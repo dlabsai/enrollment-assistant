@@ -16,41 +16,16 @@ import {
 } from "@va/shared/components/ui/table";
 import type { JSX } from "react";
 
-import type { ChatCompletionTraceBasic } from "../types";
+import { formatTableTimestamp } from "../../lib/date-format";
+import { formatLocaleNumber } from "../../lib/number-format";
+import { formatUsageCost, formatUsageDuration } from "../lib/formatters";
+import type { UsageTraceBasic } from "../types";
 
 interface UsageTableProps {
-    traces: ChatCompletionTraceBasic[];
+    traces: UsageTraceBasic[];
 }
 
-const formatCost = (cost: number | null): string => {
-    if (cost === null) {
-        return "-";
-    }
-    if (cost === 0) {
-        return "$0.00";
-    }
-    if (cost > 0 && cost < 0.0001) {
-        return "<$0.0001";
-    }
-    return cost < 0.01 ? `$${cost.toFixed(4)}` : `$${cost.toFixed(2)}`;
-};
-
-const formatDuration = (seconds: number | null): string => {
-    if (seconds === null) {
-        return "-";
-    }
-    return seconds < 1
-        ? `${Math.round(seconds * 1000)}ms`
-        : `${seconds.toFixed(2)}s`;
-};
-
-const formatTimestamp = (value: string): string =>
-    new Date(value).toLocaleString("en-US", {
-        month: "short",
-        day: "numeric",
-        hour: "2-digit",
-        minute: "2-digit",
-    });
+const formatTimestamp = formatTableTimestamp;
 
 const formatPlatform = (value: boolean | null): string => {
     if (value === true) {
@@ -66,7 +41,7 @@ export const UsageTable = ({ traces }: UsageTableProps): JSX.Element => (
     <Card className="@container/card">
         <CardHeader>
             <CardTitle>Recent requests</CardTitle>
-            <CardDescription>Latest {traces.length} requests</CardDescription>
+            <CardDescription>Latest {formatLocaleNumber(traces.length)} requests</CardDescription>
         </CardHeader>
         <CardContent className="overflow-hidden px-0">
             <div className="overflow-x-auto px-6">
@@ -107,13 +82,13 @@ export const UsageTable = ({ traces }: UsageTableProps): JSX.Element => (
                                             {formatPlatform(trace.is_public)}
                                         </TableCell>
                                         <TableCell className="text-right tabular-nums">
-                                            {totalTokens.toLocaleString()}
+                                            {formatLocaleNumber(totalTokens)}
                                         </TableCell>
                                         <TableCell className="text-right tabular-nums">
-                                            {formatCost(trace.cost)}
+                                            {formatUsageCost(trace.cost)}
                                         </TableCell>
                                         <TableCell className="text-right tabular-nums">
-                                            {formatDuration(trace.duration)}
+                                            {formatUsageDuration(trace.duration)}
                                         </TableCell>
                                         <TableCell>
                                             <Badge

@@ -1,6 +1,6 @@
 import logging
 from collections.abc import Sequence
-from datetime import datetime
+from datetime import datetime  # noqa: TC003
 from pathlib import Path
 
 from pydantic import BaseModel, TypeAdapter
@@ -56,28 +56,30 @@ class CatalogPage(BaseRagModel):
     pass
 
 
-class WordPressPage(BaseRagModel):
+class WebsitePage(BaseRagModel):
     excerpt: str | None = None
     breadcrumbs: list[dict[str, str | int]] = []
 
 
-class WordPressPost(BaseRagModel):
-    excerpt: str | None = None
-    categories: list[str] = []
-    tags: list[str] = []
-
-
-class WordPressProgram(BaseRagModel):
+class WebsiteProgram(BaseRagModel):
     excerpt: str | None = None
     breadcrumbs: list[dict[str, str | int]] = []
+
+
+class TrainingMaterial(BaseRagModel):
+    source_path: str
+    file_name: str
+    file_extension: str
+    content_hash: str | None = None
 
 
 _filename_map: dict[type[BaseModel], str] = {
-    CatalogCourse: "catalog_courses.json",
     CatalogProgram: "catalog_programs.json",
-    WordPressPage: "wordpress_pages.json",
-    WordPressPost: "wordpress_posts.json",
-    WordPressProgram: "wordpress_programs.json",
+    CatalogCourse: "catalog_courses.json",
+    CatalogPage: "catalog_pages.json",
+    WebsitePage: "website_pages.json",
+    WebsiteProgram: "website_programs.json",
+    TrainingMaterial: "training_materials.json",
 }
 
 
@@ -85,24 +87,31 @@ def _load_mapped_models[T: BaseModel](model_type: type[T]) -> list[T]:
     return _load_models(RAG_DATA_DIR / _filename_map[model_type], model_type=model_type)
 
 
-def load_wordpress_pages() -> list[WordPressPage]:
-    return _load_mapped_models(WordPressPage)
-
-
-def load_wordpress_posts() -> list[WordPressPost]:
-    return _load_mapped_models(WordPressPost)
-
-
-def load_wordpress_programs() -> list[WordPressProgram]:
-    return _load_mapped_models(WordPressProgram)
+def load_catalog_programs() -> list[CatalogProgram]:
+    return _load_mapped_models(CatalogProgram)
 
 
 def load_catalog_courses() -> list[CatalogCourse]:
     return _load_mapped_models(CatalogCourse)
 
 
-def load_catalog_programs() -> list[CatalogProgram]:
-    return _load_mapped_models(CatalogProgram)
+def load_catalog_pages() -> list[CatalogPage]:
+    return _load_mapped_models(CatalogPage)
+
+
+def load_website_pages() -> list[WebsitePage]:
+    return _load_mapped_models(WebsitePage)
+
+
+def load_website_programs() -> list[WebsiteProgram]:
+    return _load_mapped_models(WebsiteProgram)
+
+
+def load_training_materials() -> list[TrainingMaterial]:
+    path = RAG_DATA_DIR / _filename_map[TrainingMaterial]
+    if not path.exists():
+        return []
+    return _load_models(path, model_type=TrainingMaterial)
 
 
 def save_models(models: Sequence[BaseModel]) -> None:

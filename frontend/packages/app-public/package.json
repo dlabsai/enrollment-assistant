@@ -5,23 +5,23 @@
     "type": "module",
     "scripts": {
         "dev-local": "vite --mode public-local",
-        "build-local": "pnpm -w exec tsc -b packages/app-public && vite build --mode public-local",
-        "build-stage": "pnpm -w exec tsc -b packages/app-public && vite build --mode public-stage",
-        "build-prod": "pnpm -w exec tsc -b packages/app-public && vite build --mode public-prod",
-        "type-check": "pnpm -w exec tsc -b --noEmit packages/app-public",
+        "build-local": "pnpm -w exec tsgo -b packages/app-public && vite build --mode public-local",
+        "build-stage": "pnpm -w exec tsgo -b packages/app-public && vite build --mode public-stage",
+        "build-prod": "pnpm -w exec tsgo -b packages/app-public && vite build --mode public-prod",
+        "type-check": "pnpm -w exec tsgo -b --noEmit packages/app-public",
+        "lint": "eslint src vite.config.ts --fix --cache --cache-strategy content --cache-location ../../node_modules/.cache/eslint/app-public",
         "preview-local": "vite preview --mode public-local",
         "preview-stage": "vite preview --mode public-stage",
         "preview-prod": "vite preview --mode public-prod"
     },
     "dependencies": {
         "@va/shared": "workspace:*",
-        "lucide-react": "^0.562.0",
-        "nanoid": "^5.1.6",
-        "react": "^19.2.0",
-        "react-dom": "^19.2.0",
-        "react-hook-form": "^7.69.0"
+        "lucide-react": "^1.7.0",
+        "nanoid": "^5.1.7",
+        "react": "^19.2.4",
+        "react-dom": "^19.2.4"
     },
     "devDependencies": {
-        "vite": "^7.1.11"
+        "vite": "^8.0.3"
     }
 }

@@ -3,10 +3,8 @@ import { isRecord } from "@va/shared/lib/type-guards";
 import type { ChatMessage } from "@va/shared/types";
 
 const CHAT_HISTORY_KEY = "chat_history";
-const CONSENT_KEY = "chat_consent_given";
 const CONSENT_DATA_KEY = "chat_consent_data";
-const CONSENT_CHAT_IDS_KEY = "chat_consent_chat_ids";
-const USER_ID_KEY = "chat_user_id";
+const VISITOR_ID_KEY = "chat_visitor_id";
 
 interface StoredChatHistory {
     messages: ChatMessage[];
@@ -147,78 +145,6 @@ export interface ConsentData {
     timestamp: number;
 }
 
-export const hasCompleteConsentData = (): boolean => {
-    try {
-        const consent = localStorage.getItem(CONSENT_KEY);
-        if (consent !== "true") {
-            return false;
-        }
-
-        const consentDataStr =
-            localStorage.getItem(CONSENT_DATA_KEY) ?? undefined;
-        if (consentDataStr === undefined || consentDataStr === "") {
-            logger.warn("Consent data is missing");
-            return false;
-        }
-
-        try {
-            const consentData: unknown =
-                JSON.parse(consentDataStr) ?? undefined;
-            if (!isRecord(consentData)) {
-                logger.warn("Consent data is invalid");
-                return false;
-            }
-
-            const requiredFields: (keyof ConsentData)[] = [
-                "firstName",
-                "lastName",
-                "email",
-                "phone",
-                "zip",
-                "timestamp",
-            ];
-            for (const field of requiredFields) {
-                if (!(field in consentData)) {
-                    logger.warn(
-                        `Consent data missing required field: ${field}`,
-                    );
-                    return false;
-                }
-            }
-        } catch (parseError) {
-            logger.warn("Failed to parse consent data:", parseError);
-            return false;
-        }
-
-        const userId = localStorage.getItem(USER_ID_KEY) ?? undefined;
-        if (userId === undefined || userId === "") {
-            logger.warn("User ID is missing");
-            return false;
-        }
-
-        return true;
-    } catch (error) {
-        logger.error("Error checking complete consent data:", error);
-        return false;
-    }
-};
-
-export const setConsent = (value: boolean): void => {
-    try {
-        localStorage.setItem(CONSENT_KEY, value.toString());
-    } catch (error) {
-        logger.error("Error setting consent:", error);
-    }
-};
-
-export const setConsentData = (data: ConsentData): void => {
-    try {
-        localStorage.setItem(CONSENT_DATA_KEY, JSON.stringify(data));
-    } catch (error) {
-        logger.error("Error setting consent data:", error);
-    }
-};
-
 const isValidConsentData = (value: unknown): value is ConsentData => {
     if (!isRecord(value)) {
         return false;
@@ -239,6 +165,34 @@ const isValidConsentData = (value: unknown): value is ConsentData => {
     );
 };
 
+export const hasCompleteConsentData = (): boolean => {
+    try {
+        const raw = localStorage.getItem(CONSENT_DATA_KEY) ?? undefined;
+        if (raw === undefined || raw === "") {
+            return false;
+        }
+
+        const parsed: unknown = JSON.parse(raw) ?? undefined;
+        if (!isValidConsentData(parsed)) {
+            return false;
+        }
+
+        const visitorId = localStorage.getItem(VISITOR_ID_KEY) ?? undefined;
+        return visitorId !== undefined && visitorId !== "";
+    } catch (error) {
+        logger.error("Error checking consent data:", error);
+        return false;
+    }
+};
+
+export const setConsentData = (data: ConsentData): void => {
+    try {
+        localStorage.setItem(CONSENT_DATA_KEY, JSON.stringify(data));
+    } catch (error) {
+        logger.error("Error setting consent data:", error);
+    }
+};
+
 export const getConsentData = (): ConsentData | undefined => {
     try {
         const raw = localStorage.getItem(CONSENT_DATA_KEY) ?? undefined;
@@ -253,53 +207,20 @@ export const getConsentData = (): ConsentData | undefined => {
     }
 };
 
-const isStringArray = (value: unknown): value is string[] =>
-    Array.isArray(value) && value.every((item) => typeof item === "string");
-
-const getStoredConsentChatIds = (): string[] => {
-    const stored = localStorage.getItem(CONSENT_CHAT_IDS_KEY) ?? undefined;
-    if (stored === undefined) {
-        return [];
-    }
-    const parsed: unknown = JSON.parse(stored) ?? undefined;
-    return isStringArray(parsed) ? parsed : [];
-};
-
-export const addConsentChatId = (chatId: string): void => {
-    try {
-        const ids = getStoredConsentChatIds();
-        if (!ids.includes(chatId)) {
-            ids.push(chatId);
-            localStorage.setItem(CONSENT_CHAT_IDS_KEY, JSON.stringify(ids));
-        }
-    } catch (error) {
-        logger.error("Error adding consent chat ID:", error);
-    }
-};
-
-export const getConsentChatIds = (): string[] => {
-    try {
-        return getStoredConsentChatIds();
-    } catch (error) {
-        logger.error("Error getting consent chat IDs:", error);
-        return [];
-    }
-};
-
 const generateUUID = (): string => crypto.randomUUID();
 
-export const getUserId = (): string => {
+export const getVisitorId = (): string => {
     try {
-        const existingUserId = localStorage.getItem(USER_ID_KEY) ?? undefined;
-        if (existingUserId !== undefined) {
-            return existingUserId;
+        const existingVisitorId = localStorage.getItem(VISITOR_ID_KEY) ?? undefined;
+        if (existingVisitorId !== undefined && existingVisitorId !== "") {
+            return existingVisitorId;
         }
 
-        const newUserId = generateUUID();
-        localStorage.setItem(USER_ID_KEY, newUserId);
-        return newUserId;
+        const newVisitorId = generateUUID();
+        localStorage.setItem(VISITOR_ID_KEY, newVisitorId);
+        return newVisitorId;
     } catch (error) {
-        logger.error("Error getting/setting user ID:", error);
+        logger.error("Error getting/setting visitor ID:", error);
         return generateUUID();
     }
 };

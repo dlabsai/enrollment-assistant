@@ -4,11 +4,20 @@ import {
     ResizablePanelGroup,
 } from "@va/shared/components/ui/resizable";
 import { Info } from "lucide-react";
-import { type JSX, memo, useCallback, useMemo, useRef, useState } from "react";
+import {
+    type JSX,
+    memo,
+    useCallback,
+    useEffect,
+    useMemo,
+    useRef,
+    useState,
+} from "react";
 
-import { PageLoading } from "@/components/page-state";
+import { LoadingState } from "@/components/page-state";
 
-import { getSpanEnd, getSpanStart } from "../lib/trace-utils";
+import { hydrateSpansWithProjectedOutput } from "../lib/trace-projection-utils";
+import { getResolvedTraceTiming } from "../lib/trace-utils";
 import type { TraceDetail } from "../types";
 import { SpanNavigator } from "./trace-turn-span-navigator";
 import { SpanSection } from "./trace-turn-span-section";
@@ -22,8 +31,8 @@ interface TraceTurnDebugViewProps {
     detail: TraceDetail | undefined;
     loading: boolean;
     error: string | undefined;
+    selectedSpanId?: string;
     summaryOnly?: boolean;
-    summaryLayout?: "stack" | "split";
 }
 
 export const TraceTurnDebugView = memo(
@@ -31,18 +40,26 @@ export const TraceTurnDebugView = memo(
         detail,
         loading,
         error,
+        selectedSpanId: externalSelectedSpanId,
         summaryOnly = false,
-        summaryLayout = "stack",
     }: TraceTurnDebugViewProps): JSX.Element => {
-        const spans = useMemo(() => detail?.spans ?? [], [detail]);
+        const spans = useMemo(() => hydrateSpansWithProjectedOutput(detail), [detail]);
         const spanSections = useMemo(() => buildSpanSections(spans), [spans]);
         const selectedSpanIdDefault = spanSections[0]?.span.span_id;
         const [selectedSpanId, setSelectedSpanId] = useState<
             string | undefined
-        >(selectedSpanIdDefault);
+        >(externalSelectedSpanId ?? selectedSpanIdDefault);
         const scrollRef = useRef<HTMLDivElement | null>(null);
 
         const resolvedSelectedSpanId = useMemo(() => {
+            if (
+                externalSelectedSpanId !== undefined &&
+                spanSections.some(
+                    (entry) => entry.span.span_id === externalSelectedSpanId,
+                )
+            ) {
+                return externalSelectedSpanId;
+            }
             if (
                 selectedSpanId !== undefined &&
                 spanSections.some(
@@ -52,35 +69,35 @@ export const TraceTurnDebugView = memo(
                 return selectedSpanId;
             }
             return selectedSpanIdDefault;
-        }, [selectedSpanId, selectedSpanIdDefault, spanSections]);
+        }, [externalSelectedSpanId, selectedSpanId, selectedSpanIdDefault, spanSections]);
 
-        const spanStartTimes = spans
-            .map((span) => getSpanStart(span))
-            .filter((value): value is number => value !== undefined);
-        const traceStart =
-            spanStartTimes.length > 0 ? Math.min(...spanStartTimes) : undefined;
-        const spanEndTimes = spans
-            .map((span) => getSpanEnd(span))
-            .filter((value): value is number => value !== undefined);
-        const traceEnd =
-            spanEndTimes.length > 0 ? Math.max(...spanEndTimes) : undefined;
+        const { end: traceEnd, start: traceStart } = useMemo(
+            () => getResolvedTraceTiming(spans),
+            [spans],
+        );
 
         const handleSpanSelect = useCallback(
             (spanId: string): void => {
                 setSelectedSpanId(spanId);
-                const container = scrollRef.current;
-                if (!container) {
-                    return;
-                }
-                const element = container.querySelector(
-                    `[data-span-anchor="${spanId}"]`,
-                );
-                if (element instanceof HTMLElement) {
-                    element.scrollIntoView({ block: "start" });
-                }
             },
-            [scrollRef, setSelectedSpanId],
+            [setSelectedSpanId],
         );
+
+        useEffect(() => {
+            if (externalSelectedSpanId === undefined) {
+                return;
+            }
+            const container = scrollRef.current;
+            if (!container) {
+                return;
+            }
+            const element = container.querySelector(
+                `[data-span-anchor="${externalSelectedSpanId}"]`,
+            );
+            if (element instanceof HTMLElement) {
+                element.scrollIntoView({ block: "center" });
+            }
+        }, [externalSelectedSpanId]);
 
         let content: JSX.Element = (
             <div className="text-muted-foreground flex h-full items-center justify-center gap-2 text-sm">
@@ -89,7 +106,7 @@ export const TraceTurnDebugView = memo(
         );
 
         if (loading) {
-            content = <PageLoading />;
+            content = <LoadingState />;
         } else if (error !== undefined) {
             content = (
                 <div className="text-destructive flex h-full items-center justify-center">
@@ -99,20 +116,23 @@ export const TraceTurnDebugView = memo(
         } else if (detail !== undefined) {
             content = summaryOnly ? (
                 <TraceTurnSummary
+                    overview={detail.overview}
+                    selectedSpanId={resolvedSelectedSpanId}
                     spans={spans}
-                    summaryLayout={summaryLayout}
                     traceEnd={traceEnd}
                     traceStart={traceStart}
                 />
             ) : (
                 <ResizablePanelGroup
                     className="h-full min-h-0 min-w-0"
-                    direction="horizontal"
+                    id="trace-turn-debug-layout"
+                    orientation="horizontal"
                 >
                     <ResizablePanel
                         className="min-h-0 min-w-0"
-                        defaultSize={32}
-                        minSize={25}
+                        defaultSize="32%"
+                        id="trace-turn-debug-spans-panel"
+                        minSize="25%"
                     >
                         <SpanNavigator
                             onSelectSpan={handleSpanSelect}
@@ -123,8 +143,9 @@ export const TraceTurnDebugView = memo(
                     <ResizableHandle withHandle />
                     <ResizablePanel
                         className="min-h-0 min-w-0"
-                        defaultSize={68}
-                        minSize={40}
+                        defaultSize="68%"
+                        id="trace-turn-debug-details-panel"
+                        minSize="40%"
                     >
                         <div className="h-full min-h-0 min-w-0 overflow-auto">
                             <div

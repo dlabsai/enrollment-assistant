@@ -51,6 +51,6 @@ class Dataset[InputsT, OutputT, MetadataT]:
     @classmethod
     def from_cases(
         cls, cases: list[Case[InputsT, OutputT, MetadataT]], name: str = "evaluation"
-    ) -> "Dataset[InputsT, OutputT, MetadataT]":
+    ) -> Dataset[InputsT, OutputT, MetadataT]:
         """Create a dataset from a list of cases."""
         return cls(cases=cases, name=name)

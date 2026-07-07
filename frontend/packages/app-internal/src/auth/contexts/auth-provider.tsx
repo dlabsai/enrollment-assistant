@@ -10,22 +10,28 @@ import {
 
 import {
     fetchCurrentUser,
+    loginWithTeamsSso,
     logoutUser,
     refreshSession as refreshSessionApi,
 } from "../lib/api";
 import {
-    clearStoredToken,
-    getStoredToken,
-    setStoredToken,
-} from "../lib/storage";
+    isRunningInTeams,
+    isTeamsForceModeEnabled,
+    isTeamsLikelyByProxy,
+    isTeamsSsoEnabled,
+    requestTeamsSsoToken,
+} from "../lib/teams-sso";
 import type { UserProfile } from "../types";
-import { AuthContext, type AuthContextValue } from "./auth-context";
+import {
+    AuthContext,
+    type AuthContextValue,
+    type TeamsAuthMode,
+} from "./auth-context";
 
 const fetchAndStoreUser = async (
-    token: string,
     setUser: (user?: UserProfile) => void,
 ): Promise<void> => {
-    const profile = await fetchCurrentUser(token);
+    const profile = await fetchCurrentUser();
     setUser(profile);
 };
 
@@ -33,94 +39,200 @@ interface AuthProviderProps {
     children: ReactNode;
 }
 
+const getErrorMessage = (error: unknown, fallback: string): string =>
+    error instanceof Error && error.message !== "" ? error.message : fallback;
+
 export const AuthProvider = ({ children }: AuthProviderProps): JSX.Element => {
-    const [token, setToken] = useState(() => getStoredToken());
     const [user, setUser] = useState<UserProfile | undefined>();
     const [loading, setLoading] = useState(true);
     const [sessionExpired, setSessionExpired] = useState(false);
+    const [authError, setAuthError] = useState<string | undefined>();
+    const [teamsSsoLoading, setTeamsSsoLoading] = useState(false);
+    const [teamsAuthMode, setTeamsAuthMode] =
+        useState<TeamsAuthMode>("outside");
+    const teamsSsoEnabled = isTeamsSsoEnabled();
+    const teamsForceModeEnabled = isTeamsForceModeEnabled();
 
-    const refreshSessionToken = useCallback(async (): Promise<
-        string | undefined
-    > => {
-        try {
-            const response = await refreshSessionApi();
-            const newToken = response.access_token;
-            await fetchAndStoreUser(newToken, setUser);
-            setStoredToken(newToken);
-            setToken(newToken);
-            setSessionExpired(false);
-            return newToken;
-        } catch (error) {
-            logger.warn("Failed to refresh session", error);
-            clearStoredToken();
-            setToken(undefined);
+    const clearAuthState = useCallback(
+        (options: { sessionExpired: boolean }) => {
             setUser(undefined);
-            return undefined;
-        }
+            setSessionExpired(options.sessionExpired);
+        },
+        [],
+    );
+
+    const clearAuthError = useCallback(() => {
+        setAuthError(undefined);
     }, []);
 
-    useEffect(() => {
-        const initialize = async (): Promise<void> => {
-            if (token === undefined) {
-                await refreshSessionToken();
-                setLoading(false);
-                return;
+    const completeAuthentication = useCallback(async () => {
+        await fetchAndStoreUser(setUser);
+        setSessionExpired(false);
+        setAuthError(undefined);
+    }, []);
+
+    const detectTeamsAuthMode =
+        useCallback(async (): Promise<TeamsAuthMode> => {
+            if (!teamsSsoEnabled) {
+                setTeamsAuthMode("outside");
+                return "outside";
             }
 
             try {
-                await fetchAndStoreUser(token, setUser);
+                const runningInTeams = await isRunningInTeams();
+                const nextMode = runningInTeams ? "inside" : "outside";
+                setTeamsAuthMode(nextMode);
+                return nextMode;
+            } catch (error) {
+                logger.warn(
+                    "Failed to detect Microsoft Teams environment",
+                    error,
+                );
+                setTeamsAuthMode("error");
+                setAuthError(
+                    getErrorMessage(
+                        error,
+                        "Failed to initialize Microsoft Teams authentication.",
+                    ),
+                );
+                return "error";
+            }
+        }, [teamsSsoEnabled]);
+
+    const runTeamsSsoLogin = useCallback(async () => {
+        setAuthError(undefined);
+        setTeamsSsoLoading(true);
+
+        try {
+            const teamsToken = await requestTeamsSsoToken();
+            await loginWithTeamsSso({ token: teamsToken });
+            await completeAuthentication();
+        } finally {
+            setTeamsSsoLoading(false);
+        }
+    }, [completeAuthentication]);
+
+    const refreshSessionToken = useCallback(async (): Promise<boolean> => {
+        try {
+            await refreshSessionApi();
+            await completeAuthentication();
+            return true;
+        } catch (error) {
+            logger.warn("Failed to refresh session", error);
+            clearAuthState({ sessionExpired: false });
+            return false;
+        }
+    }, [clearAuthState, completeAuthentication]);
+
+    useEffect(() => {
+        const initialize = async (): Promise<void> => {
+            try {
+                await completeAuthentication();
             } catch (error) {
                 logger.warn("Failed to restore session", error);
-                await refreshSessionToken();
+
+                if (await refreshSessionToken()) {
+                    return;
+                }
+
+                if (!teamsForceModeEnabled) {
+                    const nextTeamsAuthMode = isTeamsLikelyByProxy()
+                        ? "inside"
+                        : "outside";
+                    setTeamsAuthMode(nextTeamsAuthMode);
+                    if (nextTeamsAuthMode !== "inside") {
+                        return;
+                    }
+                }
+
+                try {
+                    await runTeamsSsoLogin();
+                } catch (teamsError) {
+                    logger.warn(
+                        "Automatic Microsoft Teams sign-in failed",
+                        teamsError,
+                    );
+                    setAuthError(
+                        getErrorMessage(
+                            teamsError,
+                            "Microsoft Teams authentication failed.",
+                        ),
+                    );
+                }
             } finally {
                 setLoading(false);
             }
         };
 
         void initialize();
-    }, [token, refreshSessionToken]);
+    }, [
+        completeAuthentication,
+        detectTeamsAuthMode,
+        refreshSessionToken,
+        runTeamsSsoLogin,
+        teamsForceModeEnabled,
+    ]);
+
+    useEffect(() => {
+        if (!teamsSsoEnabled || user === undefined) {
+            return;
+        }
+
+        void detectTeamsAuthMode();
+    }, [detectTeamsAuthMode, teamsSsoEnabled, user]);
 
     const markSessionExpired = useCallback(() => {
-        clearStoredToken();
-        setToken(undefined);
-        setUser(undefined);
-        setSessionExpired(true);
-    }, []);
+        clearAuthState({ sessionExpired: true });
+    }, [clearAuthState]);
 
-    const authenticate = useCallback(async (nextToken: string) => {
-        await fetchAndStoreUser(nextToken, setUser);
-        setStoredToken(nextToken);
-        setToken(nextToken);
-        setSessionExpired(false);
-    }, []);
+    const authenticate = useCallback(async () => {
+        await completeAuthentication();
+    }, [completeAuthentication]);
 
-    const logout = useCallback(() => {
-        void logoutUser();
-        clearStoredToken();
-        setToken(undefined);
-        setUser(undefined);
-        setSessionExpired(false);
-    }, []);
+    const signInWithTeamsSso = useCallback(async () => {
+        if (!teamsSsoEnabled) {
+            throw new Error(
+                "Microsoft Teams SSO is not enabled for this build",
+            );
+        }
+
+        await runTeamsSsoLogin();
+    }, [runTeamsSsoLogin, teamsSsoEnabled]);
+
+    const logout = useCallback(async () => {
+        await logoutUser();
+        clearAuthState({ sessionExpired: false });
+    }, [clearAuthState]);
 
     const value = useMemo<AuthContextValue>(
         () => ({
             user,
-            token,
             loading,
             sessionExpired,
+            authError,
+            teamsSsoEnabled,
+            teamsSsoLoading,
+            teamsAuthMode,
+            clearAuthError,
             markSessionExpired,
             authenticate,
             refreshSession: refreshSessionToken,
+            signInWithTeamsSso,
             logout,
         }),
         [
             user,
-            token,
             loading,
             sessionExpired,
+            authError,
+            teamsSsoEnabled,
+            teamsSsoLoading,
+            teamsAuthMode,
+            clearAuthError,
             markSessionExpired,
             authenticate,
             refreshSessionToken,
+            signInWithTeamsSso,
             logout,
         ],
     );

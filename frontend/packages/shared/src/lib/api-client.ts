@@ -3,11 +3,15 @@ import { logger } from "./logger";
 import { isRecord } from "./type-guards";
 
 export interface ApiClientOptions {
-    token?: string;
     signal?: AbortSignal;
     headers?: Record<string, string>;
     baseUrl?: string;
     credentials?: RequestCredentials;
+}
+
+export interface ApiBlobResponse {
+    blob: Blob;
+    fileName?: string;
 }
 
 interface ApiError extends Error {
@@ -46,20 +50,55 @@ const parseErrorResponse = async (response: Response): Promise<string> => {
     }
 };
 
-const buildHeaders = (
-    options: ApiClientOptions = {},
-): Record<string, string> => {
-    const headers: Record<string, string> = {
-        "Content-Type": "application/json",
-        ...options.headers,
-    };
+const decodeFileName = (value: string): string => {
+    try {
+        return decodeURIComponent(value);
+    } catch {
+        return value;
+    }
+};
 
-    if (options.token !== undefined && options.token !== "") {
-        headers.Authorization = `Bearer ${options.token}`;
+const parseContentDispositionFileName = (
+    header: string | null,
+): string | undefined => {
+    if (header === null) {
+        return undefined;
     }
 
-    return headers;
+    const parts = header.split(";").map((part) => part.trim());
+    const encodedPart = parts.find((part) =>
+        part.toLowerCase().startsWith("filename*="),
+    );
+    if (encodedPart !== undefined) {
+        const rawValue = encodedPart.slice("filename*=".length).trim();
+        const value = rawValue.toLowerCase().startsWith("utf-8''")
+            ? rawValue.slice("utf-8''".length)
+            : rawValue;
+        const decoded = decodeFileName(value);
+        return decoded === "" ? undefined : decoded;
+    }
+
+    const fileNamePart = parts.find((part) =>
+        part.toLowerCase().startsWith("filename="),
+    );
+    if (fileNamePart === undefined) {
+        return undefined;
+    }
+
+    const rawValue = fileNamePart.slice("filename=".length).trim();
+    const unquotedValue =
+        rawValue.startsWith('"') && rawValue.endsWith('"')
+            ? rawValue.slice(1, -1).replaceAll(String.raw`\"`, '"')
+            : rawValue;
+    return unquotedValue === "" ? undefined : unquotedValue;
 };
+
+const buildHeaders = (
+    options: ApiClientOptions = {},
+): Record<string, string> => ({
+    "Content-Type": "application/json",
+    ...options.headers,
+});
 
 const apiFetch = async <T>(
     endpoint: string,
@@ -101,6 +140,33 @@ export const apiGet = async <T>(
         throw new Error("Unexpected empty response");
     }
     return result;
+};
+
+export const apiGetBlob = async (
+    endpoint: string,
+    options: ApiClientOptions = {},
+): Promise<ApiBlobResponse> => {
+    const baseUrl = options.baseUrl ?? API_URL;
+    const url = `${baseUrl}${endpoint}`;
+
+    const response = await fetch(url, {
+        method: "GET",
+        headers: buildHeaders(options),
+        signal: options.signal,
+        credentials: options.credentials,
+    });
+
+    if (!response.ok) {
+        const detail = await parseErrorResponse(response);
+        throw createApiError(response.status, detail);
+    }
+
+    return {
+        blob: await response.blob(),
+        fileName: parseContentDispositionFileName(
+            response.headers.get("Content-Disposition"),
+        ),
+    };
 };
 
 export const apiPost = async <T>(

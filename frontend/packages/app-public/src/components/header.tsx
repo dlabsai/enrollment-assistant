@@ -30,45 +30,49 @@ export const Header = ({ onClose, onReset }: HeaderProps): JSX.Element => {
                     className="text-foreground size-[19px]"
                 />
                 <p className="font-header text-foreground font-semibold tracking-wide">
-                    Enrollment Agent
+                    Enrollment Assistant
                 </p>
             </div>
             <div className="flex items-center gap-1.5">
                 <Tooltip>
-                    <TooltipTrigger asChild>
-                        <Button
-                            aria-label="Clear chat history"
-                            className="group rounded-full"
-                            onClick={onReset}
-                            size="icon"
-                            variant="ghost"
-                        >
-                            <RotateCcw
-                                aria-hidden="true"
-                                className="text-foreground size-[19px]"
-                            />
-                        </Button>
-                    </TooltipTrigger>
+                    <TooltipTrigger
+                        render={
+                            <Button
+                                aria-label="Clear chat history"
+                                className="group rounded-full"
+                                onClick={onReset}
+                                size="icon"
+                                variant="ghost"
+                            >
+                                <RotateCcw
+                                    aria-hidden="true"
+                                    className="text-foreground size-[19px]"
+                                />
+                            </Button>
+                        }
+                    />
                     <TooltipContent sideOffset={4}>
                         <p>Clear</p>
                     </TooltipContent>
                 </Tooltip>
 
                 <Tooltip>
-                    <TooltipTrigger asChild>
-                        <Button
-                            aria-label="Close widget"
-                            className="group rounded-full"
-                            onClick={onClose}
-                            size="icon"
-                            variant="ghost"
-                        >
-                            <X
-                                aria-hidden="true"
-                                className="text-foreground size-[19px]"
-                            />
-                        </Button>
-                    </TooltipTrigger>
+                    <TooltipTrigger
+                        render={
+                            <Button
+                                aria-label="Close widget"
+                                className="group rounded-full"
+                                onClick={onClose}
+                                size="icon"
+                                variant="ghost"
+                            >
+                                <X
+                                    aria-hidden="true"
+                                    className="text-foreground size-[19px]"
+                                />
+                            </Button>
+                        }
+                    />
                     <TooltipContent sideOffset={4}>
                         <p>Close</p>
                     </TooltipContent>

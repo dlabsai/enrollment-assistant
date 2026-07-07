@@ -9,6 +9,7 @@ import {
 } from "@va/shared/components/ui/card";
 import type { JSX } from "react";
 
+import { formatLocaleNumber } from "../../lib/number-format";
 import type { PublicUsageSummary } from "../../usage/types";
 
 interface PublicUsageSummaryProps {
@@ -26,7 +27,7 @@ export const PublicUsageSummaryCards = ({
             <CardHeader>
                 <CardDescription>Total leads</CardDescription>
                 <CardTitle className="text-2xl font-semibold tabular-nums @[250px]/card:text-3xl">
-                    {summary.total_leads.toLocaleString()}
+                    {formatLocaleNumber(summary.total_leads)}
                 </CardTitle>
                 <CardAction>
                     <IconMail className="text-muted-foreground size-5" />

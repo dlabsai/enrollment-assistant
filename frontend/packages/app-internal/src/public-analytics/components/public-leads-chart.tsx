@@ -96,9 +96,12 @@ export const PublicLeadsChart = ({
                             content={
                                 <ChartTooltipContent
                                     indicator="dot"
-                                    labelFormatter={(value: string) =>
+                                    labelFormatter={(value) =>
                                         formatTimeSeriesTooltipLabel(
-                                            value,
+                                            typeof value === "string" ||
+                                                typeof value === "number"
+                                                ? String(value)
+                                                : "",
                                             timeRange,
                                         )
                                     }

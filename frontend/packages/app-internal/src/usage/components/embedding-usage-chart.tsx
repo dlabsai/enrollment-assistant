@@ -17,6 +17,7 @@ import {
     ChartTooltipContent,
 } from "@/components/ui/chart";
 
+import { makeLocaleNumberFormatter } from "../../lib/number-format";
 import type { TimeRangeValue } from "../../lib/time-range";
 import {
     formatTimeSeriesTick,
@@ -46,7 +47,7 @@ export const EmbeddingUsageChart = ({
     timeRange,
 }: EmbeddingUsageChartProps): JSX.Element => {
     const compactFormatter = useMemo(
-        () => new Intl.NumberFormat("en-US", { notation: "compact" }),
+        () => makeLocaleNumberFormatter({ notation: "compact" }),
         [],
     );
     const isHourly = isHourlyTimeRange(timeRange);
@@ -146,9 +147,12 @@ export const EmbeddingUsageChart = ({
                             content={
                                 <ChartTooltipContent
                                     indicator="dot"
-                                    labelFormatter={(value: string) =>
+                                    labelFormatter={(value) =>
                                         formatTimeSeriesTooltipLabel(
-                                            value,
+                                            typeof value === "string" ||
+                                                typeof value === "number"
+                                                ? String(value)
+                                                : "",
                                             timeRange,
                                         )
                                     }

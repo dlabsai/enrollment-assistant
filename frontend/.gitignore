@@ -8,7 +8,6 @@ node_modules
 
 # Build outputs
 dist-*
-packages/build-config/dist
 .vite-temp
 
 # Misc
@@ -17,3 +16,5 @@ packages/build-config/dist
 deploy.sh
 task.md
 .pnpm-store
+
+.env

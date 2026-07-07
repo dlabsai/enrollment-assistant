@@ -15,6 +15,7 @@ import {
     ChartTooltipContent,
 } from "@/components/ui/chart";
 
+import { formatLocaleNumber } from "../../lib/number-format";
 import type {
     ChatAnalyticsBucket,
     ChatAnalyticsStats,
@@ -39,7 +40,10 @@ const formatStat = (value: number | null | undefined): string => {
     if (value === null || value === undefined) {
         return "—";
     }
-    return value % 1 === 0 ? value.toFixed(0) : value.toFixed(1);
+    return formatLocaleNumber(value, {
+        minimumFractionDigits: 0,
+        maximumFractionDigits: value % 1 === 0 ? 0 : 1,
+    });
 };
 
 const statLabels = [
@@ -101,7 +105,7 @@ export const ChatLengthChart = ({
                             <ChartTooltipContent
                                 formatter={(value) =>
                                     typeof value === "number"
-                                        ? value.toLocaleString()
+                                        ? formatLocaleNumber(value)
                                         : value
                                 }
                             />

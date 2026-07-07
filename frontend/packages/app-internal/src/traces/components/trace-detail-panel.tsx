@@ -37,18 +37,18 @@ import {
 } from "react";
 import { JSONTree, type ShouldExpandNodeInitially } from "react-json-tree";
 
-import { PageLoading } from "@/components/page-state";
+import { LoadingState } from "@/components/page-state";
 
 import {
     buildSpanTree,
-    getSpanEnd,
-    getSpanStart,
     getStringAttribute,
     parseJsonRecursively,
 } from "../lib/trace-utils";
 import {
     buildSpanHierarchy,
     formatSpanDuration,
+    getSpanTimelineLayout,
+    getTraceTimeRange,
     jsonTreeTheme,
     shouldExpandJsonNode,
     type SpanTreeNode,
@@ -61,11 +61,14 @@ interface TraceDetailPanelProps {
     loading: boolean;
     error: string | undefined;
     selectedSpanId?: string;
+    view?: TraceDetailView;
+    onViewChange?: (view: TraceDetailView) => void;
     onSpanChange?: (spanId: string | undefined) => void;
     onSpanSync?: (spanId: string | undefined) => void;
 }
 
 type SpanViewMode = "tree" | "timeline";
+type TraceDetailView = "span" | "summary";
 
 const SpanTimelineList = ({
     spans,
@@ -77,24 +80,13 @@ const SpanTimelineList = ({
     onSelectSpan: (spanId: string) => void;
 }): JSX.Element => {
     const flattened = useMemo(() => buildSpanTree(spans), [spans]);
-    const spanStartTimes = spans
-        .map((span) => getSpanStart(span))
-        .filter((value): value is number => value !== undefined);
-    const spanEndTimes = spans
-        .map((span) => getSpanEnd(span))
-        .filter((value): value is number => value !== undefined);
-
-    const traceStart =
-        spanStartTimes.length > 0 ? Math.min(...spanStartTimes) : undefined;
-    const traceEnd =
-        spanEndTimes.length > 0 ? Math.max(...spanEndTimes) : undefined;
-    const traceDuration =
-        traceStart !== undefined && traceEnd !== undefined
-            ? traceEnd - traceStart
-            : undefined;
+    const { end: traceEnd, start: traceStart } = useMemo(
+        () => getTraceTimeRange(spans),
+        [spans],
+    );
 
     return (
-        <div className="space-y-2 px-4 py-3">
+        <div className="px-4 py-3">
             {flattened.map(({ span, depth }) => {
                 const attributes = span.attributes ?? {};
                 const agentName = getStringAttribute(
@@ -105,25 +97,13 @@ const SpanTimelineList = ({
                     attributes,
                     "gen_ai.request.model",
                 );
-                const spanStart = getSpanStart(span);
-                const spanEnd = getSpanEnd(span);
-                const startOffset =
-                    traceStart !== undefined && spanStart !== undefined
-                        ? spanStart - traceStart
-                        : undefined;
-                const duration =
-                    spanStart !== undefined && spanEnd !== undefined
-                        ? spanEnd - spanStart
-                        : undefined;
-
-                const offsetPct =
-                    traceDuration !== undefined && startOffset !== undefined
-                        ? Math.max((startOffset / traceDuration) * 100, 0)
-                        : 0;
-                const widthPct =
-                    traceDuration !== undefined && duration !== undefined
-                        ? Math.max((duration / traceDuration) * 100, 2)
-                        : 2;
+                const timelineLayout = getSpanTimelineLayout(
+                    span,
+                    traceStart,
+                    traceEnd,
+                );
+                const offsetPct = timelineLayout?.offsetPct ?? 0;
+                const widthPct = timelineLayout?.widthPct ?? 2;
 
                 const labelParts = [agentName, model].filter(
                     (item): item is string =>
@@ -132,7 +112,7 @@ const SpanTimelineList = ({
 
                 return (
                     <button
-                        className="hover:border-border hover:bg-muted/40 data-[selected=true]:border-primary/40 data-[selected=true]:bg-primary/5 flex w-full flex-col gap-2 rounded-md border border-transparent px-2 py-2 text-left"
+                        className="hover:border-primary/50 hover:bg-primary/10 data-[selected=true]:border-primary data-[selected=true]:bg-primary/15 data-[selected=true]:ring-primary/30 flex w-full flex-col gap-2 rounded-none border border-transparent px-2 py-2 text-left transition-none data-[selected=true]:shadow-sm data-[selected=true]:ring-1"
                         data-selected={selectedSpanId === span.span_id}
                         key={span.span_id}
                         onClick={() => {
@@ -221,12 +201,9 @@ const SpanTreeList = ({
             const isExpanded = expandedSpanIds.has(span.span_id);
 
             return (
-                <div
-                    className="space-y-2"
-                    key={span.span_id}
-                >
+                <div key={span.span_id}>
                     <div
-                        className="hover:border-border hover:bg-muted/40 data-[selected=true]:border-primary/40 data-[selected=true]:bg-primary/5 flex w-full flex-col gap-2 rounded-md border border-transparent px-2 py-2 text-left"
+                        className="hover:border-primary/50 hover:bg-primary/10 data-[selected=true]:border-primary data-[selected=true]:bg-primary/15 data-[selected=true]:ring-primary/30 flex w-full flex-col gap-2 rounded-none border border-transparent px-2 py-2 text-left transition-none data-[selected=true]:shadow-sm data-[selected=true]:ring-1"
                         data-selected={selectedSpanId === span.span_id}
                         onClick={() => {
                             handleSpanSelect(span.span_id);
@@ -288,15 +265,13 @@ const SpanTreeList = ({
                         ) : undefined}
                     </div>
                     {hasChildren && isExpanded ? (
-                        <div className="space-y-2">
-                            {renderNodes(children, depth + 1)}
-                        </div>
+                        <div>{renderNodes(children, depth + 1)}</div>
                     ) : undefined}
                 </div>
             );
         });
 
-    return <div className="space-y-2 px-4 py-3">{renderNodes(tree, 0)}</div>;
+    return <div className="px-4 py-3">{renderNodes(tree, 0)}</div>;
 };
 
 const SpanNavigator = memo(
@@ -545,21 +520,21 @@ SpanRaw.displayName = "SpanRaw";
 const traceViewStorageKey = "internal-trace-detail-view";
 const rawJsonParsingStorageKey = "internal-trace-raw-json-parse";
 
-type TraceDetailView = "span" | "turn" | "summary";
-
 const isTraceDetailView = (value: string): value is TraceDetailView =>
-    value === "span" || value === "turn" || value === "summary";
+    value === "span" || value === "summary";
 
 export const TraceDetailPanel = ({
     detail,
     loading,
     error,
     selectedSpanId: externalSpanId,
+    view,
+    onViewChange,
     onSpanChange,
     onSpanSync,
 }: TraceDetailPanelProps): JSX.Element => {
     const [localSpanId, setLocalSpanId] = useState<string | undefined>();
-    const [activeView, setActiveView] = useState<TraceDetailView>(() => {
+    const [localActiveView, setLocalActiveView] = useState<TraceDetailView>(() => {
         if (typeof window === "undefined") {
             return "span";
         }
@@ -573,6 +548,7 @@ export const TraceDetailPanel = ({
         }
         return trimmed;
     });
+    const activeView = view ?? localActiveView;
     const [parseRawJsonStrings, setParseRawJsonStrings] = useState(() => {
         if (typeof window === "undefined") {
             return false;
@@ -612,25 +588,29 @@ export const TraceDetailPanel = ({
         [onSpanChange],
     );
 
-    const handleViewChange = useCallback((value: string): void => {
-        const nextView = isTraceDetailView(value) ? value : "span";
-        setActiveView(nextView);
-        setMountedViews((previous) => {
-            if (previous.has(nextView)) {
-                return previous;
-            }
-            const next = new Set(previous);
-            next.add(nextView);
-            return next;
-        });
-    }, []);
+    const handleViewChange = useCallback(
+        (value: string): void => {
+            const nextView = isTraceDetailView(value) ? value : "span";
+            setLocalActiveView(nextView);
+            setMountedViews((previous) => {
+                if (previous.has(nextView)) {
+                    return previous;
+                }
+                const next = new Set(previous);
+                next.add(nextView);
+                return next;
+            });
+            onViewChange?.(nextView);
+        },
+        [onViewChange],
+    );
 
     useEffect(() => {
         if (typeof window === "undefined") {
             return;
         }
-        window.localStorage.setItem(traceViewStorageKey, activeView);
-    }, [activeView]);
+        window.localStorage.setItem(traceViewStorageKey, localActiveView);
+    }, [localActiveView]);
 
     useEffect(() => {
         if (typeof window === "undefined") {
@@ -659,7 +639,7 @@ export const TraceDetailPanel = ({
     );
 
     if (loading) {
-        content = <PageLoading />;
+        content = <LoadingState />;
     } else if (error !== undefined) {
         content = (
             <div className="text-destructive flex h-full items-center justify-center">
@@ -670,12 +650,14 @@ export const TraceDetailPanel = ({
         const spanDetailContent = (
             <ResizablePanelGroup
                 className="h-full min-h-0 min-w-0"
-                direction="horizontal"
+                id="trace-detail-raw-layout"
+                orientation="horizontal"
             >
                 <ResizablePanel
                     className="min-h-0 min-w-0"
-                    defaultSize={42}
-                    minSize={30}
+                    defaultSize="42%"
+                    id="trace-detail-raw-spans-panel"
+                    minSize="30%"
                 >
                     <SpanNavigator
                         onSelectSpan={handleSpanSelect}
@@ -686,8 +668,9 @@ export const TraceDetailPanel = ({
                 <ResizableHandle withHandle />
                 <ResizablePanel
                     className="min-h-0 min-w-0"
-                    defaultSize={58}
-                    minSize={40}
+                    defaultSize="58%"
+                    id="trace-detail-raw-details-panel"
+                    minSize="40%"
                 >
                     <div className="h-full min-h-0 min-w-0 overflow-auto">
                         {selectedSpan === undefined ? (
@@ -755,38 +738,26 @@ export const TraceDetailPanel = ({
                     </div>
                     <TabsList>
                         <TabsTrigger value="span">Raw</TabsTrigger>
-                        <TabsTrigger value="turn">Structured</TabsTrigger>
                         <TabsTrigger value="summary">Overview</TabsTrigger>
                     </TabsList>
                 </div>
                 <TabsContent
-                    className="min-h-0 flex-1 data-[state=inactive]:hidden"
-                    forceMount={mountedViews.has("span") ? true : undefined}
+                    className="min-h-0 flex-1 data-[hidden]:hidden"
+                    keepMounted={mountedViews.has("span") ? true : undefined}
                     value="span"
                 >
                     {spanDetailContent}
                 </TabsContent>
                 <TabsContent
-                    className="min-h-0 flex-1 data-[state=inactive]:hidden"
-                    forceMount={mountedViews.has("turn") ? true : undefined}
-                    value="turn"
-                >
-                    <TraceTurnDebugView
-                        detail={detail}
-                        error={undefined}
-                        loading={false}
-                    />
-                </TabsContent>
-                <TabsContent
-                    className="min-h-0 flex-1 data-[state=inactive]:hidden"
-                    forceMount={mountedViews.has("summary") ? true : undefined}
+                    className="min-h-0 flex-1 data-[hidden]:hidden"
+                    keepMounted={mountedViews.has("summary") ? true : undefined}
                     value="summary"
                 >
                     <TraceTurnDebugView
                         detail={detail}
                         error={undefined}
                         loading={false}
-                        summaryLayout="split"
+                        selectedSpanId={externalSpanId}
                         summaryOnly
                     />
                 </TabsContent>

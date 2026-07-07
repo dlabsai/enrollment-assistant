@@ -15,10 +15,10 @@ from typing import Any
 from pydantic import BaseModel, Field
 from pydantic_ai import Agent
 
+from app.chat.agents import get_pydantic_ai_model_name
+from app.chat.engine_utils import ModelSettings, run_agent
 from app.core.config import settings
 from app.evals import EvaluationReason, Evaluator, EvaluatorContext
-from app.llm.providers import get_pydantic_ai_model
-from app.llm.runtime import ModelSettings, run_agent
 
 # ============================================================================
 # Common Models
@@ -88,7 +88,7 @@ True ONLY if both follows_guidelines AND is_grounded are True."""
 def create_judge_agent() -> Agent[None, JudgeResult]:
     """Create the LLM judge agent for evaluating responses."""
     return Agent(
-        get_pydantic_ai_model(settings.EVALUATION_MODEL),
+        get_pydantic_ai_model_name(settings.EVALUATION_MODEL),
         output_type=JudgeResult,
         system_prompt=JUDGE_SYSTEM_PROMPT,
     )
@@ -127,6 +127,7 @@ class LLMJudgeEvaluator(Evaluator[AgentInput, AgentOutput, Any]):
                 temperature=settings.EVALUATION_MODEL_TEMPERATURE,
                 max_tokens=settings.EVALUATION_MODEL_MAX_TOKENS,
             ),
+            system_prompt=JUDGE_SYSTEM_PROMPT,
         )
 
         return {

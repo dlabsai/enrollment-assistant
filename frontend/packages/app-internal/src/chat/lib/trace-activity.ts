@@ -4,7 +4,9 @@ import type {
 } from "@va/shared/types";
 
 import {
-    extractResponseToolCalls,
+    extractRequestToolCallDetails,
+    extractRequestToolResults,
+    extractResponseToolCallDetails,
     extractToolResults,
     getSpanEnd,
     getSpanStart,
@@ -14,13 +16,21 @@ import {
 } from "../../traces/lib/trace-utils";
 import type { TraceDetail, TraceSpan } from "../../traces/types";
 
+const CHATBOT_AGENT_LABEL = "Chatbot agent";
+const GUARDRAILS_AGENT_LABEL = "Guardrails agent";
+const INVESTIGATION_AGENT_LABEL = "Investigation agent";
+
 const AGENT_LABELS: Record<string, string> = {
-    search: "Search agent",
-    chatbot: "Chatbot agent",
-    guardrails: "Guardrails agent",
+    chatbot: CHATBOT_AGENT_LABEL,
+    guardrails: GUARDRAILS_AGENT_LABEL,
+    investigation: INVESTIGATION_AGENT_LABEL,
 };
 
 const ALLOWED_AGENT_NAMES = new Set(Object.keys(AGENT_LABELS));
+const ANSWER_AGENT_LABELS = new Set([
+    CHATBOT_AGENT_LABEL,
+    INVESTIGATION_AGENT_LABEL,
+]);
 
 const normalizeAgentLabel = (agentName: string): string =>
     AGENT_LABELS[agentName] ?? agentName.replaceAll("_", " ");
@@ -186,7 +196,54 @@ export const buildActivityLogFromTrace = (
         string,
         LoadingActivityLogEntry[]
     >();
+    const observedToolCallIds = new Set<string>();
     let sequence = 0;
+
+    const shiftMapValue = <T>(
+        map: Map<string, T[]>,
+        key: string | undefined,
+    ): T | undefined => {
+        if (key === undefined || key.trim() === "") {
+            return undefined;
+        }
+
+        const values = map.get(key);
+        if (values === undefined || values.length === 0) {
+            return undefined;
+        }
+
+        const value = values.shift();
+        if (values.length === 0) {
+            map.delete(key);
+        }
+        return value;
+    };
+
+    const pushMapValue = <T>(
+        map: Map<string, T[]>,
+        key: string,
+        value: T,
+    ): void => {
+        const values = map.get(key) ?? [];
+        values.push(value);
+        map.set(key, values);
+    };
+
+    const applyToolResult = (
+        entry: LoadingActivityLogEntry,
+        toolOutput: unknown,
+        options: {
+            spanIsError: boolean;
+            errorText?: string;
+        },
+    ): void => {
+        entry.toolOutput = toolOutput;
+        entry.toolState = resolveToolState(options.spanIsError, true);
+        entry.status = options.spanIsError ? "error" : "complete";
+        entry.toolErrorText = options.spanIsError
+            ? options.errorText
+            : undefined;
+    };
 
     for (const span of ordered) {
         const attributes = span.attributes ?? {};
@@ -238,8 +295,10 @@ export const buildActivityLogFromTrace = (
             }
         }
 
-        const toolCalls = extractResponseToolCalls(attributes);
+        const toolCalls = extractResponseToolCallDetails(attributes);
         const toolResults = extractToolResults(attributes);
+        const requestToolResults = extractRequestToolResults(attributes);
+        const requestToolCalls = extractRequestToolCallDetails(attributes);
         const spanToolCallId = getStringAttribute(
             attributes,
             "gen_ai.tool.call.id",
@@ -258,6 +317,7 @@ export const buildActivityLogFromTrace = (
                 : spanToolName !== undefined && spanToolArgs !== undefined
                   ? [
                         {
+                            id: spanToolCallId,
                             name: spanToolName,
                             arguments:
                                 typeof spanToolArgs === "string"
@@ -267,12 +327,43 @@ export const buildActivityLogFromTrace = (
                     ]
                   : [];
 
-        if (fallbackToolCalls.length > 0 || toolResults.length > 0) {
+        if (
+            fallbackToolCalls.length > 0 ||
+            toolResults.length > 0 ||
+            requestToolResults.length > 0
+        ) {
             const resultsByName = new Map<string, string[]>();
             for (const result of toolResults) {
-                const list = resultsByName.get(result.name) ?? [];
-                list.push(result.result);
-                resultsByName.set(result.name, list);
+                pushMapValue(resultsByName, result.name, result.result);
+            }
+
+            const requestResultsById = new Map<string, string[]>();
+            const requestResultsByName = new Map<string, string[]>();
+            for (const result of requestToolResults) {
+                if (result.id !== undefined && result.id.trim() !== "") {
+                    pushMapValue(requestResultsById, result.id, result.result);
+                }
+                if (result.name !== undefined && result.name.trim() !== "") {
+                    pushMapValue(
+                        requestResultsByName,
+                        result.name,
+                        result.result,
+                    );
+                }
+            }
+
+            const requestCallsById = new Map<string, typeof requestToolCalls>();
+            const requestCallsByName = new Map<
+                string,
+                typeof requestToolCalls
+            >();
+            for (const call of requestToolCalls) {
+                if (call.id !== undefined && call.id.trim() !== "") {
+                    pushMapValue(requestCallsById, call.id, call);
+                }
+                if (call.name.trim() !== "") {
+                    pushMapValue(requestCallsByName, call.name, call);
+                }
             }
 
             if (
@@ -283,6 +374,16 @@ export const buildActivityLogFromTrace = (
                 const unnamed = resultsByName.get("tool") ?? [];
                 resultsByName.delete("tool");
                 resultsByName.set(spanToolName, unnamed);
+            }
+
+            if (
+                spanToolName !== undefined &&
+                requestResultsByName.has("tool") &&
+                !requestResultsByName.has(spanToolName)
+            ) {
+                const unnamed = requestResultsByName.get("tool") ?? [];
+                requestResultsByName.delete("tool");
+                requestResultsByName.set(spanToolName, unnamed);
             }
 
             const spanIsError = span.status_code === "ERROR";
@@ -317,19 +418,38 @@ export const buildActivityLogFromTrace = (
             for (const [index, call] of fallbackToolCalls.entries()) {
                 const results = resultsByName.get(call.name);
                 const result = results?.shift();
+                const isStructuredFinalResult =
+                    call.name === "final_result" && result === undefined;
                 const hasOutput = result !== undefined;
                 const toolOutput =
                     result === undefined
                         ? undefined
                         : parseJsonRecursively(result);
                 const toolInput = parseJsonRecursively(call.arguments);
-                const toolState = resolveToolState(spanIsError, hasOutput);
+                const toolState = isStructuredFinalResult
+                    ? "output-available"
+                    : resolveToolState(spanIsError, hasOutput);
                 const callId =
-                    spanToolCallId !== undefined &&
+                    call.id ??
+                    (spanToolCallId !== undefined &&
                     spanToolCallId.trim() !== "" &&
                     fallbackToolCalls.length === 1
                         ? spanToolCallId
-                        : undefined;
+                        : undefined);
+                if (callId !== undefined && callId.trim() !== "") {
+                    observedToolCallIds.add(callId);
+                }
+                const requestResult =
+                    shiftMapValue(requestResultsById, callId) ??
+                    shiftMapValue(requestResultsByName, call.name);
+                const resolvedToolOutput =
+                    requestResult === undefined
+                        ? toolOutput
+                        : parseJsonRecursively(requestResult);
+                const resolvedHasOutput =
+                    requestResult !== undefined ||
+                    hasOutput ||
+                    isStructuredFinalResult;
                 const existing =
                     callId === undefined
                         ? undefined
@@ -337,12 +457,14 @@ export const buildActivityLogFromTrace = (
 
                 if (existing) {
                     existing.toolInput = toolInput;
-                    if (toolOutput !== undefined) {
-                        existing.toolOutput = toolOutput;
-                        existing.toolState = resolveToolState(
-                            spanIsError,
-                            true,
-                        );
+                    if (
+                        resolvedToolOutput !== undefined ||
+                        isStructuredFinalResult
+                    ) {
+                        existing.toolOutput = resolvedToolOutput;
+                        existing.toolState = isStructuredFinalResult
+                            ? "output-available"
+                            : resolveToolState(spanIsError, true);
                         existing.status = spanIsError ? "error" : "complete";
                         existing.toolErrorText = spanIsError
                             ? (span.status_message ?? "Tool error")
@@ -361,16 +483,18 @@ export const buildActivityLogFromTrace = (
                         parentId,
                         toolName: call.name,
                         toolInput,
-                        toolOutput,
+                        toolOutput: resolvedToolOutput,
                         toolErrorText: spanIsError
                             ? (span.status_message ?? "Tool error")
                             : undefined,
-                        toolState,
+                        toolState: resolvedHasOutput
+                            ? resolveToolState(spanIsError, true)
+                            : toolState,
                     };
                     entries.push(entry);
                     sequence += 1;
 
-                    if (!hasOutput) {
+                    if (!resolvedHasOutput && !isStructuredFinalResult) {
                         registerPendingEntry(call.name, entry, callId);
                     }
                 }
@@ -386,17 +510,10 @@ export const buildActivityLogFromTrace = (
                             : pendingToolEntriesById.get(spanToolCallId);
                     const pendingEntry = entryById ?? popPendingByName(name);
                     if (pendingEntry) {
-                        pendingEntry.toolOutput = toolOutput;
-                        pendingEntry.toolState = resolveToolState(
+                        applyToolResult(pendingEntry, toolOutput, {
                             spanIsError,
-                            true,
-                        );
-                        pendingEntry.status = spanIsError
-                            ? "error"
-                            : "complete";
-                        pendingEntry.toolErrorText = spanIsError
-                            ? (span.status_message ?? "Tool error")
-                            : undefined;
+                            errorText: span.status_message ?? "Tool error",
+                        });
                         if (entryById && spanToolCallId !== undefined) {
                             pendingToolEntriesById.delete(spanToolCallId);
                         }
@@ -420,8 +537,362 @@ export const buildActivityLogFromTrace = (
                     }
                 }
             }
+
+            for (const [callId, values] of requestResultsById.entries()) {
+                for (const result of values) {
+                    const toolOutput = parseJsonRecursively(result);
+                    const pendingEntry = pendingToolEntriesById.get(callId);
+                    if (pendingEntry) {
+                        applyToolResult(pendingEntry, toolOutput, {
+                            spanIsError,
+                            errorText: span.status_message ?? "Tool error",
+                        });
+                        pendingToolEntriesById.delete(callId);
+                    } else if (!observedToolCallIds.has(callId)) {
+                        const requestCall = shiftMapValue(
+                            requestCallsById,
+                            callId,
+                        );
+                        const toolName = requestCall?.name ?? "tool";
+                        const toolInput =
+                            requestCall === undefined
+                                ? undefined
+                                : parseJsonRecursively(requestCall.arguments);
+
+                        entries.push({
+                            id: `tool:${span.span_id}:${resultIndex}`,
+                            sequence,
+                            label: `Using tool: ${toolName}`,
+                            status: spanIsError ? "error" : "complete",
+                            kind: "tool",
+                            parentId,
+                            toolName,
+                            toolInput,
+                            toolOutput,
+                            toolErrorText: spanIsError
+                                ? (span.status_message ?? "Tool error")
+                                : undefined,
+                            toolState: resolveToolState(spanIsError, true),
+                        });
+                        observedToolCallIds.add(callId);
+                        sequence += 1;
+                        resultIndex += 1;
+                    }
+                }
+            }
+
+            for (const [name, values] of requestResultsByName.entries()) {
+                for (const result of values) {
+                    const toolOutput = parseJsonRecursively(result);
+                    const pendingEntry = popPendingByName(name);
+                    if (pendingEntry) {
+                        applyToolResult(pendingEntry, toolOutput, {
+                            spanIsError,
+                            errorText: span.status_message ?? "Tool error",
+                        });
+                    } else {
+                        const requestCall = shiftMapValue(
+                            requestCallsByName,
+                            name,
+                        );
+                        const toolName = requestCall?.name ?? name;
+                        const toolInput =
+                            requestCall === undefined
+                                ? undefined
+                                : parseJsonRecursively(requestCall.arguments);
+
+                        entries.push({
+                            id: `tool:${span.span_id}:${resultIndex}`,
+                            sequence,
+                            label: `Using tool: ${toolName}`,
+                            status: spanIsError ? "error" : "complete",
+                            kind: "tool",
+                            parentId,
+                            toolName,
+                            toolInput,
+                            toolOutput,
+                            toolErrorText: spanIsError
+                                ? (span.status_message ?? "Tool error")
+                                : undefined,
+                            toolState: resolveToolState(spanIsError, true),
+                        });
+                        sequence += 1;
+                        resultIndex += 1;
+                    }
+                }
+            }
         }
     }
 
     return entries;
+};
+
+const normalizeSequence = (
+    entries: LoadingActivityLogEntry[],
+): LoadingActivityLogEntry[] =>
+    entries.map((entry, index) => ({
+        ...entry,
+        sequence: index,
+    }));
+
+const toComparableValue = (value: unknown): string | undefined => {
+    if (value === undefined) {
+        return undefined;
+    }
+
+    return JSON.stringify(parseJsonRecursively(value));
+};
+
+const getFallbackParentId = (
+    entries: LoadingActivityLogEntry[],
+): string | undefined => {
+    const answerAgentEntry = entries.find(
+        (entry) => entry.kind === "agent" && ANSWER_AGENT_LABELS.has(entry.label),
+    );
+    if (answerAgentEntry !== undefined) {
+        return answerAgentEntry.id;
+    }
+
+    return undefined;
+};
+
+const getFallbackInsertIndex = (entries: LoadingActivityLogEntry[]): number => {
+    const answerAgentIndex = entries.findIndex(
+        (entry) => entry.kind === "agent" && ANSWER_AGENT_LABELS.has(entry.label),
+    );
+    if (answerAgentIndex !== -1) {
+        return answerAgentIndex + 1;
+    }
+
+    const guardrailsIndex = entries.findIndex(
+        (entry) => entry.kind === "agent" && entry.label === GUARDRAILS_AGENT_LABEL,
+    );
+    if (guardrailsIndex !== -1) {
+        return guardrailsIndex;
+    }
+
+    return entries.length;
+};
+
+const buildActivityLogFromStoredToolCalls = (
+    storedToolCalls: unknown[] | undefined,
+    options: {
+        parentId: string | undefined;
+        startingSequence: number;
+    },
+): LoadingActivityLogEntry[] => {
+    if (storedToolCalls === undefined || storedToolCalls.length === 0) {
+        return [];
+    }
+
+    const entries: LoadingActivityLogEntry[] = [];
+    const pendingById = new Map<string, LoadingActivityLogEntry>();
+    const pendingByName = new Map<string, LoadingActivityLogEntry[]>();
+    let sequence = options.startingSequence;
+
+    const registerPendingEntry = (
+        toolName: string,
+        entry: LoadingActivityLogEntry,
+        toolCallId: string | undefined,
+    ): void => {
+        if (toolCallId !== undefined && toolCallId.trim() !== "") {
+            pendingById.set(toolCallId, entry);
+            return;
+        }
+
+        const pending = pendingByName.get(toolName) ?? [];
+        pending.push(entry);
+        pendingByName.set(toolName, pending);
+    };
+
+    const popPendingByName = (
+        toolName: string,
+    ): LoadingActivityLogEntry | undefined => {
+        const pending = pendingByName.get(toolName);
+        if (pending === undefined || pending.length === 0) {
+            return undefined;
+        }
+
+        const entry = pending.shift();
+        if (pending.length === 0) {
+            pendingByName.delete(toolName);
+        }
+        return entry;
+    };
+
+    for (const item of storedToolCalls) {
+        if (isRecord(item) && Array.isArray(item.tool_calls)) {
+            for (const toolCall of item.tool_calls) {
+                if (isRecord(toolCall)) {
+                    const toolCallId =
+                        typeof toolCall.id === "string"
+                            ? toolCall.id
+                            : undefined;
+                    const toolFunction = isRecord(toolCall.function)
+                        ? toolCall.function
+                        : undefined;
+                    const toolName =
+                        typeof toolFunction?.name === "string" &&
+                        toolFunction.name.trim() !== ""
+                            ? toolFunction.name
+                            : "tool";
+                    const toolInput = parseJsonRecursively(
+                        toolFunction?.arguments,
+                    );
+
+                    const entry: LoadingActivityLogEntry = {
+                        id: `tool:metadata:${toolCallId ?? sequence}`,
+                        sequence,
+                        label: `Using tool: ${toolName}`,
+                        status: "in_progress",
+                        kind: "tool",
+                        parentId: options.parentId,
+                        toolName,
+                        toolInput,
+                        toolState: "input-available",
+                    };
+                    entries.push(entry);
+                    sequence += 1;
+                    registerPendingEntry(toolName, entry, toolCallId);
+                }
+            }
+        }
+
+        if (isRecord(item) && item.role === "tool") {
+            const toolCallId =
+                typeof item.tool_call_id === "string"
+                    ? item.tool_call_id
+                    : undefined;
+            const toolName =
+                typeof item.name === "string" ? item.name : undefined;
+            const toolOutput = parseJsonRecursively(item.content);
+            const pendingEntry =
+                (toolCallId === undefined
+                    ? undefined
+                    : pendingById.get(toolCallId)) ??
+                (toolName === undefined
+                    ? undefined
+                    : popPendingByName(toolName));
+
+            if (pendingEntry === undefined) {
+                const resolvedToolName =
+                    toolName !== undefined && toolName.trim() !== ""
+                        ? toolName
+                        : "tool";
+                entries.push({
+                    id: `tool:metadata:${toolCallId ?? sequence}`,
+                    sequence,
+                    label: `Using tool: ${resolvedToolName}`,
+                    status: "complete",
+                    kind: "tool",
+                    parentId: options.parentId,
+                    toolName: resolvedToolName,
+                    toolOutput,
+                    toolState: "output-available",
+                });
+                sequence += 1;
+            } else {
+                pendingEntry.status = "complete";
+                pendingEntry.toolState = "output-available";
+                pendingEntry.toolOutput = toolOutput;
+                if (toolCallId !== undefined) {
+                    pendingById.delete(toolCallId);
+                }
+            }
+        }
+    }
+
+    return entries;
+};
+
+export const mergeActivityLogWithStoredToolCalls = (
+    activityLog: LoadingActivityLogEntry[],
+    storedToolCalls: unknown[] | undefined,
+): LoadingActivityLogEntry[] => {
+    const normalizedActivityLog = activityLog.toSorted(
+        (left, right) => left.sequence - right.sequence,
+    );
+    const fallbackEntries = buildActivityLogFromStoredToolCalls(
+        storedToolCalls,
+        {
+            parentId: getFallbackParentId(normalizedActivityLog),
+            startingSequence: normalizedActivityLog.length,
+        },
+    );
+
+    if (fallbackEntries.length === 0) {
+        return normalizedActivityLog;
+    }
+
+    if (normalizedActivityLog.length === 0) {
+        return normalizeSequence(fallbackEntries);
+    }
+
+    const merged = [...normalizedActivityLog];
+    const matchedIndexes = new Set<number>();
+    let insertIndex = getFallbackInsertIndex(merged);
+
+    for (const fallbackEntry of fallbackEntries) {
+        const fallbackInput = toComparableValue(fallbackEntry.toolInput);
+        let matchedIndex = -1;
+
+        for (const [index, existingEntry] of merged.entries()) {
+            const sameTool =
+                !matchedIndexes.has(index) &&
+                existingEntry.kind === "tool" &&
+                existingEntry.toolName === fallbackEntry.toolName;
+
+            if (sameTool) {
+                const existingInput = toComparableValue(
+                    existingEntry.toolInput,
+                );
+                const hasMatchingComparableInput =
+                    fallbackInput === undefined ||
+                    existingInput === undefined ||
+                    fallbackInput === existingInput;
+
+                if (hasMatchingComparableInput) {
+                    matchedIndex = index;
+                    break;
+                }
+            }
+        }
+
+        const hasMatchedEntry = matchedIndex !== -1;
+        if (hasMatchedEntry) {
+            const existingEntry = merged[matchedIndex];
+            matchedIndexes.add(matchedIndex);
+
+            const hasFallbackOutput = fallbackEntry.toolOutput !== undefined;
+            const hasExistingOutput = existingEntry.toolOutput !== undefined;
+            const nextStatus =
+                existingEntry.status === "error"
+                    ? existingEntry.status
+                    : hasFallbackOutput
+                      ? fallbackEntry.status
+                      : existingEntry.status;
+
+            merged[matchedIndex] = {
+                ...existingEntry,
+                parentId: existingEntry.parentId ?? fallbackEntry.parentId,
+                toolInput: existingEntry.toolInput ?? fallbackEntry.toolInput,
+                toolOutput: hasExistingOutput
+                    ? existingEntry.toolOutput
+                    : fallbackEntry.toolOutput,
+                toolErrorText:
+                    existingEntry.toolErrorText ?? fallbackEntry.toolErrorText,
+                toolState:
+                    existingEntry.toolState === "output-available" ||
+                    existingEntry.toolState === "output-error"
+                        ? existingEntry.toolState
+                        : (fallbackEntry.toolState ?? existingEntry.toolState),
+                status: nextStatus,
+            };
+        } else {
+            merged.splice(insertIndex, 0, fallbackEntry);
+            insertIndex += 1;
+        }
+    }
+
+    return normalizeSequence(merged);
 };

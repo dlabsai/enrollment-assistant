@@ -15,6 +15,7 @@ import {
     ChartTooltipContent,
 } from "@/components/ui/chart";
 
+import { formatLocaleNumber } from "../../lib/number-format";
 import type { ModelUsage } from "../types";
 
 interface ModelBreakdownProps {
@@ -59,23 +60,14 @@ export const ModelBreakdown = ({ data }: ModelBreakdownProps): JSX.Element => {
                         />
                         <XAxis
                             axisLine={false}
+                            tickFormatter={(value: number) =>
+                                formatLocaleNumber(value)
+                            }
                             tickLine={false}
                             type="number"
                         />
                         <ChartTooltip
-                            content={
-                                <ChartTooltipContent
-                                    formatter={(value, name) => {
-                                        if (
-                                            name === "cost" &&
-                                            typeof value === "number"
-                                        ) {
-                                            return `$${value.toFixed(4)}`;
-                                        }
-                                        return value;
-                                    }}
-                                />
-                            }
+                            content={<ChartTooltipContent />}
                             cursor={false}
                         />
                         <Bar

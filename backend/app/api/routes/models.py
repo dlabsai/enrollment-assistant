@@ -1,32 +1,28 @@
 from typing import Any
 
 import httpx
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter
 
-from app.api.deps import get_current_user, require_user_roles
+from app.api.deps import CurrentUser
 from app.core.config import settings
-from app.models import UserRole
 
 router = APIRouter(tags=["models"])
 
 _openrouter_models: list[str] = []
 
 
-@router.get(
-    "/models",
-    response_model=list[str],
-    dependencies=[
-        Depends(require_user_roles(get_current_user, UserRole.USER, UserRole.ADMIN, UserRole.DEV))
-    ],
-)
-async def list_models() -> Any:
+@router.get("/models", response_model=list[str])
+async def list_models(_current_user: CurrentUser) -> Any:
     available_models: list[str] = []
     use_openrouter = False
+
     for model in settings.MODELS.split(","):
         model_name = model.strip()
-        if model_name == "openrouter:*":
+        if model_name == "":
+            continue
+        if model_name == "openrouter/*":
             use_openrouter = True
-        elif model_name != "":
+        else:
             available_models.append(model_name)
 
     if use_openrouter and not _openrouter_models:
@@ -37,9 +33,11 @@ async def list_models() -> Any:
             for model in openrouter_models.get("data", []):
                 supported_parameters = model.get("supported_parameters", [])
                 supports_tools = any(
-                    param in supported_parameters for param in ("tools", "tool_choice")
+                    parameter in supported_parameters for parameter in ("tools", "tool_choice")
                 )
                 if supports_tools:
-                    _openrouter_models.append("openrouter:" + model["id"].strip())
+                    model_id = model.get("id", "").strip()
+                    if model_id != "":
+                        _openrouter_models.append("openrouter/" + model_id)
 
     return list(dict.fromkeys(available_models + _openrouter_models))

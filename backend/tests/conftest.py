@@ -1,41 +1,54 @@
+# ruff: noqa: E402
+
 import os
 import uuid
-from collections.abc import AsyncGenerator, Mapping
+from typing import TYPE_CHECKING, cast
 
-import docker
+_PYTEST_POSTGRES_ENV_MAP = {
+    "PYTEST_POSTGRES_SERVER": "POSTGRES_SERVER",
+    "PYTEST_POSTGRES_PORT": "POSTGRES_PORT",
+    "PYTEST_POSTGRES_USER": "POSTGRES_USER",
+    "PYTEST_POSTGRES_PASSWORD": "POSTGRES_PASSWORD",
+    "PYTEST_POSTGRES_DB": "POSTGRES_DB",
+}
+
+_missing = [key for key in _PYTEST_POSTGRES_ENV_MAP if os.environ.get(key, "").strip() == ""]
+if _missing:
+    raise RuntimeError(f"Tests require external DB env vars: {', '.join(sorted(_missing))}")
+
+_pytest_db = os.environ["PYTEST_POSTGRES_DB"].strip()
+_runtime_db = os.environ.get("POSTGRES_DB", "").strip()
+if not _pytest_db.endswith("_test"):
+    raise RuntimeError("Unsafe PYTEST_POSTGRES_DB value. Test database name must end with '_test'.")
+if _runtime_db != "" and _runtime_db == _pytest_db:
+    raise RuntimeError("Unsafe DB configuration: PYTEST_POSTGRES_DB must differ from POSTGRES_DB.")
+
+for _source, _target in _PYTEST_POSTGRES_ENV_MAP.items():
+    os.environ[_target] = os.environ[_source]
+
 import pytest
 import pytest_asyncio
-from docker.models.containers import Container
-from sqlalchemy import select, text
-from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import Base, User
-from tests.rag_fixtures import create_session_factory
+from app.evals.rag_data import create_session_factory
+from app.evals.test_db import (
+    create_test_db_engine,
+    ensure_test_db_rag_data,
+    initialize_test_db_schema,
+    run_test_db_migrations,
+)
+from app.models import User
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncGenerator
 
 # Fixed UUID for centralized test user
 TEST_USER_ID = uuid.UUID("12345678-1234-5678-9abc-123456789012")
 
-# Module-scoped postgres container for all tests
+# Module-scoped engine/session factory for all tests
 _test_engine = None
 _test_session_factory = None
-
-# Container settings for persistent RAG data
-_PERSISTENT_CONTAINER_NAME = "virtual-assistant-test-postgres"
-_POSTGRES_IMAGE = "pgvector/pgvector:pg17"
-_POSTGRES_USER = "test"
-_POSTGRES_PASSWORD = "test"  # noqa: S105
-_POSTGRES_DB = "test"
-
-
-def _build_database_url_from_env(env: Mapping[str, str]) -> str | None:
-    server = env.get("POSTGRES_SERVER")
-    user = env.get("POSTGRES_USER")
-    password = env.get("POSTGRES_PASSWORD")
-    db = env.get("POSTGRES_DB")
-    if not server or not user or not password or not db:
-        return None
-    port = env.get("POSTGRES_PORT", "5432")
-    return f"postgresql+psycopg://{user}:{password}@{server}:{port}/{db}"
 
 
 def pytest_addoption(parser: pytest.Parser) -> None:
@@ -45,12 +58,6 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         action="store_true",
         default=False,
         help="Force rebuild of RAG data (expensive - calls embedding API)",
-    )
-    parser.addoption(
-        "--fresh-db",
-        action="store_true",
-        default=False,
-        help="Start with a fresh database container (removes persistent RAG data)",
     )
     parser.addoption(
         "--repeat",
@@ -100,20 +107,6 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         help="Override the guardrails model for evals.",
     )
     parser.addoption(
-        "--search-model",
-        action="store",
-        type=str,
-        default=None,
-        help="Override the search model for evals.",
-    )
-    parser.addoption(
-        "--extractor-model",
-        action="store",
-        type=str,
-        default=None,
-        help="Override the extractor model for evals.",
-    )
-    parser.addoption(
         "--evaluation-model",
         action="store",
         type=str,
@@ -122,188 +115,39 @@ def pytest_addoption(parser: pytest.Parser) -> None:
     )
 
 
-def _get_container_host_port(container: Container) -> tuple[str, int]:
-    """Extract host and port from container port mapping."""
-    container.reload()
-    port_mapping = container.ports.get("5432/tcp", [{}])[0]
-    host_port = int(port_mapping.get("HostPort", 5432))
-    host: str = port_mapping.get("HostIp", "localhost")
-    if host == "0.0.0.0":  # noqa: S104
-        host = "localhost"
-    return host, host_port
-
-
-def _wait_for_container(container: Container, *, check_postgres: bool = False) -> None:
-    """Wait for container to be ready."""
-    import time
-
-    for _ in range(30):
-        container.reload()
-        if container.status == "running":
-            if not check_postgres:
-                break
-            # Check if postgres is ready
-            exit_code, _ = container.exec_run("pg_isready -U test")
-            if exit_code == 0:
-                break
-        time.sleep(1)
-
-
-def _get_or_create_container() -> tuple[str, int]:
-    """Get existing container or create a new one. Returns (host, port)."""
-    client = docker.from_env()
-
-    # Check for existing container
-    containers: list[Container] = client.containers.list(
-        all=True, filters={"name": _PERSISTENT_CONTAINER_NAME}
-    )
-
-    if containers:
-        container = containers[0]
-        if container.status != "running":
-            print(f"\n🔄 Starting existing container '{_PERSISTENT_CONTAINER_NAME}'...")
-            container.start()
-            _wait_for_container(container)
-
-        host, host_port = _get_container_host_port(container)
-        print(
-            f"\n🔄 Reusing existing test database container "
-            f"'{_PERSISTENT_CONTAINER_NAME}' at {host}:{host_port}"
-        )
-        return host, host_port
-
-    # Create new container
-    print(f"\n🆕 Creating new test database container '{_PERSISTENT_CONTAINER_NAME}'...")
-    container = client.containers.run(
-        _POSTGRES_IMAGE,
-        name=_PERSISTENT_CONTAINER_NAME,
-        environment={
-            "POSTGRES_USER": _POSTGRES_USER,
-            "POSTGRES_PASSWORD": _POSTGRES_PASSWORD,
-            "POSTGRES_DB": _POSTGRES_DB,
-        },
-        ports={"5432/tcp": None},  # Auto-assign host port
-        detach=True,
-        remove=False,  # Don't auto-remove when stopped
-    )
-
-    _wait_for_container(container, check_postgres=True)
-
-    host, host_port = _get_container_host_port(container)
-    print(f"✅ Container ready at {host}:{host_port}")
-    return host, host_port
-
-
-def _remove_container() -> None:
-    """Remove the persistent test container."""
-    try:
-        client = docker.from_env()
-        containers: list[Container] = client.containers.list(
-            all=True, filters={"name": _PERSISTENT_CONTAINER_NAME}
-        )
-        for container in containers:
-            print(f"\n🗑️ Removing container '{_PERSISTENT_CONTAINER_NAME}'...")
-            container.remove(force=True)
-    except Exception as e:
-        print(f"Warning: Could not remove container: {e}")
-
-
 def pytest_configure(config: pytest.Config) -> None:
-    """Start PostgreSQL container before any tests run.
+    """Migrate the configured guarded test database."""
+    from app.core.config import settings
 
-    Uses a persistent named container to preserve RAG data between test sessions.
-    RAG data is expensive to create (embedding API calls) so we keep it persistent.
-    """
-    if "TELEMETRY_DATABASE_URL" not in os.environ:
-        telemetry_url = _build_database_url_from_env(os.environ)
-        if telemetry_url is not None:
-            os.environ["TELEMETRY_DATABASE_URL"] = telemetry_url
-
-    fresh_db = config.getoption("--fresh-db", default=False)
-
-    if fresh_db:
-        _remove_container()
-
-    # Get or create container
-    host, port = _get_or_create_container()
-
-    # Set environment variables
-    os.environ["POSTGRES_SERVER"] = host
-    os.environ["POSTGRES_PORT"] = str(port)
-    os.environ["POSTGRES_USER"] = _POSTGRES_USER
-    os.environ["POSTGRES_PASSWORD"] = _POSTGRES_PASSWORD
-    os.environ["POSTGRES_DB"] = _POSTGRES_DB
-
-    from app.core import config as config_module
-    from app.core import db
-
-    config_module.settings = config_module.Settings()
-    db.init_engine()
+    run_test_db_migrations(str(settings.SQLALCHEMY_DATABASE_URI))
 
 
 def pytest_unconfigure(config: pytest.Config) -> None:
-    """Keep PostgreSQL container running for RAG data persistence."""
-    print(
-        f"\n💾 Test database container '{_PERSISTENT_CONTAINER_NAME}' "
-        "kept running for RAG data persistence"
-    )
-    print("   Use --fresh-db to start with a clean database")
-
-
-def _build_async_url() -> str:
-    """Build async database URL from environment variables."""
-    server = os.environ["POSTGRES_SERVER"]
-    port = os.environ["POSTGRES_PORT"]
-    user = os.environ["POSTGRES_USER"]
-    password = os.environ["POSTGRES_PASSWORD"]
-    db = os.environ["POSTGRES_DB"]
-    return f"postgresql+psycopg://{user}:{password}@{server}:{port}/{db}"
+    """Pytest shutdown hook."""
+    del config
 
 
 @pytest_asyncio.fixture(scope="session")
 async def db_engine(request: pytest.FixtureRequest):
     """Create the database engine and tables once per test session.
 
-    Handles both new containers and reused persistent containers.
+    Uses the external test database selected in `pytest_configure`.
     If --rebuild-rag is passed, will rebuild RAG data (expensive).
     """
     global _test_engine, _test_session_factory  # noqa: PLW0603
 
-    from tests.rag_fixtures import check_rag_data_exists, get_rag_data_stats, populate_rag_data
+    from app.core.config import settings
 
-    # Build URL from environment variables (works for both new and reused containers)
-    async_url = _build_async_url()
-
-    _test_engine = create_async_engine(async_url, echo=False)
+    _test_engine = create_test_db_engine(str(settings.SQLALCHEMY_DATABASE_URI))
     _test_session_factory = create_session_factory(_test_engine)
 
-    # Create pgvector extension and all tables (idempotent)
-    async with _test_engine.begin() as conn:
-        await conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
-        await conn.run_sync(Base.metadata.create_all)
+    await initialize_test_db_schema(_test_engine)
 
     # Check if RAG data needs to be populated
-    rebuild_rag = request.config.getoption("--rebuild-rag", default=False)
-    rag_exists = await check_rag_data_exists(_test_engine)
-
-    if rebuild_rag or not rag_exists:
-        if rebuild_rag:
-            print("\n🔨 Rebuilding RAG data (--rebuild-rag flag set)...")
-        else:
-            print("\n📦 No RAG data found, populating database...")
-
-        await populate_rag_data(_test_engine)
-        stats = await get_rag_data_stats(_test_engine)
-        print(
-            f"✅ RAG data populated: {stats['total_documents']} documents, "
-            f"{stats['total_chunks']} chunks"
-        )
-    else:
-        stats = await get_rag_data_stats(_test_engine)
-        print(
-            f"\n✅ Using existing RAG data: {stats['total_documents']} documents, "
-            f"{stats['total_chunks']} chunks"
-        )
+    rebuild_rag = cast(bool, request.config.getoption("--rebuild-rag", default=False))
+    stats = await ensure_test_db_rag_data(_test_engine, rebuild_rag=rebuild_rag)
+    status = "RAG data rebuilt/populated" if rebuild_rag else "RAG data ready"
+    print(f"\n✅ {status}: {stats['total_documents']} documents, {stats['total_chunks']} chunks")
 
     yield _test_engine
 
@@ -337,21 +181,38 @@ async def session(db_engine: object) -> AsyncGenerator[AsyncSession]:
 
 
 @pytest_asyncio.fixture
-async def clean_session(db_engine: object) -> AsyncGenerator[AsyncSession]:
-    """Create a test database session that cleans non-RAG tables before the test.
-
-    Use this fixture for integration tests that need a clean slate for
-    conversations/messages but want to preserve RAG data (Document, DocumentContentChunk).
-    """
-    from tests.rag_fixtures import clear_non_rag_tables
+async def transactional_session(db_engine: object) -> AsyncGenerator[AsyncSession]:
+    """Create a transactional test session that rolls back all test changes."""
+    from app.api.deps import get_db_session
+    from app.main import app
 
     if _test_session_factory is None:
         raise RuntimeError("Test session factory not initialized")
+    if _test_engine is None:
+        raise RuntimeError("Test engine not initialized")
 
-    async with _test_session_factory() as session:
-        # Clean non-RAG tables before the test
-        await clear_non_rag_tables(session)
-        yield session
+    async with _test_engine.connect() as connection:
+        transaction = await connection.begin()
+        async with _test_session_factory(bind=connection) as session:
+
+            async def override_get_db_session() -> AsyncGenerator[AsyncSession]:
+                request_transaction = await session.begin_nested()
+                try:
+                    yield session
+                    if request_transaction.is_active:
+                        await request_transaction.commit()
+                except Exception:
+                    if request_transaction.is_active:
+                        await request_transaction.rollback()
+                    raise
+
+            app.dependency_overrides[get_db_session] = override_get_db_session
+            try:
+                yield session
+            finally:
+                app.dependency_overrides.pop(get_db_session, None)
+
+        await transaction.rollback()
 
 
 @pytest_asyncio.fixture
@@ -372,6 +233,9 @@ async def test_user(session: AsyncSession) -> User:
     # Use a pre-generated bcrypt hash for "testpass123" to avoid bcrypt issues in tests
     # This is a valid bcrypt hash generated for "testpass123"
     precomputed_hash = "$2b$12$LQv3c1yqBWVHxkd0LHAkCOYz6TtxMQJqhN8/X4.R.HqhAW5a3QBGG"
+    from app.core.rbac import SystemGroupSlug, get_group_for_slug
+
+    group = await get_group_for_slug(session, SystemGroupSlug.USER)
 
     user = User(
         id=TEST_USER_ID,
@@ -379,6 +243,7 @@ async def test_user(session: AsyncSession) -> User:
         name="Test User",
         password_hash=precomputed_hash,
         is_active=True,
+        group_id=group.id,
     )
     session.add(user)
     try:

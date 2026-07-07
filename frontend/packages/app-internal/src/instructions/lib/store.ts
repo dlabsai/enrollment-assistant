@@ -225,6 +225,44 @@ const isPersistedInstructionsState = (
     return typeof hasSeenGuide === "boolean";
 };
 
+const filterInternalSectionEntries = <T>(
+    entries: Record<string, T>,
+): Record<string, T> =>
+    Object.fromEntries(
+        Object.entries(entries).filter(
+            ([sectionId]) => getPlatformForSectionId(sectionId) === "internal",
+        ),
+    ) as Record<string, T>;
+
+const filterInternalTemplateEntries = <T>(
+    entries: Record<string, T>,
+): Record<string, T> =>
+    Object.fromEntries(
+        Object.entries(entries).filter(
+            ([filename]) =>
+                getPlatformForFilename(filename) === "internal" &&
+                getSectionIdForTemplate(filename) !== undefined,
+        ),
+    ) as Record<string, T>;
+
+const getDefaultTemplateForSection = (
+    diskTemplates: PromptFile[],
+    sectionId: string | undefined,
+): string | undefined => {
+    const scope = getScopeForSectionId(sectionId);
+    const platform = getPlatformForSectionId(sectionId);
+    if (scope === undefined || platform === undefined) {
+        return undefined;
+    }
+
+    const templateSet = new Set(
+        diskTemplates.map((template) => template.filename),
+    );
+    return getTemplateFilenamesForScope(scope, platform).find((filename) =>
+        templateSet.has(filename),
+    );
+};
+
 const createInitialInstructionsState = (): InstructionsState => ({
     diskTemplates: [],
     diskTemplatesLoaded: false,
@@ -270,7 +308,6 @@ const createInstructionsActions = (
     loadDiskTemplates: async (): Promise<void> => {
         const templates = await withErrorHandling(
             async () => fetchDiskTemplates(api),
-
             "Failed to load templates",
             (error) => {
                 set({ error });
@@ -286,17 +323,10 @@ const createInstructionsActions = (
             if (selectedTemplate !== undefined && editedContent === "") {
                 get().selectTemplate(selectedTemplate);
             }
-            const hasInternal = templates.some((template) =>
-                template.filename.includes("_internal"),
-            );
-            if (!hasInternal && get().activePlatform === "internal") {
-                get().setActivePlatform("public");
-            }
-            if (
-                selectedTemplate === undefined &&
-                activeSectionId === undefined
-            ) {
-                const defaultTemplate = getDefaultTemplateFilename(templates);
+            if (selectedTemplate === undefined) {
+                const defaultTemplate =
+                    getDefaultTemplateForSection(templates, activeSectionId) ??
+                    getDefaultTemplateFilename(templates);
                 if (defaultTemplate !== undefined) {
                     get().selectTemplate(defaultTemplate);
                 }
@@ -1238,6 +1268,51 @@ export const createInstructionsStore = (
                         )
                             ? persistedState
                             : undefined;
+                        const selectedTemplate =
+                            persisted?.selectedTemplate !== undefined &&
+                            getPlatformForFilename(
+                                persisted.selectedTemplate,
+                            ) === "internal" &&
+                            getSectionIdForTemplate(
+                                persisted.selectedTemplate,
+                            ) !== undefined
+                                ? persisted.selectedTemplate
+                                : undefined;
+                        const activeSectionId =
+                            persisted?.activeSectionId !== undefined &&
+                            getPlatformForSectionId(
+                                persisted.activeSectionId,
+                            ) === "internal"
+                                ? persisted.activeSectionId
+                                : selectedTemplate === undefined
+                                  ? undefined
+                                  : getSectionIdForTemplate(selectedTemplate);
+                        const selectedVersionIdBySection =
+                            persisted === undefined
+                                ? currentState.selectedVersionIdBySection
+                                : filterInternalSectionEntries(
+                                      persisted.selectedVersionIdBySection,
+                                  );
+                        const isDefaultSelectedBySection =
+                            persisted === undefined
+                                ? currentState.isDefaultSelectedBySection
+                                : filterInternalSectionEntries(
+                                      persisted.isDefaultSelectedBySection,
+                                  );
+                        const selectedVersionId =
+                            activeSectionId === undefined
+                                ? undefined
+                                : (selectedVersionIdBySection[
+                                      activeSectionId
+                                  ] ?? persisted?.selectedVersionId);
+                        const isDefaultSelected =
+                            activeSectionId === undefined
+                                ? true
+                                : (isDefaultSelectedBySection[
+                                      activeSectionId
+                                  ] ??
+                                  persisted?.isDefaultSelected ??
+                                  true);
                         const hasSeenGuide =
                             persisted?.hasSeenGuide ??
                             currentState.hasSeenGuide;
@@ -1245,6 +1320,25 @@ export const createInstructionsStore = (
                         return {
                             ...currentState,
                             ...persisted,
+                            activePlatform: "internal",
+                            activeSectionId,
+                            expandedSections:
+                                persisted === undefined
+                                    ? currentState.expandedSections
+                                    : filterInternalSectionEntries(
+                                          persisted.expandedSections,
+                                      ),
+                            selectedTemplate,
+                            selectedVersionId,
+                            selectedVersionIdBySection,
+                            isDefaultSelected,
+                            isDefaultSelectedBySection,
+                            drafts:
+                                persisted === undefined
+                                    ? currentState.drafts
+                                    : filterInternalTemplateEntries(
+                                          persisted.drafts,
+                                      ),
                             showGuide: !hasSeenGuide,
                         };
                     },

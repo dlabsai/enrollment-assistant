@@ -21,6 +21,7 @@ import type {
     Rating,
 } from "../types";
 import {
+    type ChatCollectionKind,
     deleteChat as apiDeleteChat,
     deleteMessageFeedback as apiDeleteMessageFeedback,
     fetchChatDetail,
@@ -33,7 +34,11 @@ import {
     submitMessageFeedback as apiSubmitMessageFeedback,
     updateMessageActiveChild as apiUpdateMessageActiveChild,
 } from "./api";
-import { buildActivityLogFromTrace } from "./trace-activity";
+import { mapServerGuardrailsFailures } from "./guardrails";
+import {
+    buildActivityLogFromTrace,
+    mergeActivityLogWithStoredToolCalls,
+} from "./trace-activity";
 
 interface ChatState {
     chats: Map<string, Chat>;
@@ -62,6 +67,12 @@ interface ConversationTreeState {
     childrenByParent: Map<string, string[]>;
     currentBranchPath: string[];
 }
+
+type SortedChatsSelectorState = Pick<ChatState, "chats">;
+
+type CurrentChatSelectorState = Pick<ChatState, "chats" | "currentChatId">;
+
+type CurrentDraftSelectorState = Pick<ChatState, "drafts" | "currentChatId">;
 
 export interface ChatActions {
     loadChats: () => Promise<void>;
@@ -97,7 +108,10 @@ export interface ChatActions {
 
     updateChat: (id: string, updater: (chat: Chat) => Chat) => void;
 
-    loadMessageFeedback: (messageId: string) => Promise<void>;
+    loadMessageFeedback: (
+        messageId: string,
+        source?: "chat" | "chats",
+    ) => Promise<void>;
     initializeMessageFeedback: (
         entries: { messageId: string; feedback: MessageFeedback[] }[],
     ) => void;
@@ -106,8 +120,12 @@ export interface ChatActions {
         messageId: string,
         rating: Rating,
         text?: string,
+        source?: "chat" | "chats",
     ) => Promise<void>;
-    removeMessageFeedback: (messageId: string) => Promise<void>;
+    removeMessageFeedback: (
+        messageId: string,
+        source?: "chat" | "chats",
+    ) => Promise<void>;
 }
 
 const generateTempId = (): string => `__temp_${nanoid(7)}`;
@@ -121,16 +139,16 @@ const truncate = (text: string, length: number): string => {
     return `${text.slice(0, length)}...`;
 };
 
-type AgentStage = "search" | "chatbot" | "guardrails";
+type AgentStage = "chatbot" | "guardrails" | "investigation";
 
 type AgentStageStatus = "start" | "end" | "error";
 
 type ToolCallStatus = "start" | "end" | "error";
 
 const AGENT_STAGE_LABELS: Record<AgentStage, string> = {
-    search: "Search agent",
     chatbot: "Chatbot agent",
     guardrails: "Guardrails agent",
+    investigation: "Investigation agent",
 };
 
 const MIN_TOOL_ACTIVITY_MS = 800;
@@ -182,6 +200,9 @@ const convertServerChat = (item: ChatListItem): Chat => ({
     isPublic: item.is_public,
     userName: item.user_name ?? undefined,
     userEmail: item.user_email ?? undefined,
+    investigationSourceConversationId: undefined,
+    investigationSourceMessageId: undefined,
+    investigationSourceFeedbackId: undefined,
     messages: [],
     isLoading: false,
     hasUnread: false,
@@ -190,15 +211,80 @@ const convertServerChat = (item: ChatListItem): Chat => ({
     parentMessageId: undefined,
 });
 
+const getDisplayContent = (message: {
+    content: string;
+    guardrails_blocked?: boolean;
+    guardrails_blocked_message?: string | null;
+}): string =>
+    message.guardrails_blocked === true &&
+    typeof message.guardrails_blocked_message === "string" &&
+    message.guardrails_blocked_message !== ""
+        ? message.guardrails_blocked_message
+        : message.content;
+
 const convertServerMessages = (
     response: ChatDetailResponse,
 ): { messages: Message[]; parentMessageId?: string } => {
     const messages: Message[] = response.messages.map((message) => ({
         id: message.id,
         role: message.role,
-        content: message.content,
+        content: getDisplayContent(message),
         createdAt: new Date(message.created_at).getTime(),
         parentId: message.parent_id ?? undefined,
+        guardrailsBlocked: message.guardrails_blocked ?? false,
+        guardrailsBlockedMessage: message.guardrails_blocked_message ?? undefined,
+        assistantToolCalls: message.assistant_tool_calls ?? undefined,
+        generationTimeMs: message.generation_time_ms ?? undefined,
+        responseCost: message.response_cost ?? undefined,
+        responseUsage:
+            message.response_usage === undefined || message.response_usage === null
+                ? undefined
+                : {
+                      inputTokens: message.response_usage.input_tokens ?? undefined,
+                      uncachedInputTokens:
+                          message.response_usage.uncached_input_tokens ?? undefined,
+                      cacheReadInputTokens:
+                          message.response_usage.cache_read_input_tokens ?? undefined,
+                      outputTokens: message.response_usage.output_tokens ?? undefined,
+                  },
+        responseCostBreakdown:
+            message.response_cost_breakdown === undefined ||
+            message.response_cost_breakdown === null
+                ? undefined
+                : {
+                      inputCost: message.response_cost_breakdown.input_cost ?? undefined,
+                      cacheReadInputCost:
+                          message.response_cost_breakdown.cache_read_input_cost ?? undefined,
+                      outputCost: message.response_cost_breakdown.output_cost ?? undefined,
+                  },
+        guardrailsFailures: mapServerGuardrailsFailures(message.guardrails_failures),
+        toolSourcesUsed: message.tool_sources_used,
+        groundingSourcesUsed: message.grounding_sources_used,
+        groundingSourceStatus: message.grounding_source_status,
+        generationTiming:
+            message.generation_timing === undefined
+                ? undefined
+                : {
+                      totalTimeMs:
+                          message.generation_timing.total_time_ms ?? undefined,
+                      chatbotTimeMs:
+                          message.generation_timing.chatbot_time_ms ??
+                          undefined,
+                      guardrailTimeMs:
+                          message.generation_timing.guardrail_time_ms ??
+                          undefined,
+                      chatbotTimesMs:
+                          message.generation_timing.chatbot_times_ms ??
+                          undefined,
+                      guardrailTimesMs:
+                          message.generation_timing.guardrail_times_ms ??
+                          undefined,
+                      chatbotModel:
+                          message.generation_timing.chatbot_model ?? undefined,
+                      guardrailModel:
+                          message.generation_timing.guardrail_model ??
+                          undefined,
+                  },
     }));
 
     const lastAssistant = response.messages.findLast(
@@ -226,9 +312,11 @@ const convertConversationTree = (
         messagesById.set(messageId, {
             id: messageId,
             role: message.role,
-            content: message.content,
+            content: getDisplayContent(message),
             createdAt: new Date(message.created_at).getTime(),
             parentId: message.parent_id ?? undefined,
+            guardrailsBlocked: message.guardrails_blocked ?? false,
+            guardrailsBlockedMessage: message.guardrails_blocked_message ?? undefined,
         });
 
         const childIds = messageTreeNodes.map((child) => child.message.id);
@@ -273,7 +361,7 @@ export const createSelectSortedChats = () => {
     let lastChats = new Map<string, Chat>();
     let lastResult: Chat[] = [];
 
-    return (state: ChatState): Chat[] => {
+    return (state: SortedChatsSelectorState): Chat[] => {
         if (state.chats === lastChats) {
             return lastResult;
         }
@@ -286,15 +374,19 @@ export const createSelectSortedChats = () => {
     };
 };
 
-export const selectCurrentChat = (state: ChatState): Chat | undefined =>
+export const selectCurrentChat = (
+    state: CurrentChatSelectorState,
+): Chat | undefined =>
     state.currentChatId === undefined
         ? undefined
         : (state.chats.get(state.currentChatId) ?? undefined);
 
-export const selectCurrentDraft = (state: ChatState): string =>
+export const selectCurrentDraft = (state: CurrentDraftSelectorState): string =>
     state.drafts.get(getDraftKey(state.currentChatId)) ?? "";
 
-export const selectIsCurrentLoading = (state: ChatState): boolean => {
+export const selectIsCurrentLoading = (
+    state: CurrentChatSelectorState,
+): boolean => {
     const chat = selectCurrentChat(state);
     return chat?.isLoading ?? false;
 };
@@ -327,11 +419,32 @@ const createInitialChatState = (): ChatState => ({
     activityLogCounter: 0,
 });
 
+interface ChatStoreOptions {
+    collectionKind?: ChatCollectionKind;
+}
+
 const createChatActions = (
     api: AuthenticatedApi,
     set: ChatSetState,
     get: ChatGetState,
+    options: ChatStoreOptions = {},
 ): ChatActions => {
+    const collectionKind = options.collectionKind ?? "chat";
+    const getStoredToolCallsForMessage = (
+        messageId: string,
+    ): Message["assistantToolCalls"] | undefined => {
+        for (const chat of get().chats.values()) {
+            const message = chat.messages.find(
+                (entry) => entry.id === messageId,
+            );
+            if (message?.assistantToolCalls !== undefined) {
+                return message.assistantToolCalls;
+            }
+        }
+
+        return undefined;
+    };
+
     const hydrateMessageActivityLogFromTrace = async (
         messageId: string,
     ): Promise<void> => {
@@ -347,19 +460,28 @@ const createChatActions = (
         loading.add(messageId);
         set({ messageActivityLogLoading: loading });
 
+        const storedToolCalls = getStoredToolCallsForMessage(messageId);
+
         try {
             const traceDetail = await fetchTraceDetailByMessageId(
                 api,
                 messageId,
+                "chat_activity",
             );
-            const activityLog = buildActivityLogFromTrace(traceDetail);
+            const activityLog = mergeActivityLogWithStoredToolCalls(
+                buildActivityLogFromTrace(traceDetail),
+                storedToolCalls,
+            );
             const next = new Map(get().messageActivityLog);
             next.set(messageId, activityLog);
             set({ messageActivityLog: next });
         } catch (error) {
             logger.debug("Failed to hydrate activity log from trace", error);
             const next = new Map(get().messageActivityLog);
-            next.set(messageId, []);
+            next.set(
+                messageId,
+                mergeActivityLogWithStoredToolCalls([], storedToolCalls),
+            );
             set({ messageActivityLog: next });
         } finally {
             const nextLoading = new Set(get().messageActivityLogLoading);
@@ -382,20 +504,33 @@ const createChatActions = (
         const newChats = new Map(get().chats);
         const chat = newChats.get(chatId);
 
-        if (chat) {
-            newChats.set(chatId, {
-                ...chat,
-                messages,
-                parentMessageId,
-                title: detail.title ?? chat.title,
-                summary: detail.summary ?? undefined,
-            });
-            set({
-                chats: newChats,
-                messageFeedback: nextMessageFeedback,
-                currentSummary: detail.summary ?? undefined,
-            });
-        }
+        newChats.set(chatId, {
+            id: chatId,
+            title: detail.title ?? chat?.title,
+            summary: detail.summary ?? undefined,
+            lastMessagePreview: chat?.lastMessagePreview,
+            updatedAt: new Date(detail.updated_at).getTime(),
+            isPublic: detail.is_public,
+            userName: detail.user_name ?? undefined,
+            userEmail: detail.user_email ?? undefined,
+            investigationSourceConversationId:
+                detail.investigation_source_conversation_id ?? undefined,
+            investigationSourceMessageId:
+                detail.investigation_source_message_id ?? undefined,
+            investigationSourceFeedbackId:
+                detail.investigation_source_feedback_id ?? undefined,
+            messages,
+            parentMessageId,
+            isLoading: false,
+            hasUnread: false,
+            loadingActivity: [],
+            loadingActivityLog: [],
+        });
+        set({
+            chats: newChats,
+            messageFeedback: nextMessageFeedback,
+            currentSummary: detail.summary ?? undefined,
+        });
     };
 
     return {
@@ -403,7 +538,7 @@ const createChatActions = (
             set({ chatsError: undefined });
 
             try {
-                const items = await fetchChats(api);
+                const items = await fetchChats(api, collectionKind);
                 const chats = new Map<string, Chat>();
 
                 for (const item of items) {
@@ -454,7 +589,9 @@ const createChatActions = (
             }
 
             try {
-                const detail = await fetchChatDetail(api, chatId);
+                const detail = await fetchChatDetail(api, chatId, {
+                    source: collectionKind === "investigation" ? "investigate" : "chat",
+                });
                 applyChatDetail(chatId, detail);
             } catch (error) {
                 logger.error("Failed to load chat detail:", error);
@@ -467,7 +604,9 @@ const createChatActions = (
             }
 
             try {
-                const detail = await fetchChatDetail(api, chatId);
+                const detail = await fetchChatDetail(api, chatId, {
+                    source: collectionKind === "investigation" ? "investigate" : "chat",
+                });
                 applyChatDetail(chatId, detail);
             } catch (error) {
                 logger.error("Failed to reload chat detail:", error);
@@ -634,6 +773,19 @@ const createChatActions = (
             let realChatId = targetId;
             let newParentMessageId = "";
 
+            const clearCurrentAbortController = (): void => {
+                const controllers = get().abortControllers;
+                const newControllers = new Map(controllers);
+                for (const chatId of new Set([targetId, realChatId])) {
+                    if (newControllers.get(chatId) === abortController) {
+                        newControllers.delete(chatId);
+                    }
+                }
+                if (newControllers.size !== controllers.size) {
+                    set({ abortControllers: newControllers });
+                }
+            };
+
             const getActivityItem = (
                 chatId: string,
                 id: string,
@@ -725,6 +877,7 @@ const createChatActions = (
                         parentMessageId,
                         modelOverrides,
                         isRegeneration,
+                        conversationKind: collectionKind,
                     },
                     {
                         onChatId: (chatId, parentMsgId, chatTitle) => {
@@ -994,6 +1147,17 @@ const createChatActions = (
                             content: messageContent,
                             parentMessageId: assistantParentId,
                             userMessageId,
+                            generationTimeMs,
+                            generationTiming,
+                            responseCost,
+                            responseUsage,
+                            responseCostBreakdown,
+                            guardrailsFailures,
+                            guardrailsBlocked,
+                            guardrailsBlockedMessage,
+                            toolSourcesUsed,
+                            groundingSourcesUsed,
+                            groundingSourceStatus,
                         }) => {
                             const finalChatId = realChatId;
                             const activeChat = get().chats.get(finalChatId);
@@ -1027,6 +1191,17 @@ const createChatActions = (
                                 content: messageContent,
                                 createdAt: Date.now(),
                                 parentId: assistantParentId,
+                                generationTimeMs,
+                                generationTiming,
+                                responseCost,
+                                responseUsage,
+                                responseCostBreakdown,
+                                guardrailsFailures,
+                                guardrailsBlocked,
+                                guardrailsBlockedMessage,
+                                toolSourcesUsed,
+                                groundingSourcesUsed,
+                                groundingSourceStatus,
                             };
 
                             if (newParentMessageId === "") {
@@ -1069,7 +1244,29 @@ const createChatActions = (
                                 set({ messageActivityLog: nextActivityLog });
                             }
 
+                            clearCurrentAbortController();
+
                             void get().loadConversationTree(finalChatId);
+                        },
+
+                        onGroundingSources: ({
+                            assistantMessageId,
+                            groundingSourcesUsed,
+                            groundingSourceStatus,
+                        }) => {
+                            const finalChatId = realChatId;
+                            get().updateChat(finalChatId, (chat) => ({
+                                ...chat,
+                                messages: chat.messages.map((message) =>
+                                    message.id === assistantMessageId
+                                        ? {
+                                              ...message,
+                                              groundingSourcesUsed,
+                                              groundingSourceStatus,
+                                          }
+                                        : message,
+                                ),
+                            }));
                         },
 
                         onError: (errorMessage) => {
@@ -1103,11 +1300,7 @@ const createChatActions = (
                     }));
                 }
             } finally {
-                const controllers = get().abortControllers;
-                const finalChatId = realChatId;
-                const newControllers = new Map(controllers);
-                newControllers.delete(finalChatId);
-                set({ abortControllers: newControllers });
+                clearCurrentAbortController();
             }
         },
 
@@ -1227,7 +1420,10 @@ const createChatActions = (
             });
         },
 
-        loadMessageFeedback: async (messageId: string): Promise<void> => {
+        loadMessageFeedback: async (
+            messageId: string,
+            source: "chat" | "chats" = "chat",
+        ): Promise<void> => {
             if (messageId.startsWith("error-")) {
                 return;
             }
@@ -1242,7 +1438,11 @@ const createChatActions = (
             set({ messageFeedbackLoading: loading });
 
             try {
-                const list = await apiFetchMessageFeedback(api, messageId);
+                const list = await apiFetchMessageFeedback(
+                    api,
+                    messageId,
+                    source,
+                );
 
                 const next = new Map(get().messageFeedback);
                 next.set(messageId, list);
@@ -1287,6 +1487,7 @@ const createChatActions = (
             messageId: string,
             rating: Rating,
             text?: string,
+            source: "chat" | "chats" = "chat",
         ): Promise<void> => {
             if (messageId.startsWith("error-")) {
                 return;
@@ -1297,10 +1498,15 @@ const createChatActions = (
             set({ messageFeedbackLoading: loading });
 
             try {
-                const saved = await apiSubmitMessageFeedback(api, messageId, {
-                    rating,
-                    text,
-                });
+                const saved = await apiSubmitMessageFeedback(
+                    api,
+                    messageId,
+                    {
+                        rating,
+                        text,
+                    },
+                    source,
+                );
 
                 const next = new Map(get().messageFeedback);
                 const existing = next.get(messageId) ?? [];
@@ -1319,7 +1525,10 @@ const createChatActions = (
             }
         },
 
-        removeMessageFeedback: async (messageId: string): Promise<void> => {
+        removeMessageFeedback: async (
+            messageId: string,
+            source: "chat" | "chats" = "chat",
+        ): Promise<void> => {
             if (messageId.startsWith("error-")) {
                 return;
             }
@@ -1337,7 +1546,11 @@ const createChatActions = (
             set({ messageFeedbackLoading: loading });
 
             try {
-                await apiDeleteMessageFeedback(api, currentUserFeedback.id);
+                await apiDeleteMessageFeedback(
+                    api,
+                    currentUserFeedback.id,
+                    source,
+                );
                 const next = new Map(get().messageFeedback);
                 const updatedList = feedbackList.filter(
                     (item) => !item.is_current_user,
@@ -1355,10 +1568,13 @@ const createChatActions = (
     };
 };
 
-export const createChatStore = (api: AuthenticatedApi): ChatStore =>
+export const createChatStore = (
+    api: AuthenticatedApi,
+    options: ChatStoreOptions = {},
+): ChatStore =>
     createStore<ChatStoreState>()(
         subscribeWithSelector((set, get) => ({
             ...createInitialChatState(),
-            ...createChatActions(api, set, get),
+            ...createChatActions(api, set, get, options),
         })),
     );

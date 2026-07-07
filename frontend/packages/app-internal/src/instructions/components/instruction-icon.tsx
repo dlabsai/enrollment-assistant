@@ -12,7 +12,7 @@ export const InstructionIcon = ({
 
     const classes = "size-4 shrink-0";
 
-    if (name.includes("chatbot") || name.includes("generic")) {
+    if (name.includes("chatbot") || name.includes("demo")) {
         return <Bot className={classes} />;
     }
     if (name.includes("guardrail")) {

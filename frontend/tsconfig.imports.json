@@ -1,6 +1,5 @@
 {
     "compilerOptions": {
-        "baseUrl": ".",
         "paths": {
             "@va/shared/*": ["packages/shared/src/*"],
             "@va/shared/vite": ["packages/shared/src/vite.ts"],

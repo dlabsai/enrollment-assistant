@@ -1,11 +1,15 @@
 """Report classes for evaluation results."""
 
+import re
 import statistics
-from collections.abc import Sequence
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any, cast
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
 
 # ANSI color codes
 _GREEN = "\033[92m"
@@ -16,7 +20,7 @@ _BOLD = "\033[1m"
 _RESET = "\033[0m"
 
 # Fields to exclude from report output (e.g., system_prompt is too verbose)
-_EXCLUDED_OUTPUT_FIELDS = {"system_prompt"}
+_EXCLUDED_OUTPUT_FIELDS = {"system_prompt", "retrieved_tool_context"}
 
 # Threshold for inline vs code block formatting in markdown
 _INLINE_VALUE_MAX_LENGTH = 100
@@ -79,6 +83,8 @@ class RunResult[OutputT]:
         default_factory=lambda: {}  # noqa: PIE807
     )
     error: str | None = None
+    otel_trace_id: str | None = None
+    otel_span_id: str | None = None
 
 
 @dataclass
@@ -131,7 +137,7 @@ class ReportCaseStats:
     pass_rate: float = 0.0
 
     @classmethod
-    def from_run_results(cls, results: Sequence[RunResult[Any]]) -> "ReportCaseStats":
+    def from_run_results(cls, results: Sequence[RunResult[Any]]) -> ReportCaseStats:
         """Calculate statistics from a list of run results."""
         n = len(results)
         if n == 0:
@@ -393,25 +399,17 @@ class EvaluationReport[InputsT, OutputT, MetadataT]:
 
             print()
 
-    def write_report(self, output_dir: str | Path = "reports") -> Path:
-        """Write a markdown report file with summary and failed run details.
+    def report_id(self, generated_at: datetime) -> str:
+        """Return a stable opaque identifier for structured report APIs."""
+        timestamp = generated_at.astimezone(UTC).strftime("%Y%m%d-%H%M%S-%f")
+        slug = re.sub(r"[^a-z0-9]+", "-", self.name.lower()).strip("-") or "eval"
+        return f"eval-{slug}-{timestamp}"
 
-        Args:
-            output_dir: Directory to write the report to.
-
-        Returns:
-            Path to the written report file.
-
-        """
-        output_path = Path(output_dir)
-        output_path.mkdir(parents=True, exist_ok=True)
-
-        timestamp = datetime.now(UTC).strftime("%Y-%m-%d_%H-%M-%S")
-        report_file = output_path / f"eval_{self.name}_{timestamp}.md"
-
+    def render_markdown(self, *, generated_at: datetime) -> str:
+        """Render the report as markdown without writing it as report storage."""
         lines: list[str] = []
         lines.append(f"# Evaluation Report: {self.name}\n")
-        lines.append(f"**Generated:** {datetime.now(UTC).isoformat()}\n")
+        lines.append(f"**Generated:** {generated_at.isoformat()}\n")
         lines.append(f"**Repeats:** {self.repeats} | **Concurrency:** {self.max_concurrency}\n")
 
         # Model configurations section
@@ -577,14 +575,35 @@ class EvaluationReport[InputsT, OutputT, MetadataT]:
                         lines.append("")
 
                     lines.append(f"**Duration:** {_fmt_num(run.duration, 3)}s\n")
+                    if run.otel_trace_id is not None:
+                        lines.append(f"**OTel Trace ID:** `{run.otel_trace_id}`\n")
+                    if run.otel_span_id is not None:
+                        lines.append(f"**OTel Span ID:** `{run.otel_span_id}`\n")
                     lines.append("---\n")
 
         if not has_failures:
             lines.append("*No failed runs.*\n")
 
-        # Write file
-        report_file.write_text("\n".join(lines))
-        print(f"{_GREEN}Report written to: {report_file}{_RESET}")
+        return "\n".join(lines)
+
+    def write_report(self, output_dir: str | Path = "reports", *, announce: bool = True) -> Path:
+        """Write a markdown report file with summary and failed run details.
+
+        Args:
+            output_dir: Directory to write the report to.
+            announce: Whether to print the written report path.
+
+        Returns:
+            Path to the written report file.
+
+        """
+        generated_at = datetime.now(UTC)
+        output_path = Path(output_dir)
+        output_path.mkdir(parents=True, exist_ok=True)
+        report_file = output_path / f"{self.report_id(generated_at)}.md"
+        report_file.write_text(self.render_markdown(generated_at=generated_at), encoding="utf-8")
+        if announce:
+            print(f"{_GREEN}Report written to: {report_file}{_RESET}")
         return report_file
 
     def _format_object_fields(
@@ -608,30 +627,29 @@ class EvaluationReport[InputsT, OutputT, MetadataT]:
             lines.append(f"**{section_name}:** None\n")
             return lines
 
+        def append_field(field_name: str, value: Any) -> None:
+            display_name = field_name.replace("_", " ").title()
+            if isinstance(value, str):
+                is_multiline_or_long = "\n" in value or len(value) > _INLINE_VALUE_MAX_LENGTH
+                if is_multiline_or_long:
+                    lines.append(f"**{display_name}:**\n")
+                    lines.append("```")
+                    lines.append(value)
+                    lines.append("```\n")
+                    return
+            lines.append(f"**{display_name}:** `{value}`\n")
+
         if hasattr(obj, "__dataclass_fields__"):
-            # It's a dataclass - format each field separately
-            for field_name in obj.__dataclass_fields__:
-                if field_name in exclude:
-                    continue
-                value = getattr(obj, field_name)
-                # Format field name nicely (e.g., test_case_id -> Test Case Id)
-                display_name = field_name.replace("_", " ").title()
-                if isinstance(value, str):
-                    is_multiline_or_long = "\n" in value or len(value) > _INLINE_VALUE_MAX_LENGTH
-                    if is_multiline_or_long:
-                        # Multi-line or long strings get code blocks
-                        lines.append(f"**{display_name}:**\n")
-                        lines.append("```")
-                        lines.append(value)
-                        lines.append("```\n")
-                    else:
-                        # Short strings inline
-                        lines.append(f"**{display_name}:** `{value}`\n")
-                else:
-                    # Non-string values inline
-                    lines.append(f"**{display_name}:** `{value}`\n")
+            field_names = cast(Mapping[str, Any], obj.__dataclass_fields__)
+            for field_name in field_names:
+                if field_name not in exclude:
+                    append_field(field_name, getattr(obj, field_name))
+        elif isinstance(obj, Mapping):
+            obj_mapping = cast(Mapping[str, Any], obj)
+            for field_name, value in obj_mapping.items():
+                if str(field_name) not in exclude:
+                    append_field(str(field_name), value)
         else:
-            # Not a dataclass, just show as-is
             lines.append(f"**{section_name}:**\n")
             lines.append("```")
             lines.append(str(obj))

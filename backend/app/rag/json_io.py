@@ -1,10 +1,13 @@
 import logging
 from collections.abc import Sequence
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 from pydantic import BaseModel, TypeAdapter
 
 from app.utils import ensure_dir
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 logger = logging.getLogger(__name__)
 

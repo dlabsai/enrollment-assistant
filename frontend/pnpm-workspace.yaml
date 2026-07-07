@@ -1,2 +1,7 @@
+minimumReleaseAge: 4320
+minimumReleaseAgeExclude:
+  - typescript-eslint
+  - "@typescript-eslint/*"
+
 packages:
   - "packages/*"

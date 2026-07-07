@@ -1,45 +1,61 @@
 # RAG Data Pipeline
 
-This document describes how to fetch and prepare RAG data for the backend.
+This backend ships with a repo-local Demo University Markdown corpus so build jobs never need external university source systems.
 
-## Fetching Source Data
+## Markdown corpus
 
-Run these commands to fetch raw data from external sources:
+The source Markdown lives under `app/rag/demo_corpus/` and includes:
+
+- `website/pages/*.md`
+- `website/programs/*.md`
+- `catalog/pages/*.md`
+- `catalog/programs/*.md`
+- `catalog/courses/*.md`
+- `training_materials/*.md`
+
+Regenerate the RAG source JSON files without touching the database:
 
 ```bash
-# Fetch WordPress content
-uv run -m app.rag.wordpress.cli
-
-## Transforming Data
-
-After fetching, transform the data for use in the RAG pipeline:
-
-```bash
-# Transform WordPress data
-uv run -m app.rag.transform.transform_wp_data
+uv run -m app.rag.demo_corpus.generate
 ```
 
-## Building the Database
+The generator writes the loader inputs under `app/rag/data/`:
 
-After transforming the data, build the search database by creating embeddings and populating the database:
+- `website_pages.json` for website pages
+- `website_programs.json` for website program pages
+- `catalog_pages.json`
+- `catalog_programs.json`
+- `catalog_courses.json`
+- `training_materials.json`
+
+## Building the database
+
+The normal build pipeline writes the Markdown corpus first, then chunks and embeds the documents:
 
 ```bash
-# Build the search database (creates embeddings via Azure OpenAI)
+uv run -m app.rag.cli sync
+uv run -m app.rag.cli sync --force-rebuild
+```
+
+Direct build remains available and also refreshes the Markdown corpus before reading source JSON:
+
+```bash
 uv run -m app.rag.build
-
-# Force a full rebuild (deletes all documents and recreates from scratch)
-uv run -m app.rag.build --force-rebuild
-
-# Preview changes without committing to database
 uv run -m app.rag.build --dry-run
 ```
 
-## Order of Operations
+## Order of operations
 
-1. Fetch WordPress content (`wordpress.cli`)
-2. Transform WordPress data (`transform_wp_data`)
-3. Build the search database (`build`)
+1. Write Demo University Markdown corpus (`demo_corpus.generate`)
+2. Build or incrementally update the search database (`build_search_db`)
+3. Refresh guardrail URL registries as part of the successful build
 
-## Note for Testing
+## Mermaid
 
-Integration tests automatically build their own database in a persistent Docker container. You only need to ensure the source data files exist (steps 1-4 above). See the [Testing Guide](../../tests/README.md) for details.
+```mermaid
+flowchart TD
+    Markdown[Markdown corpus] --> JSON[RAG source JSON]
+    JSON --> Build[build_search_db]
+    Build --> DB[(document + chunks + embeddings)]
+    DB --> Tools[Chat retrieval tools]
+```

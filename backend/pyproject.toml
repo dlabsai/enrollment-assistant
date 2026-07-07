@@ -2,34 +2,38 @@
 name = "app"
 version = "0.0.0"
 description = ""
-requires-python = ">=3.13"
+requires-python = ">=3.14"
 dependencies = [
     "alembic",
     "apscheduler",
     "beautifulsoup4",
     "devtools",
-    "fastapi[standard]",
+    "fastapi[standard-no-fastapi-cloud-cli]",
     "httpx",
-    "langchain-text-splitters",
-    "logfire[psycopg,fastapi,requests,sqlalchemy]",
-    "lxml",
+    "jinja2",
+    "opentelemetry-api",
+    "opentelemetry-exporter-otlp-proto-http",
+    "opentelemetry-instrumentation",
+    "opentelemetry-sdk",
     "markdownify",
-    "office365-rest-python-client",
+    "Babel",
     "passlib[bcrypt]",
     "pgvector",
     "psycopg[binary]",
+    "pwdlib[argon2]",
     "pydantic",
-    "pydantic-ai-slim[openai,openrouter]",
+    "pydantic-ai-slim[openai]",
     "pydantic-evals",
     "pydantic-settings",
-    "pyjwt",
-    "python-docx",
     "python-dotenv",
     "python-slugify",
     "rich",
     "sqlalchemy",
     "tenacity",
     "tiktoken",
+    "joserfc",
+    "scikit-learn>=1.8.0",
+    "openpyxl",
 ]
 
 [build-system]
@@ -38,18 +42,17 @@ build-backend = "hatchling.build"
 
 [dependency-groups]
 dev = [
-    "docker",
-    "lxml-stubs",
     "pyright",
     "pytest",
     "pytest-asyncio",
     "ruff",
     "testcontainers[postgres]",
     "types-beautifulsoup4",
-    "types-docker",
     "types-passlib",
-    "vulture",
 ]
+
+[tool.uv]
+exclude-newer = "3 days"
 
 [tool.ruff]
 line-length = 100
@@ -127,6 +130,3 @@ filterwarnings = [
     "ignore:You should use `LoggerProvider` instead:DeprecationWarning",
     "ignore:You should use `ProxyLoggerProvider` instead:DeprecationWarning",
 ]
-
-[tool.logfire]
-ignore_no_config = true

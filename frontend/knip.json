@@ -1,12 +1,9 @@
 {
-    "$schema": "https://unpkg.com/knip@5/schema.json",
+    "$schema": "https://unpkg.com/knip@6/schema.json",
+    "ignoreDependencies": ["react-grab"],
     "workspaces": {
         "packages/app-public": {
-            "entry": [
-                "src/main.tsx",
-                "src/components/loading-indicator.tsx",
-                "src/types/dom.d.ts"
-            ],
+            "entry": ["src/components/loading-indicator.tsx", "src/types/dom.d.ts"],
             "project": ["src/**/*.{ts,tsx}"],
             "paths": {
                 "@va/shared/*": ["../shared/src/*"],
@@ -15,7 +12,6 @@
             }
         },
         "packages/app-internal": {
-            "entry": ["src/main.tsx"],
             "project": ["src/**/*.{ts,tsx}"],
             "ignore": ["src/components/ui/**"],
             "paths": {

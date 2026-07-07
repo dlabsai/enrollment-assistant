@@ -1,0 +1,195 @@
+[
+    {
+        "id": "6001",
+        "title": "Accounting, BS",
+        "url": "https://catalog.demo-university.example.edu/programs/accounting-bs",
+        "markdown_content": "# Accounting, BS\n\n**School:** School of Business\n\n**Total credits:** 120\n\n**Format:** Online or campus\n\nThe Accounting, BS program requires business core, accounting major courses, general education, and electives. Students should confirm transfer applicability with advising.\n\n## Core courses\n\n- [ACC 210 - Financial Accounting](#)\n- [ACC 315 - Cost and Managerial Accounting](#)\n- [ACC 410 - Auditing Concepts](#)\n- [BUS 220 - Business Law and Ethics](#)\n- [BUS 310 - Business Analytics](#)\n",
+        "created": "2026-01-15T00:00:00Z",
+        "updated": "2026-01-15T00:00:00Z",
+        "school": "School of Business",
+        "courses": {
+            "Core": [
+                "ACC 210",
+                "ACC 315",
+                "ACC 410",
+                "BUS 220",
+                "BUS 310"
+            ]
+        }
+    },
+    {
+        "id": "6002",
+        "title": "Artificial Intelligence, BS",
+        "url": "https://catalog.demo-university.example.edu/programs/artificial-intelligence-bs",
+        "markdown_content": "# Artificial Intelligence, BS\n\n**School:** School of Technology\n\n**Total credits:** 120\n\n**Format:** Online or campus\n\nThe Artificial Intelligence, BS program requires computing core, mathematics, applied AI coursework, general education, and electives.\n\n## Core courses\n\n- [CS 201 - Programming for Problem Solving](#)\n- [CS 250 - Data Structures](#)\n- [AI 101 - Foundations of Artificial Intelligence](#)\n- [AI 240 - Applied Machine Learning](#)\n- [AI 360 - Responsible AI Systems](#)\n",
+        "created": "2026-01-15T00:00:00Z",
+        "updated": "2026-01-15T00:00:00Z",
+        "school": "School of Technology",
+        "courses": {
+            "Core": [
+                "CS 201",
+                "CS 250",
+                "AI 101",
+                "AI 240",
+                "AI 360"
+            ]
+        }
+    },
+    {
+        "id": "6003",
+        "title": "Business Administration, BS",
+        "url": "https://catalog.demo-university.example.edu/programs/business-administration-bs",
+        "markdown_content": "# Business Administration, BS\n\n**School:** School of Business\n\n**Total credits:** 120\n\n**Format:** Online or campus\n\nThe Business Administration, BS program includes business core, general education, electives, and applied management coursework.\n\n## Core courses\n\n- [BUS 220 - Business Law and Ethics](#)\n- [BUS 310 - Business Analytics](#)\n- [MKT 330 - Digital Campaign Analytics](#)\n- [BUS 410 - Operations and Process Improvement](#)\n- [BUS 480 - Strategic Management Capstone](#)\n",
+        "created": "2026-01-15T00:00:00Z",
+        "updated": "2026-01-15T00:00:00Z",
+        "school": "School of Business",
+        "courses": {
+            "Core": [
+                "BUS 220",
+                "BUS 310",
+                "MKT 330",
+                "BUS 410",
+                "BUS 480"
+            ]
+        }
+    },
+    {
+        "id": "6004",
+        "title": "Business Administration, MBA",
+        "url": "https://catalog.demo-university.example.edu/programs/business-administration-mba",
+        "markdown_content": "# Business Administration, MBA\n\n**School:** School of Business\n\n**Total credits:** 36\n\n**Format:** Online\n\nThe MBA program includes graduate business core courses and a capstone. Students normally take one course per accelerated graduate term unless advising approves a different load.\n\n## Core courses\n\n- [BUS 520 - Strategic Management](#)\n- [BUS 540 - Managerial Finance](#)\n- [BUS 560 - Organizational Leadership](#)\n- [MKT 610 - Marketing Strategy](#)\n- [BUS 650 - Analytics for Executives](#)\n- [BUS 690 - MBA Capstone](#)\n",
+        "created": "2026-01-15T00:00:00Z",
+        "updated": "2026-01-15T00:00:00Z",
+        "school": "School of Business",
+        "courses": {
+            "Core": [
+                "BUS 520",
+                "BUS 540",
+                "BUS 560",
+                "MKT 610",
+                "BUS 650",
+                "BUS 690"
+            ]
+        }
+    },
+    {
+        "id": "6005",
+        "title": "Clinical Mental Health Counseling, MS",
+        "url": "https://catalog.demo-university.example.edu/programs/clinical-mental-health-counseling-ms",
+        "markdown_content": "# Clinical Mental Health Counseling, MS\n\n**School:** School of Health and Human Services\n\n**Total credits:** 60\n\n**Format:** Online with synchronous and field-experience requirements\n\nThe Clinical Mental Health Counseling, MS program follows a structured sequence. Students complete foundational counseling courses before practicum and internship courses.\n\n## Core courses\n\n- [CMHC 500 - Professional Counseling Orientation](#)\n- [CMHC 520 - Counseling Theories](#)\n- [CMHC 540 - Assessment and Treatment Planning](#)\n- [CMHC 590 - Counseling Practicum](#)\n- [CMHC 690 - Counseling Internship](#)\n\n## Licensure disclosure\n\nEducational requirements for counseling licensure vary by state. Students must review the state authorization and licensure disclosure page for their intended state.\n",
+        "created": "2026-01-15T00:00:00Z",
+        "updated": "2026-01-15T00:00:00Z",
+        "school": "School of Health and Human Services",
+        "courses": {
+            "Core": [
+                "CMHC 500",
+                "CMHC 520",
+                "CMHC 540",
+                "CMHC 590",
+                "CMHC 690"
+            ]
+        }
+    },
+    {
+        "id": "6006",
+        "title": "Cybersecurity, BS",
+        "url": "https://catalog.demo-university.example.edu/programs/cybersecurity-bs",
+        "markdown_content": "# Cybersecurity, BS\n\n**School:** School of Technology\n\n**Total credits:** 120\n\n**Format:** Online or campus\n\nThe Cybersecurity, BS program includes computing foundations, security coursework, general education, and applied projects.\n\n## Core courses\n\n- [CS 201 - Programming for Problem Solving](#)\n- [CS 250 - Data Structures](#)\n- [CYB 210 - Network Defense](#)\n- [CYB 330 - Security Governance and Risk](#)\n- [CYB 430 - Incident Response Lab](#)\n",
+        "created": "2026-01-15T00:00:00Z",
+        "updated": "2026-01-15T00:00:00Z",
+        "school": "School of Technology",
+        "courses": {
+            "Core": [
+                "CS 201",
+                "CS 250",
+                "CYB 210",
+                "CYB 330",
+                "CYB 430"
+            ]
+        }
+    },
+    {
+        "id": "6007",
+        "title": "Data Analytics Graduate Certificate",
+        "url": "https://catalog.demo-university.example.edu/programs/data-analytics-graduate-certificate",
+        "markdown_content": "# Data Analytics Graduate Certificate\n\n**School:** School of Technology\n\n**Total credits:** 15\n\n**Format:** Online\n\nThe Data Analytics Graduate Certificate includes focused graduate coursework in data preparation, analysis, visualization, and responsible reporting.\n\n## Core courses\n\n- [DA 510 - Data Preparation and Quality](#)\n- [DA 520 - Applied Statistics for Analytics](#)\n- [DA 620 - Data Visualization and Storytelling](#)\n- [BUS 650 - Analytics for Executives](#)\n",
+        "created": "2026-01-15T00:00:00Z",
+        "updated": "2026-01-15T00:00:00Z",
+        "school": "School of Technology",
+        "courses": {
+            "Core": [
+                "DA 510",
+                "DA 520",
+                "DA 620",
+                "BUS 650"
+            ]
+        }
+    },
+    {
+        "id": "6008",
+        "title": "Human Services, BS",
+        "url": "https://catalog.demo-university.example.edu/programs/human-services-bs",
+        "markdown_content": "# Human Services, BS\n\n**School:** School of Health and Human Services\n\n**Total credits:** 120\n\n**Format:** Online\n\nThe Human Services, BS program includes general education, human services core, community-resource coursework, and electives.\n\n## Core courses\n\n- [HSV 210 - Introduction to Human Services](#)\n- [HSV 320 - Case Planning and Documentation](#)\n- [HSV 420 - Community Program Evaluation](#)\n- [PSY 230 - Lifespan Development](#)\n",
+        "created": "2026-01-15T00:00:00Z",
+        "updated": "2026-01-15T00:00:00Z",
+        "school": "School of Health and Human Services",
+        "courses": {
+            "Core": [
+                "HSV 210",
+                "HSV 320",
+                "HSV 420",
+                "PSY 230"
+            ]
+        }
+    },
+    {
+        "id": "6009",
+        "title": "Public Health, MPH",
+        "url": "https://catalog.demo-university.example.edu/programs/public-health-mph",
+        "markdown_content": "# Public Health, MPH\n\n**School:** School of Health and Human Services\n\n**Total credits:** 42\n\n**Format:** Online\n\nThe Public Health, MPH program includes epidemiology, biostatistics, policy, program planning, evaluation, and an applied capstone.\n\n## Core courses\n\n- [PH 510 - Public Health Systems](#)\n- [PH 520 - Epidemiology](#)\n- [PH 620 - Program Planning and Evaluation](#)\n- [PH 690 - Public Health Capstone](#)\n",
+        "created": "2026-01-15T00:00:00Z",
+        "updated": "2026-01-15T00:00:00Z",
+        "school": "School of Health and Human Services",
+        "courses": {
+            "Core": [
+                "PH 510",
+                "PH 520",
+                "PH 620",
+                "PH 690"
+            ]
+        }
+    },
+    {
+        "id": "6010",
+        "title": "Software Engineering, MS",
+        "url": "https://catalog.demo-university.example.edu/programs/software-engineering-ms",
+        "markdown_content": "# Software Engineering, MS\n\n**School:** School of Technology\n\n**Total credits:** 30\n\n**Format:** Online\n\nThe Software Engineering, MS program includes architecture, quality engineering, cloud systems, secure development, and a capstone project.\n\n## Core courses\n\n- [SE 501 - Software Architecture](#)\n- [SE 540 - Quality Engineering](#)\n- [SE 610 - Cloud Systems Design](#)\n- [SE 690 - Software Engineering Capstone](#)\n",
+        "created": "2026-01-15T00:00:00Z",
+        "updated": "2026-01-15T00:00:00Z",
+        "school": "School of Technology",
+        "courses": {
+            "Core": [
+                "SE 501",
+                "SE 540",
+                "SE 610",
+                "SE 690"
+            ]
+        }
+    },
+    {
+        "id": "6011",
+        "title": "Teaching English Language Learners Graduate Certificate",
+        "url": "https://catalog.demo-university.example.edu/programs/teaching-english-language-learners-graduate-certificate",
+        "markdown_content": "# Teaching English Language Learners Graduate Certificate\n\n**School:** School of Education\n\n**Total credits:** 15\n\n**Format:** Online\n\nThe Teaching English Language Learners Graduate Certificate includes coursework in language development, inclusive instruction, assessment, and family engagement.\n\n## Core courses\n\n- [EDU 560 - Language Learning Methods](#)\n- [EDU 575 - Assessment for Multilingual Learners](#)\n- [EDU 590 - Family and Community Engagement](#)\n",
+        "created": "2026-01-15T00:00:00Z",
+        "updated": "2026-01-15T00:00:00Z",
+        "school": "School of Education",
+        "courses": {
+            "Core": [
+                "EDU 560",
+                "EDU 575",
+                "EDU 590"
+            ]
+        }
+    }
+]

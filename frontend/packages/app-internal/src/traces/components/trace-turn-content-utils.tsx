@@ -1,6 +1,7 @@
 import { Streamdown } from "@va/shared/components/streamdown";
 import type { JSX } from "react";
 
+import { formatLocaleNumber } from "../../lib/number-format";
 import { isRecord } from "../lib/trace-utils";
 
 export const stringifyValue = (value: unknown): string => {
@@ -13,10 +14,36 @@ export const stringifyValue = (value: unknown): string => {
     if (typeof value === "string") {
         return value;
     }
-    if (typeof value === "number" || typeof value === "boolean") {
+    if (typeof value === "number") {
+        return Number.isFinite(value)
+            ? formatLocaleNumber(value, { maximumFractionDigits: 4 })
+            : String(value);
+    }
+    if (typeof value === "boolean") {
         return String(value);
     }
     return JSON.stringify(value, undefined, 2);
+};
+
+const isIdentifierKey = (key: string): boolean => {
+    const normalizedKey = key.toLowerCase();
+    return (
+        normalizedKey === "id" ||
+        normalizedKey === "ids" ||
+        normalizedKey.endsWith("_id") ||
+        normalizedKey.endsWith("_ids")
+    );
+};
+
+export const stringifyFieldValue = (key: string, value: unknown): string => {
+    if (
+        typeof value === "number" &&
+        Number.isFinite(value) &&
+        isIdentifierKey(key)
+    ) {
+        return String(value);
+    }
+    return stringifyValue(value);
 };
 
 export const renderStructuredValue = (value: unknown): JSX.Element => {
@@ -32,7 +59,7 @@ export const renderStructuredValue = (value: unknown): JSX.Element => {
                             {key}
                         </div>
                         <div className="text-muted-foreground whitespace-pre-wrap">
-                            {stringifyValue(entry)}
+                            {stringifyFieldValue(key, entry)}
                         </div>
                     </div>
                 ))}

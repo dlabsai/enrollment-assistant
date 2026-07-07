@@ -4,34 +4,301 @@ import {
     ResizablePanelGroup,
 } from "@va/shared/components/ui/resizable";
 import { Toggle } from "@va/shared/components/ui/toggle";
-import { type JSX, useMemo, useState } from "react";
+import { Fragment, type JSX, useEffect, useMemo, useRef, useState } from "react";
 
 import {
+    formatEstimatedUsdCost,
+    formatLocaleNumber,
+} from "../../lib/number-format";
+import {
+    getReadableProjectedDataEntries,
+    type ProjectedDataValueType,
+    sortProjectedOverviewItemsForDisplay,
+} from "../lib/trace-projection-utils";
+import {
+    formatDurationMs,
     isRecord,
     parseJsonRecursively,
     type TraceMessage,
     type TraceMessagePart,
 } from "../lib/trace-utils";
-import type { TraceSpan } from "../types";
-import { JsonValue } from "./trace-turn-content";
+import type { TraceOverviewItem, TraceSpan } from "../types";
+import { ContentValue } from "./trace-turn-content";
 import {
     renderMarkdownValue,
     renderPlainTextValue,
     renderStructuredValue,
+    stringifyFieldValue,
+    stringifyValue,
 } from "./trace-turn-content-utils";
 import {
     buildMessageKey,
     buildMessagePartKey,
     getStringField,
 } from "./trace-turn-message-utils";
+import { formatOffsetMs } from "./trace-turn-metrics-utils";
 import { buildSpanOverviewModel } from "./trace-turn-summary-model";
 
 interface TraceTurnSummaryProps {
+    overview: TraceOverviewItem[];
+    selectedSpanId?: string;
     spans: TraceSpan[];
     traceStart: number | undefined;
     traceEnd: number | undefined;
-    summaryLayout?: "stack" | "split";
 }
+
+interface ProjectedDetailRow {
+    key: string;
+    label: string;
+    value: unknown;
+    valueType: ProjectedDataValueType | "auto";
+    markdownValue?: string;
+}
+
+const isJsonLikeProjectedString = (value: string): boolean => {
+    const trimmed = value.trim();
+    return trimmed.startsWith("{") || trimmed.startsWith("[");
+};
+
+const isStructuredProjectedValue = (value: unknown): boolean =>
+    Array.isArray(value) ||
+    isRecord(value) ||
+    (typeof value === "string" && isJsonLikeProjectedString(value));
+
+const getNumberValue = (value: unknown): number | undefined =>
+    typeof value === "number" && Number.isFinite(value) ? value : undefined;
+
+const getNumberField = (
+    value: unknown,
+    key: string,
+): number | undefined => {
+    if (!isRecord(value)) {
+        return undefined;
+    }
+    return getNumberValue(value[key]);
+};
+
+const formatTokenWithCost = (
+    tokens: string | number,
+    cost: number | undefined,
+): string => {
+    const tokenText =
+        typeof tokens === "number" ? formatLocaleNumber(tokens) : tokens;
+    return cost === undefined
+        ? tokenText
+        : `${tokenText} · ${formatEstimatedUsdCost(cost)}`;
+};
+
+const renderProjectedScalarValue = (key: string, value: unknown): JSX.Element => (
+    <div className="text-muted-foreground text-xs break-words whitespace-pre-wrap">
+        {stringifyFieldValue(key, value)}
+    </div>
+);
+
+const renderProjectedValue = (key: string, value: unknown, formatted: boolean): JSX.Element => {
+    if (isStructuredProjectedValue(value)) {
+        return (
+            <ContentValue
+                formatted={formatted}
+                value={value}
+            />
+        );
+    }
+    return renderProjectedScalarValue(key, value);
+};
+
+const renderProjectedMarkdownCard = (
+    value: string,
+    formatted: boolean,
+): JSX.Element => (
+    <div className="border-muted min-w-0 rounded-md border px-3 py-2 text-sm">
+        {formatted ? renderMarkdownValue(value) : renderPlainTextValue(value)}
+    </div>
+);
+
+const renderProjectedDetailValue = (
+    row: ProjectedDetailRow,
+    formatted: boolean,
+): JSX.Element => {
+    if (row.valueType === "markdown") {
+        if (formatted) {
+            const markdownValue =
+                row.markdownValue ??
+                (typeof row.value === "string" ? row.value : undefined);
+            if (markdownValue !== undefined) {
+                return renderProjectedMarkdownCard(markdownValue, true);
+            }
+        }
+        if (typeof row.value === "string") {
+            return renderProjectedMarkdownCard(row.value, false);
+        }
+        return renderProjectedValue(row.key, row.value, false);
+    }
+    if (row.valueType === "scalar") {
+        return renderProjectedScalarValue(row.key, row.value);
+    }
+    return renderProjectedValue(row.key, row.value, formatted);
+};
+
+const ProjectedDetailsGrid = ({
+    formatted,
+    rows,
+}: {
+    formatted: boolean;
+    rows: ProjectedDetailRow[];
+}): JSX.Element => (
+    <div className="grid grid-cols-[140px_minmax(0,1fr)] items-start gap-x-3 gap-y-0 text-sm leading-tight">
+        {rows.map((row) => (
+            <Fragment key={row.key}>
+                <div className="text-xs font-semibold">{row.label}</div>
+                <div className="min-w-0">
+                    {renderProjectedDetailValue(row, formatted)}
+                </div>
+            </Fragment>
+        ))}
+    </div>
+);
+
+interface BackendOverviewRow {
+    item: TraceOverviewItem;
+    offsetPct: number;
+    widthPct: number;
+    start: number;
+    depth: number;
+    value: string;
+    barClass: string;
+}
+
+const overviewStartMs = (item: TraceOverviewItem): number | undefined => {
+    if (item.start_time === null) {
+        return undefined;
+    }
+    const value = Date.parse(item.start_time);
+    return Number.isNaN(value) ? undefined : value;
+};
+
+const formatOverviewDuration = (durationMs: number | null): string => formatDurationMs(durationMs);
+
+const getStandardModelValue = (item: TraceOverviewItem): string | undefined => {
+    if (item.type !== "agent" && item.type !== "llm") {
+        return undefined;
+    }
+    const {model} = item.data;
+    return typeof model === "string" && model.trim() !== ""
+        ? model
+        : undefined;
+};
+
+const overviewBarClass = (item: TraceOverviewItem): string => {
+    switch (item.type) {
+        case "agent":
+        case "llm": {
+            return "bg-chart-1";
+        }
+        case "tool": {
+            return "bg-chart-2";
+        }
+        case "retrieval":
+        case "embedding": {
+            return "bg-chart-3";
+        }
+        case "url_guardrails": {
+            return "bg-chart-4";
+        }
+        case "conversation_turn": {
+            return "bg-chart-5";
+        }
+        case "evaluation": {
+            return "bg-chart-5";
+        }
+        case "evaluation_case": {
+            return "bg-chart-2";
+        }
+        case "evaluation_result": {
+            const scoreLabel = item.data.score_label;
+            if (scoreLabel === "fail") {
+                return "bg-destructive";
+            }
+            if (scoreLabel === "pass") {
+                return "bg-chart-3";
+            }
+            return "bg-chart-4";
+        }
+        case "other": {
+            return "bg-muted-foreground";
+        }
+        default: {
+            return "bg-muted-foreground";
+        }
+    }
+};
+
+const buildOverviewDepth = (
+    item: TraceOverviewItem,
+    itemBySpanId: Map<string, TraceOverviewItem>,
+): number => {
+    let depth = 0;
+    let parentId = item.parent_span_id;
+    const seen = new Set<string>();
+    while (typeof parentId === "string" && parentId.trim() !== "") {
+        if (seen.has(parentId)) {
+            return depth;
+        }
+        seen.add(parentId);
+        const parent = itemBySpanId.get(parentId);
+        if (parent === undefined) {
+            return depth;
+        }
+        depth += 1;
+        parentId = parent.parent_span_id;
+    }
+    return depth;
+};
+
+const buildBackendOverviewRows = ({
+    overview,
+    traceEnd,
+    traceStart,
+}: {
+    overview: TraceOverviewItem[];
+    traceStart: number | undefined;
+    traceEnd: number | undefined;
+}): BackendOverviewRow[] => {
+    const rangeDuration =
+        traceStart !== undefined && traceEnd !== undefined
+            ? Math.max(traceEnd - traceStart, 1)
+            : undefined;
+    const orderedOverview = sortProjectedOverviewItemsForDisplay(overview);
+    const itemBySpanId = new Map(overview.map((item) => [item.span_id, item]));
+    return orderedOverview
+        .map((item) => {
+            const start = overviewStartMs(item) ?? traceStart ?? 0;
+            const duration = item.duration_ms ?? 0;
+            const offsetPct =
+                rangeDuration === undefined || traceStart === undefined
+                    ? 0
+                    : Math.max(
+                          0,
+                          Math.min(
+                              100,
+                              ((start - traceStart) / rangeDuration) * 100,
+                          ),
+                      );
+            const widthPct =
+                rangeDuration === undefined
+                    ? 100
+                    : Math.max(0.5, Math.min(100, (duration / rangeDuration) * 100));
+            return {
+                item,
+                offsetPct,
+                widthPct,
+                start,
+                depth: buildOverviewDepth(item, itemBySpanId),
+                value: formatOverviewDuration(item.duration_ms),
+                barClass: overviewBarClass(item),
+            };
+        });
+};
 
 const resolveToolName = (raw: Record<string, unknown> | undefined): string => {
     if (!raw) {
@@ -96,10 +363,47 @@ const renderToolResultPart = (part: TraceMessagePart): JSX.Element => {
     );
 };
 
-const renderSummaryToolValue = (value: unknown): JSX.Element => (
-    <div className="bg-muted/30 rounded-md border p-2 text-xs">
-        <JsonValue value={parseJsonRecursively(value)} />
-    </div>
+const parseToolValue = (value: unknown): unknown => parseJsonRecursively(value);
+
+const renderToolKeyValue = (value: unknown): JSX.Element => {
+    const parsed = parseToolValue(value);
+    if (!isRecord(parsed)) {
+        return (
+            <div className="text-muted-foreground text-xs whitespace-pre-wrap">
+                {stringifyValue(parsed)}
+            </div>
+        );
+    }
+
+    return (
+        <div className="grid grid-cols-[160px_1fr] gap-x-3 gap-y-2 text-xs">
+            {Object.entries(parsed).map(([key, entry]) => (
+                <div
+                    className="contents"
+                    key={key}
+                >
+                    <div className="font-semibold break-words">{key}</div>
+                    <div className="text-muted-foreground break-words whitespace-pre-wrap">
+                        {stringifyFieldValue(key, entry)}
+                    </div>
+                </div>
+            ))}
+        </div>
+    );
+};
+
+const renderSummaryToolArguments = (value: unknown): JSX.Element => (
+    <div className="bg-muted/30 rounded-md border p-3">{renderToolKeyValue(value)}</div>
+);
+
+const renderSummaryToolResultValue = (
+    value: unknown,
+    formatted: boolean,
+): JSX.Element => (
+    <ContentValue
+        formatted={formatted}
+        value={value}
+    />
 );
 
 const renderSummaryToolCallPart = (
@@ -122,16 +426,17 @@ const renderSummaryToolCallPart = (
     return showToolName ? (
         <div className="space-y-1">
             <div className="text-xs font-semibold">{name}</div>
-            {renderSummaryToolValue(argumentsValue)}
+            {renderSummaryToolArguments(argumentsValue)}
         </div>
     ) : (
-        renderSummaryToolValue(argumentsValue)
+        renderSummaryToolArguments(argumentsValue)
     );
 };
 
 const renderSummaryToolResultPart = (
     part: TraceMessagePart,
     showToolName: boolean,
+    formatted: boolean,
 ): JSX.Element => {
     const raw = isRecord(part.raw) ? part.raw : undefined;
     const name = resolveToolName(raw);
@@ -150,15 +455,17 @@ const renderSummaryToolResultPart = (
     return showToolName ? (
         <div className="space-y-1">
             <div className="text-xs font-semibold">{name}</div>
-            {renderSummaryToolValue(resultValue)}
+            {renderSummaryToolResultValue(resultValue, formatted)}
         </div>
     ) : (
-        renderSummaryToolValue(resultValue)
+        renderSummaryToolResultValue(resultValue, formatted)
     );
 };
 
-const renderSummaryToolMessage = (message: TraceMessage): JSX.Element =>
-    renderSummaryToolValue(message.content);
+const renderSummaryToolMessage = (
+    message: TraceMessage,
+    formatted: boolean,
+): JSX.Element => renderSummaryToolResultValue(message.content, formatted);
 
 const renderSummaryMessageContent = (
     message: TraceMessage,
@@ -169,7 +476,7 @@ const renderSummaryMessageContent = (
     if (parts.length === 0) {
         if (message.role === "tool") {
             return formatted
-                ? renderSummaryToolMessage(message)
+                ? renderSummaryToolMessage(message, formatted)
                 : renderStructuredValue(parseJsonRecursively(message.content));
         }
         return formatted
@@ -203,10 +510,10 @@ const renderSummaryMessageContent = (
                                     <div className="text-muted-foreground text-xs uppercase">
                                         {part.type}
                                     </div>
-                                    {renderSummaryToolResultPart(part, true)}
+                                    {renderSummaryToolResultPart(part, true, formatted)}
                                 </>
                             ) : (
-                                renderSummaryToolResultPart(part, false)
+                                renderSummaryToolResultPart(part, false, formatted)
                             )
                         ) : (
                             <>
@@ -239,17 +546,44 @@ const renderSummaryMessageContent = (
 };
 
 export const TraceTurnSummary = ({
+    overview,
+    selectedSpanId,
     spans,
     traceStart,
     traceEnd,
-    summaryLayout = "stack",
 }: TraceTurnSummaryProps): JSX.Element => {
-    const [summaryFormatted, setSummaryFormatted] = useState(
-        () => summaryLayout === "split",
+    const [summaryFormatted, setSummaryFormatted] = useState(true);
+    const [selectedTimingSpanId, setSelectedTimingSpanId] = useState(selectedSpanId);
+    const resolvedSelectedTimingSpanId = selectedTimingSpanId ?? selectedSpanId;
+    const timelineScrollRef = useRef<HTMLDivElement | null>(null);
+
+    const backendOverviewRows = useMemo(
+        () => buildBackendOverviewRows({ overview, traceEnd, traceStart }),
+        [overview, traceEnd, traceStart],
     );
-    const [selectedTimingSpanId, setSelectedTimingSpanId] = useState<
-        string | undefined
-    >();
+    const selectedBackendOverviewRow =
+        resolvedSelectedTimingSpanId === undefined
+            ? undefined
+            : backendOverviewRows.find(
+                  (entry) => entry.item.span_id === resolvedSelectedTimingSpanId,
+              );
+    const useBackendOverview = backendOverviewRows.length > 0;
+
+    useEffect(() => {
+        if (selectedSpanId === undefined) {
+            return;
+        }
+        const container = timelineScrollRef.current;
+        if (container === null) {
+            return;
+        }
+        const element = container.querySelector(
+            `[data-overview-span-id="${selectedSpanId}"]`,
+        );
+        if (element instanceof HTMLElement) {
+            element.scrollIntoView({ block: "center" });
+        }
+    }, [selectedSpanId, useBackendOverview]);
 
     const overviewModel = useMemo(
         () =>
@@ -257,13 +591,14 @@ export const TraceTurnSummary = ({
                 spans,
                 traceStart,
                 traceEnd,
-                selectedSpanId: selectedTimingSpanId,
+                selectedSpanId: resolvedSelectedTimingSpanId,
             }),
-        [selectedTimingSpanId, spans, traceEnd, traceStart],
+        [resolvedSelectedTimingSpanId, spans, traceEnd, traceStart],
     );
     const { timingRows } = overviewModel;
     const { selection } = overviewModel;
     const hasSelectedSpan = selection !== undefined;
+    const systemInstructions = selection?.systemInstructions;
     const requestMessages = selection?.requestMessages ?? [];
     const responseMessages = selection?.responseMessages ?? [];
     const hasSummaryContent = selection?.hasSummaryContent ?? false;
@@ -310,26 +645,75 @@ export const TraceTurnSummary = ({
         </div>
     );
 
-    const timingList = (
-        <div className="space-y-2 text-xs">
-            {timingRows.map((entry) => {
-                const isSelected = entry.spanId === selectedTimingSpanId;
+    const timingList = useBackendOverview ? (
+        <div className="text-xs">
+            {backendOverviewRows.map((entry) => {
+                const spanId = entry.item.span_id;
+                const isSelected = spanId === resolvedSelectedTimingSpanId;
                 return (
                     <button
-                        className={`hover:bg-muted/60 grid w-full grid-cols-[140px_70px_1fr] items-center gap-x-3 rounded px-1 py-0.5 text-left transition ${
-                            isSelected ? "bg-muted/70" : ""
+                        className={`hover:border-primary/50 hover:bg-primary/10 grid w-full grid-cols-[minmax(220px,1fr)_70px_minmax(160px,1.2fr)] items-center gap-x-3 rounded-none border border-transparent px-1 py-0.5 text-left transition-none ${
+                            isSelected
+                                ? "border-primary bg-primary/15 ring-primary/30 shadow-sm ring-1"
+                                : ""
                         }`}
-                        key={entry.spanId}
+                        data-overview-span-id={spanId}
+                        key={spanId}
                         onClick={() => {
-                            setSelectedTimingSpanId((previous) =>
-                                previous === entry.spanId
-                                    ? undefined
-                                    : entry.spanId,
-                            );
+                            setSelectedTimingSpanId(spanId);
                         }}
                         type="button"
                     >
-                        <div className="font-semibold">{entry.label}</div>
+                        <div
+                            className="font-semibold"
+                            style={{
+                                paddingLeft: `${entry.depth * 16}px`,
+                            }}
+                        >
+                            {entry.item.title}
+                        </div>
+                        <div className="text-muted-foreground tabular-nums">
+                            {entry.value}
+                        </div>
+                        <div className="bg-muted relative h-2 overflow-hidden rounded">
+                            <div
+                                className={`absolute inset-y-0 rounded ${entry.barClass}`}
+                                style={{
+                                    left: `${entry.offsetPct}%`,
+                                    width: `${entry.widthPct}%`,
+                                }}
+                            />
+                        </div>
+                    </button>
+                );
+            })}
+        </div>
+    ) : (
+        <div className="text-xs">
+            {timingRows.map((entry) => {
+                const isSelected = entry.spanId === resolvedSelectedTimingSpanId;
+                return (
+                    <button
+                        className={`hover:border-primary/50 hover:bg-primary/10 grid w-full grid-cols-[minmax(220px,1fr)_70px_minmax(160px,1.2fr)] items-center gap-x-3 rounded-none border border-transparent px-1 py-0.5 text-left transition-none ${
+                            isSelected
+                                ? "border-primary bg-primary/15 ring-primary/30 shadow-sm ring-1"
+                                : ""
+                        }`}
+                        data-overview-span-id={entry.spanId}
+                        key={entry.spanId}
+                        onClick={() => {
+                            setSelectedTimingSpanId(entry.spanId);
+                        }}
+                        type="button"
+                    >
+                        <div
+                            className="font-semibold"
+                            style={{
+                                paddingLeft: `${entry.depth * 16}px`,
+                            }}
+                        >
+                            {entry.label}
+                        </div>
                         <div className="text-muted-foreground tabular-nums">
                             {entry.value}
                         </div>
@@ -347,6 +731,63 @@ export const TraceTurnSummary = ({
             })}
         </div>
     );
+
+    const selectedBackendOutputText =
+        typeof selectedBackendOverviewRow?.item.data.output_text === "string" &&
+        selectedBackendOverviewRow.item.data.output_text.trim() !== ""
+            ? selectedBackendOverviewRow.item.data.output_text
+            : undefined;
+    const selectedBackendInputText =
+        typeof selectedBackendOverviewRow?.item.data.input_text === "string" &&
+        selectedBackendOverviewRow.item.data.input_text.trim() !== ""
+            ? selectedBackendOverviewRow.item.data.input_text
+            : undefined;
+    const selectedBackendDataEntries =
+        selectedBackendOverviewRow === undefined
+            ? []
+            : getReadableProjectedDataEntries(selectedBackendOverviewRow.item);
+    const selectedBackendModel =
+        selectedBackendOverviewRow === undefined
+            ? undefined
+            : getStandardModelValue(selectedBackendOverviewRow.item);
+    const selectedBackendReasoningEffort =
+        typeof selectedBackendOverviewRow?.item.data.reasoning_effort === "string" &&
+        selectedBackendOverviewRow.item.data.reasoning_effort.trim() !== ""
+            ? selectedBackendOverviewRow.item.data.reasoning_effort
+            : undefined;
+    const selectedBackendUncachedInputTokens =
+        selectedBackendOverviewRow?.item.data.uncached_input_tokens;
+    const selectedBackendCacheReadTokens =
+        selectedBackendOverviewRow?.item.data.cache_read_input_tokens;
+    const selectedBackendOutputTokens =
+        selectedBackendOverviewRow?.item.data.output_tokens;
+    const selectedBackendCostBreakdown =
+        selectedBackendOverviewRow?.item.data.cost_breakdown;
+    const selectedBackendTokenRows = [
+        [
+            "Uncached input",
+            selectedBackendUncachedInputTokens,
+            getNumberField(selectedBackendCostBreakdown, "input_cost"),
+        ],
+        [
+            "Cached input",
+            selectedBackendCacheReadTokens,
+            getNumberField(selectedBackendCostBreakdown, "cache_read_input_cost"),
+        ],
+        [
+            "Output",
+            selectedBackendOutputTokens,
+            getNumberField(selectedBackendCostBreakdown, "output_cost"),
+        ],
+    ]
+        .filter(
+            (entry): entry is [string, string | number, number | undefined] =>
+                typeof entry[1] === "string" || typeof entry[1] === "number",
+        )
+        .map(([label, value, cost]) => [
+            label,
+            formatTokenWithCost(value, cost),
+        ] as const);
 
     const renderSummarySection = (
         label: string | undefined,
@@ -367,7 +808,106 @@ export const TraceTurnSummary = ({
         </section>
     );
 
-    const summaryDetails = (
+    const selectedBackendHeaderRows: { label: string; value: string | number }[] =
+        selectedBackendOverviewRow === undefined
+            ? []
+            : [
+                  { label: "Step", value: selectedBackendOverviewRow.item.title },
+                  ...(selectedBackendModel === undefined
+                      ? []
+                      : [{ label: "Model", value: selectedBackendModel }]),
+                  ...(selectedBackendReasoningEffort === undefined
+                      ? []
+                      : [
+                            {
+                                label: "Reasoning effort",
+                                value: selectedBackendReasoningEffort,
+                            },
+                        ]),
+                  { label: "Duration", value: selectedBackendOverviewRow.value },
+                  {
+                      label: "Offset",
+                      value: formatOffsetMs(
+                          traceStart === undefined
+                              ? undefined
+                              : selectedBackendOverviewRow.start - traceStart,
+                      ),
+                  },
+                  ...selectedBackendTokenRows.map(([label, value]) => ({
+                      label,
+                      value,
+                  })),
+                  ...(selectedBackendOverviewRow.item.status_code !== null &&
+                  !["OK", "UNSET"].includes(
+                      selectedBackendOverviewRow.item.status_code,
+                  )
+                      ? [
+                            {
+                                label: "Status",
+                                value: selectedBackendOverviewRow.item.status_code,
+                            },
+                        ]
+                      : []),
+              ];
+
+    const selectedBackendDetailRows: ProjectedDetailRow[] =
+        selectedBackendOverviewRow === undefined
+            ? []
+            : [
+                  ...selectedBackendHeaderRows.map((entry) => ({
+                      key: `header-${entry.label}`,
+                      label: entry.label,
+                      value: entry.value,
+                      valueType: "scalar" as const,
+                  })),
+                  ...(selectedBackendInputText === undefined
+                      ? []
+                      : [
+                            {
+                                key: "input",
+                                label: "Input",
+                                value: selectedBackendInputText,
+                                valueType: "markdown" as const,
+                            },
+                        ]),
+                  ...(selectedBackendOutputText === undefined
+                      ? []
+                      : [
+                            {
+                                key: "response",
+                                label: "Response",
+                                value: selectedBackendOutputText,
+                                valueType: "markdown" as const,
+                            },
+                        ]),
+                  ...selectedBackendDataEntries.map((entry) => ({
+                      key: entry.key,
+                      label: entry.label,
+                      value: entry.value,
+                      valueType:
+                          entry.valueType ??
+                          (entry.key === "guardrails_feedback" ||
+                          entry.key === "explanation" ||
+                          entry.key === "system_instructions"
+                              ? ("markdown" as const)
+                              : ("auto" as const)),
+                      markdownValue: entry.markdownValue,
+                  })),
+              ];
+
+    const backendSummaryDetails =
+        selectedBackendOverviewRow === undefined ? (
+            <div className="text-muted-foreground text-xs">
+                Select a trace step to view projected details.
+            </div>
+        ) : (
+            <ProjectedDetailsGrid
+                formatted={summaryFormatted}
+                rows={selectedBackendDetailRows}
+            />
+        );
+
+    const legacySummaryDetails = (
         <div className="space-y-4">
             {hasSelectedSpan ? (
                 <div className="space-y-1 text-xs">
@@ -391,6 +931,19 @@ export const TraceTurnSummary = ({
             {hasSelectedSpan ? (
                 hasSummaryContent ? (
                     <div className="space-y-4 text-sm">
+                        {systemInstructions !== undefined &&
+                        systemInstructions.trim() !== ""
+                            ? renderSummarySection(
+                                  "System Instructions",
+                                  [
+                                      {
+                                          role: "system",
+                                          content: systemInstructions,
+                                      },
+                                  ],
+                                  "No system instructions for this span.",
+                              )
+                            : undefined}
                         {renderSummarySection(
                             requestLabel,
                             requestMessages,
@@ -413,24 +966,26 @@ export const TraceTurnSummary = ({
         </div>
     );
 
-    const summaryStack = (
-        <section className="space-y-3">
-            {timingList}
-            {summaryDetails}
-        </section>
-    );
+    const summaryDetails = useBackendOverview
+        ? backendSummaryDetails
+        : legacySummaryDetails;
 
-    const summarySplit = (
+    return (
         <ResizablePanelGroup
             className="h-full min-h-0 min-w-0"
-            direction="horizontal"
+            id="trace-turn-summary-layout"
+            orientation="horizontal"
         >
             <ResizablePanel
                 className="min-h-0 min-w-0"
-                defaultSize={38}
-                minSize={30}
+                defaultSize="45%"
+                id="trace-turn-summary-timeline-panel"
+                minSize="38%"
             >
-                <div className="h-full min-h-0 min-w-0 overflow-auto">
+                <div
+                    className="h-full min-h-0 min-w-0 overflow-auto"
+                    ref={timelineScrollRef}
+                >
                     <div className="space-y-3 px-4 py-4">
                         <div className="text-muted-foreground text-xs uppercase">
                             Timeline
@@ -442,12 +997,13 @@ export const TraceTurnSummary = ({
             <ResizableHandle withHandle />
             <ResizablePanel
                 className="min-h-0 min-w-0"
-                defaultSize={62}
-                minSize={40}
+                defaultSize="55%"
+                id="trace-turn-summary-details-panel"
+                minSize="40%"
             >
                 <div className="h-full min-h-0 min-w-0 overflow-auto">
-                    <div className="space-y-4 px-4 py-4">
-                        <div className="flex items-center justify-end gap-3">
+                    <div className="px-4 py-4">
+                        <div className="mb-2 flex items-center justify-end gap-3">
                             <Toggle
                                 onPressedChange={setSummaryFormatted}
                                 pressed={summaryFormatted}
@@ -462,13 +1018,5 @@ export const TraceTurnSummary = ({
                 </div>
             </ResizablePanel>
         </ResizablePanelGroup>
-    );
-
-    return summaryLayout === "split" ? (
-        summarySplit
-    ) : (
-        <div className="h-full min-h-0 min-w-0 overflow-auto">
-            <div className="space-y-6 px-4 py-4">{summaryStack}</div>
-        </div>
     );
 };

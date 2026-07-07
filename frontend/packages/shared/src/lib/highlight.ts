@@ -1,9 +1,10 @@
 const escapeRegExp = (value: string): string =>
     value.replaceAll(/[$()*+.?[\\\]^{|}]/gu, String.raw`\$&`);
 
-const getHighlightRegex = (query: string): RegExp | undefined => {
-    const terms = query.trim().split(/\s+/u).filter(Boolean);
-    if (terms.length === 0) {
+const getHighlightRegex = (query: string, phrase = false): RegExp | undefined => {
+    const trimmed = query.trim();
+    const terms = phrase ? [trimmed] : trimmed.split(/\s+/u).filter(Boolean);
+    if (terms.length === 0 || terms[0] === "") {
         return undefined;
     }
 
@@ -20,8 +21,9 @@ interface HighlightPart {
 export const splitHighlightText = (
     text: string,
     query: string,
+    phrase = false,
 ): HighlightPart[] => {
-    const regex = getHighlightRegex(query);
+    const regex = getHighlightRegex(query, phrase);
     if (!regex) {
         return [{ text, highlight: false, start: 0 }];
     }
@@ -59,8 +61,9 @@ export const splitHighlightText = (
 export const findHighlightMatch = (
     text: string,
     query: string,
+    phrase = false,
 ): { start: number; end: number } | undefined => {
-    const regex = getHighlightRegex(query);
+    const regex = getHighlightRegex(query, phrase);
     if (!regex) {
         return undefined;
     }

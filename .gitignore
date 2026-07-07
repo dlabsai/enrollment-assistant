@@ -4,10 +4,8 @@ __MACOSX/
 .DS_Store
 .thumbs.db
 .env*
-.deploy.env*
 !.env.example*
-!.deploy.env.example*
 deploy-package
 deploy.zip
-CURRENT.md
-*.build-hash
+.pi/
+lode/tmp/

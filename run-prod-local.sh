@@ -2,13 +2,13 @@
 
 set -e
 
-# Local script to test the production setup (both frontends served by FastAPI)
+# Local script to test the production setup (frontend served by FastAPI)
 # This mimics the Azure deployment locally for testing before deploying
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BACKEND_DIR="$SCRIPT_DIR/backend"
-STATIC_INTERNAL_DIR="$BACKEND_DIR/static-internal"
-STATIC_PUBLIC_DIR="$BACKEND_DIR/static-public"
+STATIC_DIR="$BACKEND_DIR/static"
+STATIC_WIDGET_DIR="$BACKEND_DIR/static-widget"
 FRONTEND_DIR="$SCRIPT_DIR/frontend"
 
 # Parse arguments
@@ -28,40 +28,34 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [ "$SKIP_BUILD" = false ]; then
-    echo "=== Building Public + Internal Frontends (virtual-assistant-private/frontend) ==="
-    cd "$FRONTEND_DIR"
-    npm install
-    VITE_API_URL=/api VITE_PUBLIC_WIDGET_BASE_PATH=/public/ npm run build-public-local
-    VITE_API_URL=/api npm run build-internal-local
+    echo "=== Building Frontend (frontend) ==="
+    if [ -d "$FRONTEND_DIR" ]; then
+        cd "$FRONTEND_DIR"
+        pnpm install --frozen-lockfile
+        pnpm run build-internal-local
+    else
+        echo "Warning: Frontend not found at $FRONTEND_DIR"
+        echo "Only API will be available"
+    fi
 fi
 
 echo "=== Setting up static directories ==="
 # Clean previous static dirs
-rm -rf "$STATIC_INTERNAL_DIR" "$STATIC_PUBLIC_DIR"
+rm -rf "$STATIC_DIR" "$STATIC_WIDGET_DIR"
 
-# Copy internal frontend to static-internal (served at /internal)
+# Copy frontend to static (served at /)
 if [ -d "$FRONTEND_DIR/dist-internal-local" ]; then
-    cp -r "$FRONTEND_DIR/dist-internal-local" "$STATIC_INTERNAL_DIR"
-    echo "Internal frontend copied to $STATIC_INTERNAL_DIR"
+    cp -r "$FRONTEND_DIR/dist-internal-local" "$STATIC_DIR"
+    echo "Frontend copied to $STATIC_DIR"
 else
-    echo "Warning: Internal frontend build not found at $FRONTEND_DIR/dist-internal-local"
-fi
-
-# Copy public frontend to static-public (served at /public)
-if [ -d "$FRONTEND_DIR/dist-public-local" ]; then
-    cp -r "$FRONTEND_DIR/dist-public-local" "$STATIC_PUBLIC_DIR"
-    echo "Public frontend copied to $STATIC_PUBLIC_DIR"
-else
-    echo "Warning: Public frontend build not found at $FRONTEND_DIR/dist-public-local"
+    echo "Warning: Frontend build not found at $FRONTEND_DIR/dist-internal-local"
 fi
 
 echo "=== Starting FastAPI with static file serving ==="
 echo ""
 echo "Endpoints:"
-echo "  - Landing page:    http://localhost:8000/"
-echo "  - Internal app:    http://localhost:8000/internal"
-echo "  - Public app:      http://localhost:8000/public"
-echo "  - API:            http://localhost:8000/api"
+echo "  - Frontend:        http://localhost:8000/"
+echo "  - API:             http://localhost:8000/api"
 echo ""
 
 cd "$BACKEND_DIR"

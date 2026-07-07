@@ -1,7 +1,9 @@
 import {
+    type ApiBlobResponse,
     type ApiClientOptions,
     apiDelete,
     apiGet,
+    apiGetBlob,
     apiPost,
     apiPostStream,
     apiPut,
@@ -12,18 +14,17 @@ import { useMemo } from "react";
 import { useAuth } from "../contexts/auth-context";
 
 const withSessionExpiry = async <T>(
-    operation: (token?: string) => Promise<T>,
-    token: string | undefined,
-    refreshSession: () => Promise<string | undefined>,
+    operation: () => Promise<T>,
+    refreshSession: () => Promise<boolean>,
     onExpire: () => void,
 ): Promise<T> => {
     try {
-        return await operation(token);
+        return await operation();
     } catch (error) {
         if (isApiError(error) && error.status === 401) {
-            const refreshedToken = await refreshSession();
-            if (refreshedToken !== undefined && refreshedToken !== "") {
-                return operation(refreshedToken);
+            const refreshedSession = await refreshSession();
+            if (refreshedSession) {
+                return operation();
             }
             onExpire();
         }
@@ -32,42 +33,50 @@ const withSessionExpiry = async <T>(
 };
 
 export const useAuthenticatedApi = (): {
-    get: <T>(
+    get: <T>(endpoint: string, options?: ApiClientOptions) => Promise<T>;
+    getBlob: (
         endpoint: string,
-        options?: Omit<ApiClientOptions, "token">,
-    ) => Promise<T>;
+        options?: ApiClientOptions,
+    ) => Promise<ApiBlobResponse>;
     post: <T>(
         endpoint: string,
         body: unknown,
-        options?: Omit<ApiClientOptions, "token">,
+        options?: ApiClientOptions,
     ) => Promise<T>;
     postStream: (
         endpoint: string,
         body: unknown,
-        options?: Omit<ApiClientOptions, "token">,
+        options?: ApiClientOptions,
     ) => Promise<Response>;
     put: <T>(
         endpoint: string,
         body: unknown,
-        options?: Omit<ApiClientOptions, "token">,
+        options?: ApiClientOptions,
     ) => Promise<T>;
-    delete: (
-        endpoint: string,
-        options?: Omit<ApiClientOptions, "token">,
-    ) => Promise<void>;
+    delete: (endpoint: string, options?: ApiClientOptions) => Promise<void>;
 } => {
-    const { token, markSessionExpired, refreshSession } = useAuth();
+    const { markSessionExpired, refreshSession } = useAuth();
 
     return useMemo(
         () => ({
-            get: async <T>(
-                endpoint: string,
-                options?: Omit<ApiClientOptions, "token">,
-            ) =>
+            get: async <T>(endpoint: string, options?: ApiClientOptions) =>
                 withSessionExpiry(
-                    async (activeToken) =>
-                        apiGet<T>(endpoint, { ...options, token: activeToken }),
-                    token,
+                    async () =>
+                        apiGet<T>(endpoint, {
+                            ...options,
+                            credentials: options?.credentials ?? "include",
+                        }),
+                    refreshSession,
+                    markSessionExpired,
+                ),
+
+            getBlob: async (endpoint: string, options?: ApiClientOptions) =>
+                withSessionExpiry(
+                    async () =>
+                        apiGetBlob(endpoint, {
+                            ...options,
+                            credentials: options?.credentials ?? "include",
+                        }),
                     refreshSession,
                     markSessionExpired,
                 ),
@@ -75,15 +84,14 @@ export const useAuthenticatedApi = (): {
             post: async <T>(
                 endpoint: string,
                 body: unknown,
-                options?: Omit<ApiClientOptions, "token">,
+                options?: ApiClientOptions,
             ) =>
                 withSessionExpiry(
-                    async (activeToken) =>
+                    async () =>
                         apiPost<T>(endpoint, body, {
                             ...options,
-                            token: activeToken,
+                            credentials: options?.credentials ?? "include",
                         }),
-                    token,
                     refreshSession,
                     markSessionExpired,
                 ),
@@ -91,15 +99,14 @@ export const useAuthenticatedApi = (): {
             postStream: async (
                 endpoint: string,
                 body: unknown,
-                options?: Omit<ApiClientOptions, "token">,
+                options?: ApiClientOptions,
             ) =>
                 withSessionExpiry(
-                    async (activeToken) =>
+                    async () =>
                         apiPostStream(endpoint, body, {
                             ...options,
-                            token: activeToken,
+                            credentials: options?.credentials ?? "include",
                         }),
-                    token,
                     refreshSession,
                     markSessionExpired,
                 ),
@@ -107,32 +114,30 @@ export const useAuthenticatedApi = (): {
             put: async <T>(
                 endpoint: string,
                 body: unknown,
-                options?: Omit<ApiClientOptions, "token">,
+                options?: ApiClientOptions,
             ) =>
                 withSessionExpiry(
-                    async (activeToken) =>
+                    async () =>
                         apiPut<T>(endpoint, body, {
                             ...options,
-                            token: activeToken,
+                            credentials: options?.credentials ?? "include",
                         }),
-                    token,
                     refreshSession,
                     markSessionExpired,
                 ),
 
-            delete: async (
-                endpoint: string,
-                options?: Omit<ApiClientOptions, "token">,
-            ) =>
+            delete: async (endpoint: string, options?: ApiClientOptions) =>
                 withSessionExpiry(
-                    async (activeToken) =>
-                        apiDelete(endpoint, { ...options, token: activeToken }),
-                    token,
+                    async () =>
+                        apiDelete(endpoint, {
+                            ...options,
+                            credentials: options?.credentials ?? "include",
+                        }),
                     refreshSession,
                     markSessionExpired,
                 ),
         }),
-        [token, refreshSession, markSessionExpired],
+        [refreshSession, markSessionExpired],
     );
 };
 

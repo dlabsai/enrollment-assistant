@@ -38,7 +38,7 @@ const SavePanelContent = ({
 
     const displayDrafts =
         forceShow && Object.keys(drafts).length === 0
-            ? { search_agent_internal: "" }
+            ? { "chatbot_agent_internal.j2": "" }
             : drafts;
 
     return (
@@ -125,14 +125,16 @@ export const SaveDialog = (): JSX.Element | undefined => {
             onOpenChange={setOpen}
             open={open}
         >
-            <DialogTrigger asChild>
-                <Button
-                    size="sm"
-                    variant="outline"
-                >
-                    Save
-                </Button>
-            </DialogTrigger>
+            <DialogTrigger
+                render={
+                    <Button
+                        size="sm"
+                        variant="outline"
+                    >
+                        Save
+                    </Button>
+                }
+            />
             <DialogContent className="p-0 sm:max-w-xl">
                 <ScrollArea className="max-h-[80vh]">
                     <SavePanelContent forceShow={forceShow} />

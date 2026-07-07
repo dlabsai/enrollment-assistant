@@ -7,7 +7,11 @@ import {
     useInstructionsStore,
 } from "../contexts/instructions-store-context";
 import { InstructionsStoreProvider } from "../contexts/instructions-store-provider";
-import { getSectionIdForScope, isAssistantSectionId } from "../lib/sections";
+import {
+    getSectionIdForScope,
+    INTERNAL_PROMPT_PLATFORM,
+    isAssistantSectionId,
+} from "../lib/sections";
 import { ConfirmDialogs } from "./confirm-dialogs";
 import { EditorArea } from "./editor-area";
 import { HelpGuide } from "./help-guide";
@@ -127,9 +131,6 @@ const InstructionsWorkspace = (): JSX.Element => {
 };
 
 const InstructionsPageContent = (): JSX.Element => {
-    const activePlatform = useInstructionsStore(
-        (state) => state.activePlatform,
-    );
     const activeSectionId = useInstructionsStore(
         (state) => state.activeSectionId,
     );
@@ -160,20 +161,14 @@ const InstructionsPageContent = (): JSX.Element => {
     }, [diskTemplatesLoaded, loadDiskTemplates]);
 
     useEffect(() => {
-        const internalSectionId = getSectionIdForScope("assistant", "internal");
-        const publicSectionId = getSectionIdForScope("assistant", "public");
+        const internalSectionId = getSectionIdForScope(
+            "assistant",
+            INTERNAL_PROMPT_PLATFORM,
+        );
         if (!versionsLoaded[internalSectionId]) {
             void loadVersions(internalSectionId);
         }
-        if (!versionsLoaded[publicSectionId]) {
-            void loadVersions(publicSectionId);
-        }
     }, [versionsLoaded, loadVersions]);
-
-    useEffect(() => {
-        const sectionId = getSectionIdForScope("assistant", activePlatform);
-        void loadDeployedVersion(sectionId);
-    }, [loadDeployedVersion, activePlatform]);
 
     useEffect(() => {
         if (activeSectionId === undefined) {

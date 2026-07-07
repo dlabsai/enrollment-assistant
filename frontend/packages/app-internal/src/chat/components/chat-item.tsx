@@ -130,21 +130,23 @@ export const ChatItem = memo(
 
                 {canDelete && (
                     <DropdownMenu>
-                        <DropdownMenuTrigger asChild>
-                            <SidebarMenuAction
-                                data-theme={resolvedTheme}
-                                onClick={(event) => {
-                                    event.stopPropagation();
-                                }}
-                                showOnHover
-                            >
-                                <MoreVertical
-                                    className="size-4"
-                                    key={resolvedTheme}
-                                />
-                                <span className="sr-only">More</span>
-                            </SidebarMenuAction>
-                        </DropdownMenuTrigger>
+                        <DropdownMenuTrigger
+                            render={
+                                <SidebarMenuAction
+                                    data-theme={resolvedTheme}
+                                    onClick={(event) => {
+                                        event.stopPropagation();
+                                    }}
+                                    showOnHover
+                                >
+                                    <MoreVertical
+                                        className="size-4"
+                                        key={resolvedTheme}
+                                    />
+                                    <span className="sr-only">More</span>
+                                </SidebarMenuAction>
+                            }
+                        />
                         <DropdownMenuContent
                             align={isMobile ? "end" : "start"}
                             className="w-40 rounded-lg"
@@ -153,17 +155,17 @@ export const ChatItem = memo(
                             }}
                             side={isMobile ? "bottom" : "right"}
                         >
-                            <DropdownMenuItem onSelect={handleRename}>
+                            <DropdownMenuItem onClick={handleRename}>
                                 <Pencil className="size-3" />
                                 Rename
                             </DropdownMenuItem>
-                            <DropdownMenuItem onSelect={handleRegenerateTitle}>
+                            <DropdownMenuItem onClick={handleRegenerateTitle}>
                                 <RefreshCw className="size-3" />
                                 Regenerate title
                             </DropdownMenuItem>
                             <DropdownMenuSeparator />
                             <DropdownMenuItem
-                                onSelect={handleDelete}
+                                onClick={handleDelete}
                                 variant="destructive"
                             >
                                 <Trash2 className="size-3" />

@@ -4,11 +4,11 @@ import { useAuthenticatedApi } from "../../auth/hooks/use-authenticated-api";
 import type { CustomTimeRange, TimeRangeValue } from "../../lib/time-range";
 import { fetchUsageOverview, type UsagePlatformFilter } from "../lib/api";
 import type {
-    ChatCompletionTraceBasic,
     ModelUsage,
     UsageDaily,
     UsageOverviewApi,
     UsageSummary,
+    UsageTraceBasic,
 } from "../types";
 
 interface UsageDataParams {
@@ -23,7 +23,7 @@ interface UsageDataState {
     summary: UsageSummary;
     dailyData: UsageDaily[];
     modelData: ModelUsage[];
-    latestTraces: ChatCompletionTraceBasic[];
+    latestTraces: UsageTraceBasic[];
 }
 
 interface UseUsageDataResult extends UsageDataState {
@@ -93,7 +93,7 @@ export const useUsageData = ({
     referenceDate,
 }: UsageDataParams): UseUsageDataResult => {
     const api = useAuthenticatedApi();
-    const [data, setData] = useState<UsageDataState>(emptyState);
+    const [data, setData] = useState(emptyState);
     const [loading, setLoading] = useState(true);
     const [hasLoaded, setHasLoaded] = useState(false);
     const [error, setError] = useState<string | undefined>();

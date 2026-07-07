@@ -17,21 +17,31 @@ uv run pytest tests/chat/test_eval_chatbot.py -v -s
 # Run guardrails evaluation tests
 uv run pytest tests/chat/test_eval_guardrails.py -v -s
 
-# Run search agent evaluation tests
-uv run pytest tests/chat/test_eval_search.py -v -s
-
 # Run specific test cases
 uv run pytest tests/chat/test_eval_chatbot.py -v -s -T "greeting_response,accreditation_inquiry"
 
 # Run with repeats for statistical confidence
 uv run pytest tests/chat/test_eval_chatbot.py -v -s -R 3 -C 5
 
-# Run with fresh database (removes persistent container)
-uv run pytest --fresh-db
-
 # Force rebuild RAG data (expensive - calls embedding API)
 uv run pytest --rebuild-rag
 ```
+
+## Required DB Environment Variables
+
+Set one external DB env set before running tests:
+
+- `PYTEST_POSTGRES_SERVER`
+- `PYTEST_POSTGRES_PORT`
+- `PYTEST_POSTGRES_USER`
+- `PYTEST_POSTGRES_PASSWORD`
+- `PYTEST_POSTGRES_DB` (must end with `_test` and differ from `POSTGRES_DB` if set)
+
+`tests/conftest.py` maps these into runtime `POSTGRES_*` and fails fast if missing/unsafe.
+
+For local Docker Compose, the `ensure-test-db` service in `docker-compose.yml`
+ensures `PYTEST_POSTGRES_DB` exists on every startup (idempotent).
+It also enforces safety checks: DB name must end with `_test` and must differ from `POSTGRES_DB`.
 
 ## Pytest Markers
 
@@ -80,15 +90,17 @@ These tests use an LLM judge to evaluate agent responses against defined criteri
 
 | Test File | Component Tested | Description |
 |-----------|-----------------|-------------|
-| `test_eval_chatbot.py` | Full chatbot pipeline | Tests the complete flow: search/extractor → chatbot → guardrails |
+| `test_eval_chatbot.py` | Full chatbot pipeline | Tests the complete path: retrieval-capable chatbot → guardrails |
 | `test_eval_guardrails.py` | Guardrails agent (isolated) | Tests if guardrails correctly identifies valid/invalid responses |
-| `test_eval_search.py` | Search agent (isolated) | Tests if search agent uses RAG tools and returns grounded info |
 
 **Common Options:**
 - `-R N` / `--repeat=N`: Number of times to repeat each test case (default: 1)
 - `-C N` / `--max-concurrency=N`: Maximum concurrent LLM calls (default: 5)
 - `-T IDs` / `--test-cases=IDs`: Comma-separated list of test case IDs to run
 - `-P N` / `--pass-threshold=N`: Minimum pass rate threshold (default: 0.9 = 90%)
+- `--chatbot-model=MODEL`: Override chatbot model for eval tests
+- `--guardrail-model=MODEL`: Override guardrails model for eval tests
+- `--evaluation-model=MODEL`: Override LLM-judge/evaluation model for eval tests
 
 ```bash
 # Run full pipeline tests with 3 repeats
@@ -97,43 +109,34 @@ uv run pytest tests/chat/test_eval_chatbot.py -v -s -R 3 -C 5
 # Run guardrails tests for specific violations
 uv run pytest tests/chat/test_eval_guardrails.py -v -s -T "dollar_amounts_violation,free_word_violation"
 
-# Run search agent tests for program queries
-uv run pytest tests/chat/test_eval_search.py -v -s -T "program_inquiry_general,program_inquiry_business"
-
 # Run with lower pass threshold (80%)
 uv run pytest tests/chat/test_eval_chatbot.py -v -s -R 5 -P 0.8
+
+# Run specific case with explicit per-role model overrides
+uv run pytest tests/chat/test_eval_chatbot.py -v -s -T "no_blog_urls" -R 20 -C 10 \
+  --chatbot-model azure/gpt-5.4 \
+  --guardrail-model azure/gpt-5.4 \
+  --evaluation-model azure/gpt-5.4
 ```
 
-### Variables Extraction Tests
-Tests for conversation variable extraction using LLM.
-
-Located in: `tests/sync/test_llm_variables_extraction.py`
-
-```bash
-uv run pytest tests/sync/test_llm_variables_extraction.py -v -s
-```
+**DB routing behavior:**
+- All suites use the same external DB env set: `PYTEST_POSTGRES_*`.
 
 ## Chatbot Flow Architecture
 
 ```
 CHATBOT FLOW:
-User Input --> Search Agent --> Chatbot Agent --> Guardrails --> Response
-                   |                  ^              |
-                   |                  |              |
-              RAG Tools:         (retry chatbot+guardrails if fails,
-              - retrieve_documents    up to 2 retries by default)
-              - find_document_titles
-              - find_document_chunks
-              - list_wordpress_pages
+User Input --> Retrieval-capable Chatbot Agent --> Guardrails --> Response
+                         |                         |
+                         |                         |
+                    RAG/lookup tools:        (retry chatbot+guardrails if fails,
+                    - retrieve_documents      up to 2 retries by default)
+                    - find_document_titles
+                    - find_document_chunks
+                    - list_catalog_programs
+                    - list_website_pages
 
 ISOLATED COMPONENT TESTS:
-┌─────────────────────────────────────────────────────────────────┐
-│ test_eval_search.py                                             │
-│ Tests search agent in isolation:                                │
-│ - Does it use RAG tools?                                        │
-│ - Is the response grounded in retrieved data?                   │
-└─────────────────────────────────────────────────────────────────┘
-
 ┌─────────────────────────────────────────────────────────────────┐
 │ test_eval_guardrails.py                                         │
 │ Tests guardrails agent in isolation:                            │
@@ -151,22 +154,14 @@ ISOLATED COMPONENT TESTS:
 
 ## Persistent RAG Data
 
-RAG data population is expensive because it creates embeddings via Azure OpenAI API. The test infrastructure uses a **persistent Docker container** (`virtual-assistant-test-postgres`) that keeps RAG data between test sessions.
-
-## Telemetry Database for Tests
-
-LLM evals and other tests emit telemetry spans into `otel_span`. Tests set `TELEMETRY_DATABASE_URL` to the pre-test database settings, so telemetry is written to the normal dev database instead of the test container. Override `TELEMETRY_DATABASE_URL` if you want telemetry to go elsewhere.
+RAG data population is expensive because it creates embeddings via Azure OpenAI API.
+Data is persisted in the external test database selected via `PYTEST_POSTGRES_*`, so repeated
+runs reuse existing RAG data unless `--rebuild-rag` is set.
 
 ## Troubleshooting
 
-### Tests fail with "No RAG data found"
-The container may have been removed. Run tests normally and wait for RAG population.
-
-### Tests are slow every time
-Check if the container is being removed between runs:
-```bash
-docker ps -a --filter "name=virtual-assistant-test-postgres"
-```
+### Tests fail at startup with missing DB env vars
+Set all required `PYTEST_POSTGRES_*` vars before running pytest.
 
 ### Need to update RAG data after source changes
 ```bash
@@ -175,9 +170,3 @@ uv run pytest --rebuild-rag tests/chat/test_llm_conversation_turn.py
 
 ### No RAG source data available
 If RAG source data files are missing, see the [RAG Data Pipeline documentation](../app/rag/README.md).
-
-### Container port conflicts
-Remove the old container and let tests create a new one:
-```bash
-docker rm -f virtual-assistant-test-postgres
-```

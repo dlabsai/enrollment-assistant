@@ -44,7 +44,6 @@ export const LoadingIndicator = ({
     activityLog,
     variant = "default",
     showHeader = true,
-    forceOpenReasoning = false,
     showEmptyState = true,
 }: LoadingIndicatorProps): JSX.Element | undefined => {
     void messages;
@@ -176,10 +175,7 @@ export const LoadingIndicator = ({
 
             return (
                 <Reasoning
-                    defaultOpen={
-                        forceOpenReasoning || entry.status === "in_progress"
-                    }
-                    disableAutoClose={forceOpenReasoning}
+                    defaultOpen={entry.status === "in_progress"}
                     isStreaming={entry.status === "in_progress"}
                 >
                     <ReasoningTrigger />

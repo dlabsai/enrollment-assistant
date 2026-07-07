@@ -22,25 +22,27 @@ export const TTSButton = ({
 
     return (
         <Tooltip>
-            <TooltipTrigger asChild>
-                <Button
-                    aria-label={tooltipText}
-                    className={cn(
-                        "text-muted-foreground rounded-full transition",
-                        isPlaying &&
-                            "bg-primary/10 text-primary hover:bg-primary/15 hover:text-primary",
-                    )}
-                    onClick={onClick}
-                    size="icon-sm"
-                    type="button"
-                    variant="ghost"
-                >
-                    <Icon
-                        aria-hidden="true"
-                        className="size-4"
-                    />
-                </Button>
-            </TooltipTrigger>
+            <TooltipTrigger
+                render={
+                    <Button
+                        aria-label={tooltipText}
+                        className={cn(
+                            "text-muted-foreground rounded-full transition",
+                            isPlaying &&
+                                "bg-primary/10 text-primary hover:bg-primary/15 hover:text-primary",
+                        )}
+                        onClick={onClick}
+                        size="icon-sm"
+                        type="button"
+                        variant="ghost"
+                    >
+                        <Icon
+                            aria-hidden="true"
+                            className="size-4"
+                        />
+                    </Button>
+                }
+            />
             <TooltipContent>{tooltipText}</TooltipContent>
         </Tooltip>
     );

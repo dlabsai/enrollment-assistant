@@ -31,27 +31,29 @@ const SectionHeader = ({
     isExpanded,
     onSelect,
 }: SectionHeaderProps): JSX.Element => (
-    <CollapsibleTrigger asChild>
-        <button
-            className={cn(
-                "flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm transition-colors",
-                "hover:bg-accent/50",
-                isActive
-                    ? "bg-accent text-accent-foreground"
-                    : "text-foreground",
-            )}
-            onClick={onSelect}
-            type="button"
-        >
-            <ChevronRight
+    <CollapsibleTrigger
+        render={
+            <button
                 className={cn(
-                    "size-4 shrink-0 transition-transform",
-                    isExpanded ? "rotate-90" : "rotate-0",
+                    "flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm transition-colors",
+                    "hover:bg-accent/50",
+                    isActive
+                        ? "bg-accent text-accent-foreground"
+                        : "text-foreground",
                 )}
-            />
-            <span className="truncate font-medium">{section.label}</span>
-        </button>
-    </CollapsibleTrigger>
+                onClick={onSelect}
+                type="button"
+            >
+                <ChevronRight
+                    className={cn(
+                        "size-4 shrink-0 transition-transform",
+                        isExpanded ? "rotate-90" : "rotate-0",
+                    )}
+                />
+                <span className="truncate font-medium">{section.label}</span>
+            </button>
+        }
+    />
 );
 
 interface TemplateItemProps {

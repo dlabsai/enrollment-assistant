@@ -1,6 +1,0 @@
-- on assistant message show: input/cached/output tokens, duration, and cost 
-- branching on messages: show conversation tree for navigation
-- UI for current CLI evals (in progress)
-- AI-human conversation handoffs
-- knowledge-base explorer
-- ...

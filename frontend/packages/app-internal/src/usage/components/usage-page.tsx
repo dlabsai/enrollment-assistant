@@ -21,8 +21,9 @@ import { type JSX, useEffect, useMemo, useState } from "react";
 
 import { PageHeader, PageHeaderGroup } from "../../components/page-header";
 import { PageSection, PageShell } from "../../components/page-shell";
-import { PageError, PageLoading } from "../../components/page-state";
+import { LoadingState, PageError } from "../../components/page-state";
 import { TimeRangeFilter } from "../../components/time-range-filter";
+import { formatLocaleNumber } from "../../lib/number-format";
 import {
     type CustomTimeRange,
     isTimeRangeValue,
@@ -38,7 +39,7 @@ import { EmbeddingSummaryCards, LlmSummaryCards } from "./usage-summary-cards";
 import { UsageTable } from "./usage-table";
 
 const platformOptions = [
-    { label: "Both", value: "both" },
+    { label: "All platforms", value: "both" },
     { label: "Internal", value: "internal" },
     { label: "Public", value: "public" },
 ] as const;
@@ -199,7 +200,7 @@ export const UsagePage = (): JSX.Element => {
         if (modelFilters.length === 1) {
             return modelFilters[0];
         }
-        return `${modelFilters.length} selected`;
+        return `${formatLocaleNumber(modelFilters.length)} selected`;
     }, [modelFilters]);
 
     const modelOptions = useMemo(() => {
@@ -258,7 +259,7 @@ export const UsagePage = (): JSX.Element => {
     }, [customRange, modelFilters, selectedPlatform, timeRange]);
 
     if (loading && !hasLoaded) {
-        return <PageLoading />;
+        return <LoadingState />;
     }
 
     if (error !== undefined) {
@@ -273,17 +274,17 @@ export const UsagePage = (): JSX.Element => {
     return (
         <PageShell variant="dashboard">
             <PageHeader title="Usage">
-                <PageHeaderGroup label="Platform">
+                <PageHeaderGroup>
                     <ToggleGroup
+                        aria-label="Platform"
                         onValueChange={(value) => {
-                            const next = isPlatformFilter(value)
-                                ? value
+                            const [nextValue] = value;
+                            const next = isPlatformFilter(nextValue)
+                                ? nextValue
                                 : "both";
                             setSelectedPlatform(next);
                         }}
-                        size="sm"
-                        type="single"
-                        value={selectedPlatform}
+                        value={[selectedPlatform]}
                         variant="outline"
                     >
                         {platformOptions.map((option) => (
@@ -320,21 +321,22 @@ export const UsagePage = (): JSX.Element => {
                         }}
                         open={modelFilterOpen}
                     >
-                        <PopoverTrigger asChild>
-                            <Button
-                                aria-expanded={modelFilterOpen}
-                                className="h-9 max-w-[240px] justify-between"
-                                role="combobox"
-                                size="sm"
-                                type="button"
-                                variant="outline"
-                            >
-                                <span className="truncate">
-                                    {modelFilterLabel}
-                                </span>
-                                <ChevronsUpDown className="text-muted-foreground size-4" />
-                            </Button>
-                        </PopoverTrigger>
+                        <PopoverTrigger
+                            render={
+                                <Button
+                                    aria-expanded={modelFilterOpen}
+                                    className="max-w-[240px] justify-between"
+                                    role="combobox"
+                                    type="button"
+                                    variant="outline"
+                                >
+                                    <span className="truncate">
+                                        {modelFilterLabel}
+                                    </span>
+                                    <ChevronsUpDown className="text-muted-foreground" />
+                                </Button>
+                            }
+                        />
                         <PopoverContent
                             align="start"
                             className="w-[320px] p-0"
@@ -346,7 +348,12 @@ export const UsagePage = (): JSX.Element => {
                                     value={modelFilterSearch}
                                 />
                                 <div className="text-muted-foreground flex items-center justify-between gap-2 border-b px-3 py-2 text-xs">
-                                    <span>{modelOptions.length} models</span>
+                                    <span>
+                                        {formatLocaleNumber(
+                                            modelOptions.length,
+                                        )}{" "}
+                                        models
+                                    </span>
                                     <Button
                                         disabled={modelFilters.length === 0}
                                         onClick={() => {
@@ -383,7 +390,11 @@ export const UsagePage = (): JSX.Element => {
                                                             value={provider}
                                                         >
                                                             <Check
-                                                                className={`size-4 ${isSelected ? "opacity-100" : "opacity-0"}`}
+                                                                className={
+                                                                    isSelected
+                                                                        ? "opacity-100"
+                                                                        : "opacity-0"
+                                                                }
                                                             />
                                                             <span className="truncate">
                                                                 {provider}
@@ -413,7 +424,11 @@ export const UsagePage = (): JSX.Element => {
                                                         value={model}
                                                     >
                                                         <Check
-                                                            className={`size-4 ${isSelected ? "opacity-100" : "opacity-0"}`}
+                                                            className={
+                                                                isSelected
+                                                                    ? "opacity-100"
+                                                                    : "opacity-0"
+                                                            }
                                                         />
                                                         <span className="truncate">
                                                             {model}
@@ -436,18 +451,16 @@ export const UsagePage = (): JSX.Element => {
                         setModelFilters([]);
                         setReferenceDate(new Date());
                     }}
-                    size="sm"
                     variant="outline"
                 >
-                    <Filter className="mr-2 size-4" />
+                    <Filter data-icon="inline-start" />
                     Clear
                 </Button>
                 <Button
                     onClick={() => void refresh()}
-                    size="sm"
                     variant="outline"
                 >
-                    <RefreshCw className="mr-2 size-4" />
+                    <RefreshCw data-icon="inline-start" />
                     Refresh
                 </Button>
             </PageHeader>

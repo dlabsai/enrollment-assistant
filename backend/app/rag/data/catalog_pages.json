@@ -1,0 +1,66 @@
+[
+    {
+        "id": "5001",
+        "title": "Academic Policies",
+        "url": "https://catalog.demo-university.example.edu/academic-policies",
+        "markdown_content": "# Academic Policies\n\nThis catalog page is the official source for academic policies and procedures. Policies include grading, satisfactory academic progress, course withdrawal, registration changes, academic integrity, transfer credit, catalog year, and appeals.\n\n## Policy interpretation\n\nStudents should work with academic advising or the registrar for policy questions connected to an active record. Admissions staff may direct prospective students here but should not interpret policy exceptions.\n",
+        "created": "2026-01-15T00:00:00Z",
+        "updated": "2026-01-15T00:00:00Z"
+    },
+    {
+        "id": "5002",
+        "title": "Admissions",
+        "url": "https://catalog.demo-university.example.edu/admissions",
+        "markdown_content": "# Admissions\n\nAdmission requirements vary by program level and academic pathway. Applicants may be asked for an application, official transcripts, identity verification, prior-degree confirmation, or additional program-specific documents.\n\n## Official records\n\nOfficial transcripts must come from the sending institution or approved transcript provider. Unofficial documents may support preliminary advising but do not replace official records.\n\n## Program review\n\nSome graduate, field-experience, or licensure-aligned programs require additional review before admission or registration. Students should not assume admission to one program guarantees admission to another.\n",
+        "created": "2026-01-15T00:00:00Z",
+        "updated": "2026-01-15T00:00:00Z"
+    },
+    {
+        "id": "5003",
+        "title": "Catalog Home",
+        "url": "https://catalog.demo-university.example.edu/catalog-home",
+        "markdown_content": "# Catalog Home\n\nThe Demo University Catalog is the official source for academic requirements, programs, courses, and academic policies. Website pages help students explore options, but the catalog controls curriculum and policy interpretation.\n\n## How to use the catalog\n\n- Review program pages for official credit totals and required courses.\n- Review course descriptions for prerequisites and credits.\n- Use academic policy pages for procedures, requirements, and appeal paths.\n- Confirm catalog-year questions with the records or advising team.\n",
+        "created": "2026-01-15T00:00:00Z",
+        "updated": "2026-01-15T00:00:00Z"
+    },
+    {
+        "id": "5004",
+        "title": "Financial Aid",
+        "url": "https://catalog.demo-university.example.edu/financial-aid",
+        "markdown_content": "# Financial Aid\n\nFinancial aid policies describe eligibility, enrollment status, satisfactory academic progress, document review, and disbursement timing. Aid decisions are not final until all required review steps are complete.\n\n## Important limits\n\nThe catalog explains policy categories and student responsibilities. It does not guarantee eligibility, award amounts, refund timing, or benefit approval for any individual student.\n",
+        "created": "2026-01-15T00:00:00Z",
+        "updated": "2026-01-15T00:00:00Z"
+    },
+    {
+        "id": "5005",
+        "title": "State Authorization and Licensure Disclosures",
+        "url": "https://catalog.demo-university.example.edu/state-authorization-and-licensure",
+        "markdown_content": "# State Authorization and Licensure Disclosures\n\nState authorization and professional licensure requirements vary by jurisdiction. Some programs may satisfy educational requirements in one state and require additional review, exams, supervised hours, or approvals in another.\n\n## Student responsibility\n\nStudents who plan to pursue a licensed profession should review the disclosure page for their intended state and speak with Admissions before enrollment. Demo University cannot guarantee licensing outcomes.\n",
+        "created": "2026-01-15T00:00:00Z",
+        "updated": "2026-01-15T00:00:00Z"
+    },
+    {
+        "id": "5006",
+        "title": "Student Support Services",
+        "url": "https://catalog.demo-university.example.edu/student-support-services",
+        "markdown_content": "# Student Support Services\n\nDemo University provides student-support services through academic advising, tutoring, library resources, accessibility services, technology support, career development, and wellness referrals.\n\n## Routing\n\nEach office owns different questions. Academic advising handles course planning; Student Accounts handles billing; Financial Aid handles aid documents; Accessibility Services handles accommodation requests; the Help Desk handles login and platform issues.\n",
+        "created": "2026-01-15T00:00:00Z",
+        "updated": "2026-01-15T00:00:00Z"
+    },
+    {
+        "id": "5007",
+        "title": "Transfer Credit",
+        "url": "https://catalog.demo-university.example.edu/transfer-credit",
+        "markdown_content": "# Transfer Credit\n\nTransfer credit is evaluated after official documents are received. Credit decisions consider source institution, course level, grade, credit value, age of coursework when relevant, and fit with the selected Demo University program.\n\n## Preliminary review\n\nUnofficial transcripts may support early advising. They do not create a final transfer-credit decision and cannot be used to guarantee remaining time or total credits required.\n",
+        "created": "2026-01-15T00:00:00Z",
+        "updated": "2026-01-15T00:00:00Z"
+    },
+    {
+        "id": "5008",
+        "title": "Tuition and Fees",
+        "url": "https://catalog.demo-university.example.edu/tuition-and-fees",
+        "markdown_content": "# Tuition and Fees\n\nTuition and fee information is published by program, academic level, and student population. Students should review the current catalog and student account resources before making payment decisions.\n\n## Planning note\n\nExact balances depend on program, credit load, transfer credit, fees, aid, benefits, and payment arrangements. Admissions should avoid quoting exact charges unless using an approved current resource.\n",
+        "created": "2026-01-15T00:00:00Z",
+        "updated": "2026-01-15T00:00:00Z"
+    }
+]

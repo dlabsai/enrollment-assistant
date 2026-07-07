@@ -5,15 +5,15 @@ import { cn } from "@va/shared/lib/utils";
 import { RefreshCw } from "lucide-react";
 import type { JSX } from "react";
 
-interface PageLoadingProps {
+interface LoadingStateProps {
     message?: string;
     className?: string;
 }
 
-export const PageLoading = ({
+export const LoadingState = ({
     message = "Loading...",
     className,
-}: PageLoadingProps): JSX.Element => (
+}: LoadingStateProps): JSX.Element => (
     <div
         className={cn(
             "flex h-full flex-1 items-center justify-center",
@@ -50,7 +50,7 @@ export const PageError = ({
                 onClick={onRetry}
                 variant="outline"
             >
-                <RefreshCw className="mr-2 size-4" />
+                <RefreshCw data-icon="inline-start" />
                 Retry
             </Button>
         )}

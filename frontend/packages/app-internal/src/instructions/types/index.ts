@@ -9,12 +9,13 @@ interface PromptTemplate {
     content: string;
 }
 
-export type ChatbotVersionScope =
+export type PromptSetScope =
     | "assistant"
+    | "investigation"
     | "summary"
     | "title"
     | "title_transcript"
-    | "rfi_extraction";
+    | "grounding";
 
 export interface PromptSetVersion {
     id: string;
@@ -22,7 +23,7 @@ export interface PromptSetVersion {
     name: string;
     description?: string;
     is_internal: boolean;
-    scope: ChatbotVersionScope;
+    scope: PromptSetScope;
     is_deployed: boolean;
     created_by_id: string;
     created_by_name: string;
@@ -36,7 +37,7 @@ export interface PromptSetVersionListItem {
     name: string;
     description?: string;
     is_internal: boolean;
-    scope: ChatbotVersionScope;
+    scope: PromptSetScope;
     is_deployed: boolean;
     created_by_id: string;
     created_by_name: string;
@@ -54,7 +55,7 @@ export interface PromptSetVersionCreate {
     name: string;
     description?: string;
     is_internal: boolean;
-    scope: ChatbotVersionScope;
+    scope: PromptSetScope;
     prompts: { filename: string; content: string }[];
 }
 

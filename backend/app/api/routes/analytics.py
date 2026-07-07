@@ -1,31 +1,21 @@
-from collections.abc import Sequence
+from __future__ import annotations
+
 from datetime import datetime, timedelta
-from typing import Annotated, Any
+from typing import TYPE_CHECKING, Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel
 from sqlalchemy import Float, Integer, case, cast, func, or_, select
 from sqlalchemy.sql import ColumnElement
 
-from app.api.deps import SessionDep, get_current_user, require_user_roles
-from app.api.schemas import (
-    ConversationAnalyticsBucketOut,
-    ConversationAnalyticsDailyOut,
-    ConversationAnalyticsHourlyOut,
-    ConversationAnalyticsResponseTimeBucketOut,
-    ConversationAnalyticsStatsOut,
-    ConversationAnalyticsSummaryOut,
-    PublicUsageBucketOut,
-    PublicUsageDailyOut,
-    PublicUsageHourlyOut,
-    PublicUsageSummaryOut,
-)
-from app.models import Conversation, ConversationSync, Message, OtelSpan, UserRole
+from app.api.deps import CurrentUser, SessionDep, require_permission
+from app.core.rbac import PermissionKey
+from app.models import Conversation, Message, OtelSpan, PublicChatContact
 
-router = APIRouter(
-    prefix="/analytics",
-    tags=["analytics"],
-    dependencies=[Depends(require_user_roles(get_current_user, UserRole.ADMIN, UserRole.DEV))],
-)
+if TYPE_CHECKING:
+    from collections.abc import Sequence
+
+router = APIRouter(prefix="/analytics", tags=["analytics"])
 
 MESSAGE_BUCKET_1 = 1
 MESSAGE_BUCKET_2 = 2
@@ -41,6 +31,92 @@ RESPONSE_BUCKET_10 = 10
 RESPONSE_BUCKET_15 = 15
 RESPONSE_BUCKET_20 = 20
 RESPONSE_BUCKET_25 = 25
+
+AnalyticsAccessUser = Annotated[
+    CurrentUser, Depends(require_permission(PermissionKey.ACCESS_ANALYTICS))
+]
+PublicAnalyticsAccessUser = Annotated[
+    CurrentUser, Depends(require_permission(PermissionKey.ACCESS_PUBLIC_ANALYTICS))
+]
+
+
+class ConversationAnalyticsDailyOut(BaseModel):
+    date: datetime
+    conversations: int
+    messages: int
+    avg_messages_per_conversation: float
+    single_message_rate: float
+
+
+class ConversationAnalyticsBucketOut(BaseModel):
+    label: str
+    conversations: int
+
+
+class ConversationAnalyticsHourlyOut(BaseModel):
+    hour: int
+    messages: int
+
+
+class ConversationAnalyticsStatsOut(BaseModel):
+    min: float | None
+    p50: float | None
+    median: float | None
+    avg: float | None
+    p75: float | None
+    p90: float | None
+    p95: float | None
+    p99: float | None
+    max: float | None
+
+
+class ConversationAnalyticsResponseTimeBucketOut(BaseModel):
+    label: str
+    responses: int
+
+
+class ConversationAnalyticsSummaryOut(BaseModel):
+    total_conversations: int
+    total_messages: int
+    avg_messages_per_conversation: float
+    single_message_rate: float
+    daily: list[ConversationAnalyticsDailyOut]
+    length_buckets: list[ConversationAnalyticsBucketOut]
+    hourly_activity: list[ConversationAnalyticsHourlyOut]
+    length_stats: ConversationAnalyticsStatsOut | None
+    response_time_buckets: list[ConversationAnalyticsResponseTimeBucketOut]
+    response_time_stats: ConversationAnalyticsStatsOut | None
+
+
+class PublicUsageDailyOut(BaseModel):
+    date: datetime
+    conversations: int
+    messages: int
+    avg_messages_per_conversation: float
+    drop_off_rate: float
+    leads: int
+
+
+class PublicUsageBucketOut(BaseModel):
+    label: str
+    conversations: int
+
+
+class PublicUsageHourlyOut(BaseModel):
+    hour: int
+    messages: int
+
+
+class PublicUsageSummaryOut(BaseModel):
+    total_conversations: int
+    total_messages: int
+    avg_messages_per_conversation: float
+    drop_off_rate: float
+    total_leads: int
+    lead_capture_rate: float
+    daily: list[PublicUsageDailyOut]
+    depth_buckets: list[PublicUsageBucketOut]
+    hourly_activity: list[PublicUsageHourlyOut]
 
 
 def _use_hourly_buckets(start: datetime | None, end: datetime | None) -> bool:
@@ -142,31 +218,19 @@ def _build_public_usage_daily_series(
     return hourly_rows
 
 
-@router.get("/conversations", response_model=ConversationAnalyticsSummaryOut)
-async def get_conversation_analytics_summary(
-    session: SessionDep,
-    platform: Annotated[str | None, Query()] = None,
-    start: Annotated[datetime | None, Query()] = None,
-    end: Annotated[datetime | None, Query()] = None,
-) -> Any:
-    if platform not in {None, "both", "public", "internal"}:
-        raise HTTPException(status_code=400, detail="Invalid platform")
+def _message_count_subquery(message_time_filters: list[Any]) -> Any:
+    message_count_stmt = select(
+        Message.conversation_id.label("conversation_id"),
+        func.count(Message.id).label("message_count"),
+    )
+    if message_time_filters:
+        message_count_stmt = message_count_stmt.where(*message_time_filters)
+    return message_count_stmt.group_by(Message.conversation_id).subquery()
 
-    if start and end and start > end:
-        raise HTTPException(status_code=400, detail="Invalid time range")
 
-    platform_value = "both" if platform in (None, "both") else platform
-    include_public = platform_value in ("both", "public")
-    include_internal = platform_value in ("both", "internal")
-
-    platform_conditions: list[Any] = []
-    if include_public:
-        platform_conditions.append(Conversation.is_public.is_(True))
-    if include_internal:
-        platform_conditions.append(Conversation.is_public.is_(False))
-
-    platform_filter = or_(*platform_conditions)
-
+def _conversation_time_filters(
+    start: datetime | None, end: datetime | None
+) -> tuple[list[Any], list[Any]]:
     conversation_time_filters: list[Any] = []
     message_time_filters: list[Any] = []
     if start is not None:
@@ -175,16 +239,52 @@ async def get_conversation_analytics_summary(
     if end is not None:
         conversation_time_filters.append(Conversation.created_at <= end)
         message_time_filters.append(Message.created_at <= end)
+    return conversation_time_filters, message_time_filters
 
-    message_count_stmt = select(
-        Message.conversation_id.label("conversation_id"),
-        func.count(Message.id).label("message_count"),
+
+def _analytics_stats_from_row(
+    row: Any, *, min_field: str, max_field: str, avg_field: str
+) -> ConversationAnalyticsStatsOut | None:
+    min_value = getattr(row, min_field)
+    if min_value is None:
+        return None
+    return ConversationAnalyticsStatsOut(
+        min=float(min_value),
+        p50=float(row.p50 or 0),
+        median=float(row.p50 or 0),
+        avg=float(getattr(row, avg_field) or 0),
+        p75=float(row.p75 or 0),
+        p90=float(row.p90 or 0),
+        p95=float(row.p95 or 0),
+        p99=float(row.p99 or 0),
+        max=float(getattr(row, max_field) or 0),
     )
-    if message_time_filters:
-        message_count_stmt = message_count_stmt.where(*message_time_filters)
 
-    message_count_subquery = message_count_stmt.group_by(Message.conversation_id).subquery()
 
+@router.get("/conversations", response_model=ConversationAnalyticsSummaryOut)
+async def get_conversation_analytics_summary(
+    session: SessionDep,
+    current_user: AnalyticsAccessUser,
+    platform: Annotated[str | None, Query()] = None,
+    start: Annotated[datetime | None, Query()] = None,
+    end: Annotated[datetime | None, Query()] = None,
+) -> Any:
+    _ = current_user
+    if platform not in {None, "both", "public", "internal"}:
+        raise HTTPException(status_code=400, detail="Invalid platform")
+    if start is not None and end is not None and start > end:
+        raise HTTPException(status_code=400, detail="Invalid time range")
+
+    platform_value = "both" if platform in (None, "both") else platform
+    platform_conditions: list[Any] = []
+    if platform_value in {"both", "public"}:
+        platform_conditions.append(Conversation.is_public.is_(True))
+    if platform_value in {"both", "internal"}:
+        platform_conditions.append(Conversation.is_public.is_(False))
+    platform_filter = or_(*platform_conditions)
+
+    conversation_time_filters, message_time_filters = _conversation_time_filters(start, end)
+    message_count_subquery = _message_count_subquery(message_time_filters)
     message_count = func.coalesce(message_count_subquery.c.message_count, 0)
     single_message_rate_expr = func.avg(case((message_count <= 1, 1), else_=0))
 
@@ -207,20 +307,10 @@ async def get_conversation_analytics_summary(
         .group_by(time_bucket)
         .order_by(time_bucket)
     )
-
-    daily_result = await session.execute(daily_stmt)
-    daily_rows = daily_result.all()
+    daily_rows = (await session.execute(daily_stmt)).all()
     daily_series = _build_conversation_daily_series(
         daily_rows, start, end, use_hourly=use_hourly_buckets
     )
-
-    bucket_defs = [
-        ("1", MESSAGE_BUCKET_1, MESSAGE_BUCKET_1),
-        ("2-3", MESSAGE_BUCKET_2, MESSAGE_BUCKET_3),
-        ("4-6", MESSAGE_BUCKET_4, MESSAGE_BUCKET_6),
-        ("7-9", MESSAGE_BUCKET_7, MESSAGE_BUCKET_9),
-        ("10+", MESSAGE_BUCKET_10, None),
-    ]
 
     message_stats_stmt = (
         select(
@@ -257,14 +347,6 @@ async def get_conversation_analytics_summary(
     )
     message_stats = (await session.execute(message_stats_stmt)).one()
 
-    bucket_counts = {
-        "1": message_stats.bucket_1 or 0,
-        "2-3": message_stats.bucket_2_3 or 0,
-        "4-6": message_stats.bucket_4_6 or 0,
-        "7-9": message_stats.bucket_7_9 or 0,
-        "10+": message_stats.bucket_10_plus or 0,
-    }
-
     hour_bucket = func.date_part("hour", Message.created_at)
     hourly_stmt = (
         select(
@@ -275,81 +357,95 @@ async def get_conversation_analytics_summary(
         .group_by(hour_bucket)
         .order_by(hour_bucket)
     )
-    hourly_result = await session.execute(hourly_stmt)
-    hourly_rows = {row.hour: row.messages for row in hourly_result}
+    hourly_rows = {row.hour: row.messages for row in await session.execute(hourly_stmt)}
 
     response_time_expr: ColumnElement[float] = cast(OtelSpan.total_time, Float)
     span_time_expr = func.coalesce(OtelSpan.span_time, OtelSpan.start_time, OtelSpan.created_at)
-    response_time_filters: list[Any] = [OtelSpan.total_time.is_not(None)]
-
+    response_time_filters: list[Any] = [OtelSpan.total_time.is_not(None), response_time_expr >= 0]
+    response_is_public_expr = case(
+        (OtelSpan.is_internal.is_not(None), ~OtelSpan.is_internal),
+        (Conversation.is_public.is_not(None), Conversation.is_public),
+        else_=None,
+    )
     if platform_value == "internal":
-        response_time_filters.append(OtelSpan.is_internal.is_(True))
+        response_time_filters.append(response_is_public_expr.is_(False))
     elif platform_value == "public":
-        response_time_filters.append(OtelSpan.is_internal.is_(False))
-
+        response_time_filters.append(response_is_public_expr.is_(True))
     if start is not None:
         response_time_filters.append(span_time_expr >= start)
     if end is not None:
         response_time_filters.append(span_time_expr <= end)
 
-    response_time_filters.append(response_time_expr >= 0)
-
-    response_time_stmt = select(
-        func.min(response_time_expr).label("min_time"),
-        func.percentile_cont(0.5).within_group(response_time_expr).label("p50"),
-        func.percentile_cont(0.75).within_group(response_time_expr).label("p75"),
-        func.percentile_cont(0.9).within_group(response_time_expr).label("p90"),
-        func.percentile_cont(0.95).within_group(response_time_expr).label("p95"),
-        func.percentile_cont(0.99).within_group(response_time_expr).label("p99"),
-        func.avg(response_time_expr).label("avg_time"),
-        func.max(response_time_expr).label("max_time"),
-        func.sum(case((response_time_expr < RESPONSE_BUCKET_5, 1), else_=0)).label("bucket_0_5"),
-        func.sum(
-            case(
-                (
-                    (response_time_expr >= RESPONSE_BUCKET_5)
-                    & (response_time_expr < RESPONSE_BUCKET_10),
-                    1,
-                ),
-                else_=0,
-            )
-        ).label("bucket_5_10"),
-        func.sum(
-            case(
-                (
-                    (response_time_expr >= RESPONSE_BUCKET_10)
-                    & (response_time_expr < RESPONSE_BUCKET_15),
-                    1,
-                ),
-                else_=0,
-            )
-        ).label("bucket_10_15"),
-        func.sum(
-            case(
-                (
-                    (response_time_expr >= RESPONSE_BUCKET_15)
-                    & (response_time_expr < RESPONSE_BUCKET_20),
-                    1,
-                ),
-                else_=0,
-            )
-        ).label("bucket_15_20"),
-        func.sum(
-            case(
-                (
-                    (response_time_expr >= RESPONSE_BUCKET_20)
-                    & (response_time_expr < RESPONSE_BUCKET_25),
-                    1,
-                ),
-                else_=0,
-            )
-        ).label("bucket_20_25"),
-        func.sum(case((response_time_expr >= RESPONSE_BUCKET_25, 1), else_=0)).label(
-            "bucket_25_plus"
-        ),
-    ).where(*response_time_filters)
+    response_time_stmt = (
+        select(
+            func.min(response_time_expr).label("min_time"),
+            func.percentile_cont(0.5).within_group(response_time_expr).label("p50"),
+            func.percentile_cont(0.75).within_group(response_time_expr).label("p75"),
+            func.percentile_cont(0.9).within_group(response_time_expr).label("p90"),
+            func.percentile_cont(0.95).within_group(response_time_expr).label("p95"),
+            func.percentile_cont(0.99).within_group(response_time_expr).label("p99"),
+            func.avg(response_time_expr).label("avg_time"),
+            func.max(response_time_expr).label("max_time"),
+            func.sum(case((response_time_expr < RESPONSE_BUCKET_5, 1), else_=0)).label(
+                "bucket_0_5"
+            ),
+            func.sum(
+                case(
+                    (
+                        (response_time_expr >= RESPONSE_BUCKET_5)
+                        & (response_time_expr < RESPONSE_BUCKET_10),
+                        1,
+                    ),
+                    else_=0,
+                )
+            ).label("bucket_5_10"),
+            func.sum(
+                case(
+                    (
+                        (response_time_expr >= RESPONSE_BUCKET_10)
+                        & (response_time_expr < RESPONSE_BUCKET_15),
+                        1,
+                    ),
+                    else_=0,
+                )
+            ).label("bucket_10_15"),
+            func.sum(
+                case(
+                    (
+                        (response_time_expr >= RESPONSE_BUCKET_15)
+                        & (response_time_expr < RESPONSE_BUCKET_20),
+                        1,
+                    ),
+                    else_=0,
+                )
+            ).label("bucket_15_20"),
+            func.sum(
+                case(
+                    (
+                        (response_time_expr >= RESPONSE_BUCKET_20)
+                        & (response_time_expr < RESPONSE_BUCKET_25),
+                        1,
+                    ),
+                    else_=0,
+                )
+            ).label("bucket_20_25"),
+            func.sum(case((response_time_expr >= RESPONSE_BUCKET_25, 1), else_=0)).label(
+                "bucket_25_plus"
+            ),
+        )
+        .select_from(OtelSpan)
+        .outerjoin(Conversation, Conversation.id == OtelSpan.conversation_id)
+        .where(*response_time_filters)
+    )
     response_time_stats_row = (await session.execute(response_time_stmt)).one()
 
+    bucket_counts = {
+        "1": message_stats.bucket_1 or 0,
+        "2-3": message_stats.bucket_2_3 or 0,
+        "4-6": message_stats.bucket_4_6 or 0,
+        "7-9": message_stats.bucket_7_9 or 0,
+        "10+": message_stats.bucket_10_plus or 0,
+    }
     response_time_bucket_defs = [
         ("0-<5s", response_time_stats_row.bucket_0_5 or 0),
         ("5-<10s", response_time_stats_row.bucket_5_10 or 0),
@@ -359,34 +455,6 @@ async def get_conversation_analytics_summary(
         ("≥25s", response_time_stats_row.bucket_25_plus or 0),
     ]
 
-    length_stats = None
-    if message_stats.min_messages is not None:
-        length_stats = ConversationAnalyticsStatsOut(
-            min=float(message_stats.min_messages),
-            p50=float(message_stats.p50 or 0),
-            median=float(message_stats.p50 or 0),
-            avg=float(message_stats.avg_messages or 0),
-            p75=float(message_stats.p75 or 0),
-            p90=float(message_stats.p90 or 0),
-            p95=float(message_stats.p95 or 0),
-            p99=float(message_stats.p99 or 0),
-            max=float(message_stats.max_messages or 0),
-        )
-
-    response_time_stats = None
-    if response_time_stats_row.min_time is not None:
-        response_time_stats = ConversationAnalyticsStatsOut(
-            min=float(response_time_stats_row.min_time),
-            p50=float(response_time_stats_row.p50 or 0),
-            median=float(response_time_stats_row.p50 or 0),
-            avg=float(response_time_stats_row.avg_time or 0),
-            p75=float(response_time_stats_row.p75 or 0),
-            p90=float(response_time_stats_row.p90 or 0),
-            p95=float(response_time_stats_row.p95 or 0),
-            p99=float(response_time_stats_row.p99 or 0),
-            max=float(response_time_stats_row.max_time or 0),
-        )
-
     return ConversationAnalyticsSummaryOut(
         total_conversations=message_stats.total_conversations,
         total_messages=message_stats.total_messages,
@@ -395,48 +463,44 @@ async def get_conversation_analytics_summary(
         daily=daily_series,
         length_buckets=[
             ConversationAnalyticsBucketOut(label=label, conversations=bucket_counts[label])
-            for label, _, _ in bucket_defs
+            for label in bucket_counts
         ],
         hourly_activity=[
             ConversationAnalyticsHourlyOut(hour=hour, messages=hourly_rows.get(hour, 0))
             for hour in range(24)
         ],
-        length_stats=length_stats,
+        length_stats=_analytics_stats_from_row(
+            message_stats,
+            min_field="min_messages",
+            max_field="max_messages",
+            avg_field="avg_messages",
+        ),
         response_time_buckets=[
             ConversationAnalyticsResponseTimeBucketOut(label=label, responses=count)
             for label, count in response_time_bucket_defs
         ],
-        response_time_stats=response_time_stats,
+        response_time_stats=_analytics_stats_from_row(
+            response_time_stats_row,
+            min_field="min_time",
+            max_field="max_time",
+            avg_field="avg_time",
+        ),
     )
 
 
-@router.get("/public-usage", response_model=PublicUsageSummaryOut, response_model_exclude_none=True)
+@router.get("/public-usage", response_model=PublicUsageSummaryOut)
 async def get_public_usage_summary(
     session: SessionDep,
+    current_user: PublicAnalyticsAccessUser,
     start: Annotated[datetime | None, Query()] = None,
     end: Annotated[datetime | None, Query()] = None,
 ) -> Any:
-    if start and end and start > end:
+    _ = current_user
+    if start is not None and end is not None and start > end:
         raise HTTPException(status_code=400, detail="Invalid time range")
 
-    conversation_time_filters: list[Any] = []
-    message_time_filters: list[Any] = []
-    if start is not None:
-        conversation_time_filters.append(Conversation.created_at >= start)
-        message_time_filters.append(Message.created_at >= start)
-    if end is not None:
-        conversation_time_filters.append(Conversation.created_at <= end)
-        message_time_filters.append(Message.created_at <= end)
-
-    message_count_stmt = select(
-        Message.conversation_id.label("conversation_id"),
-        func.count(Message.id).label("message_count"),
-    )
-    if message_time_filters:
-        message_count_stmt = message_count_stmt.where(*message_time_filters)
-
-    message_count_subquery = message_count_stmt.group_by(Message.conversation_id).subquery()
-
+    conversation_time_filters, message_time_filters = _conversation_time_filters(start, end)
+    message_count_subquery = _message_count_subquery(message_time_filters)
     message_count = func.coalesce(message_count_subquery.c.message_count, 0)
     drop_off_rate = func.avg(case((message_count <= 1, 1), else_=0))
 
@@ -451,19 +515,17 @@ async def get_public_usage_summary(
             func.coalesce(func.sum(message_count), 0).label("messages"),
             func.coalesce(func.avg(message_count), 0).label("avg_messages_per_conversation"),
             func.coalesce(drop_off_rate, 0).label("drop_off_rate"),
-            func.count(func.distinct(ConversationSync.email)).label("leads"),
+            func.count(func.distinct(PublicChatContact.email)).label("leads"),
         )
         .outerjoin(
             message_count_subquery, Conversation.id == message_count_subquery.c.conversation_id
         )
-        .outerjoin(ConversationSync, Conversation.id == ConversationSync.conversation_id)
+        .outerjoin(PublicChatContact, Conversation.id == PublicChatContact.conversation_id)
         .where(Conversation.is_public.is_(True), *conversation_time_filters)
         .group_by(time_bucket)
         .order_by(time_bucket)
     )
-
-    daily_result = await session.execute(daily_stmt)
-    daily_rows = daily_result.all()
+    daily_rows = (await session.execute(daily_stmt)).all()
     daily_series = _build_public_usage_daily_series(
         daily_rows, start, end, use_hourly=use_hourly_buckets
     )
@@ -478,8 +540,7 @@ async def get_public_usage_summary(
         )
         .where(Conversation.is_public.is_(True), *conversation_time_filters)
     )
-    counts_result = await session.execute(counts_stmt)
-    conversation_counts = [row.message_count for row in counts_result]
+    conversation_counts = [row.message_count for row in await session.execute(counts_stmt)]
 
     bucket_defs = [("1", 1, 1), ("2-3", 2, 3), ("4-6", 4, 6), ("7-9", 7, 9), ("10+", 10, None)]
     bucket_counts = {label: 0 for label, _, _ in bucket_defs}
@@ -499,8 +560,7 @@ async def get_public_usage_summary(
         .group_by(hour_bucket)
         .order_by(hour_bucket)
     )
-    hourly_result = await session.execute(hourly_stmt)
-    hourly_rows = {row.hour: row.messages for row in hourly_result}
+    hourly_rows = {row.hour: row.messages for row in await session.execute(hourly_stmt)}
 
     overall_stmt = (
         select(
@@ -508,17 +568,15 @@ async def get_public_usage_summary(
             func.coalesce(func.sum(message_count), 0).label("total_messages"),
             func.coalesce(func.avg(message_count), 0).label("avg_messages_per_conversation"),
             func.coalesce(drop_off_rate, 0).label("drop_off_rate"),
-            func.count(func.distinct(ConversationSync.email)).label("total_leads"),
+            func.count(func.distinct(PublicChatContact.email)).label("total_leads"),
         )
         .outerjoin(
             message_count_subquery, Conversation.id == message_count_subquery.c.conversation_id
         )
-        .outerjoin(ConversationSync, Conversation.id == ConversationSync.conversation_id)
+        .outerjoin(PublicChatContact, Conversation.id == PublicChatContact.conversation_id)
         .where(Conversation.is_public.is_(True), *conversation_time_filters)
     )
-
-    overall_result = await session.execute(overall_stmt)
-    overall = overall_result.one()
+    overall = (await session.execute(overall_stmt)).one()
 
     return PublicUsageSummaryOut(
         total_conversations=overall.total_conversations,

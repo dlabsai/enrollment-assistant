@@ -1,8 +1,8 @@
 import type { AuthenticatedApi } from "../../auth/hooks/use-authenticated-api";
 import type {
     ActiveVersion,
-    ChatbotVersionScope,
     PromptFile,
+    PromptSetScope,
     PromptSetVersion,
     PromptSetVersionCreate,
     PromptSetVersionListItem,
@@ -18,7 +18,7 @@ export const fetchDiskTemplates = async (
 export const fetchVersions = async (
     api: AuthenticatedApi,
     isInternal: boolean,
-    scope: ChatbotVersionScope,
+    scope: PromptSetScope,
 ): Promise<PromptSetVersionListItem[]> =>
     api.get<PromptSetVersionListItem[]>(
         `${PROMPT_MANAGEMENT_BASE}/versions?is_internal=${String(isInternal)}&scope=${scope}`,
@@ -27,7 +27,7 @@ export const fetchVersions = async (
 export const fetchDeployedVersion = async (
     api: AuthenticatedApi,
     isInternal: boolean,
-    scope: ChatbotVersionScope,
+    scope: PromptSetScope,
 ): Promise<ActiveVersion> =>
     api.get<ActiveVersion>(
         `${PROMPT_MANAGEMENT_BASE}/versions/deployed?is_internal=${String(isInternal)}&scope=${scope}`,
@@ -59,7 +59,7 @@ export const deployVersion = async (
 export const undeployVersion = async (
     api: AuthenticatedApi,
     isInternal: boolean,
-    scope: ChatbotVersionScope,
+    scope: PromptSetScope,
 ): Promise<ActiveVersion> =>
     api.post<ActiveVersion>(
         `${PROMPT_MANAGEMENT_BASE}/versions/undeploy?is_internal=${String(isInternal)}&scope=${scope}`,

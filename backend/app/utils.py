@@ -1,10 +1,13 @@
 import logging
 from datetime import UTC, datetime
-from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 def _get_logger() -> logging.Logger:
-    logger = logging.getLogger("va")
+    logger = logging.getLogger("demo-va")
     logger.setLevel(logging.INFO)
 
     uvicorn_logger = logging.getLogger("uvicorn")
@@ -35,19 +38,5 @@ def ensure_dir(dir_path: Path) -> None:
     dir_path.mkdir(parents=True, exist_ok=True)
 
 
-def configure_logfire() -> None:
-    import os  # noqa: PLC0415
-
-    import logfire  # noqa: PLC0415
-
-    from app.otel import get_database_span_processor  # noqa: PLC0415
-
-    logfire.configure(
-        service_name="va",
-        send_to_logfire="if-token-present",
-        scrubbing=False,
-        additional_span_processors=[get_database_span_processor()],
-    )
-    if os.getenv("LOGFIRE_INSTRUMENT_DB", "true").lower() == "true":
-        logfire.instrument_psycopg()
-        logfire.instrument_sqlalchemy()
+def configure_observability() -> None:
+    """Configure app-owned observability hooks."""

@@ -2,6 +2,7 @@ import { Button } from "@va/shared/components/ui/button";
 import {
     Select,
     SelectContent,
+    SelectGroup,
     SelectItem,
     SelectTrigger,
     SelectValue,
@@ -104,6 +105,15 @@ export const EditorToolbar = (): JSX.Element | undefined => {
             ? DEFAULT_VERSION_OPTION
             : selectedVersionId;
 
+    const selectedVersionLabel =
+        isDefaultSelected || selectedVersionId === undefined
+            ? "Default"
+            : selectedVersion === undefined
+              ? selectedVersionDetail?.id === selectedVersionId
+                  ? `v${selectedVersionDetail.version_number} – ${selectedVersionDetail.name}`
+                  : undefined
+              : `v${selectedVersion.version_number} – ${selectedVersion.name}`;
+
     const canDeploy =
         selectedVersion !== undefined && !selectedVersion.is_deployed;
     const canUndeploy = isDefaultSelected && deployedVersion?.id !== undefined;
@@ -137,21 +147,23 @@ export const EditorToolbar = (): JSX.Element | undefined => {
                     type="button"
                     variant="outline"
                 >
-                    <PanelLeft className="size-4" />
+                    <PanelLeft />
                     <span className="sr-only">Open sidebar</span>
                 </Button>
                 <Sheet>
-                    <SheetTrigger asChild>
-                        <Button
-                            className="md:hidden"
-                            size="icon-sm"
-                            type="button"
-                            variant="outline"
-                        >
-                            <Menu className="size-4" />
-                            <span className="sr-only">Open navigation</span>
-                        </Button>
-                    </SheetTrigger>
+                    <SheetTrigger
+                        render={
+                            <Button
+                                className="md:hidden"
+                                size="icon-sm"
+                                type="button"
+                                variant="outline"
+                            >
+                                <Menu />
+                                <span className="sr-only">Open navigation</span>
+                            </Button>
+                        }
+                    />
                     <SheetContent
                         className="w-80! max-w-none! overflow-x-hidden p-0"
                         side="left"
@@ -162,6 +174,10 @@ export const EditorToolbar = (): JSX.Element | undefined => {
                 {showVersionControls && (
                     <Select
                         onValueChange={(value) => {
+                            if (value === null) {
+                                return;
+                            }
+
                             if (value === DEFAULT_VERSION_OPTION) {
                                 requestSelectDefault();
                             } else {
@@ -171,20 +187,25 @@ export const EditorToolbar = (): JSX.Element | undefined => {
                         value={versionValue}
                     >
                         <SelectTrigger className="w-48">
-                            <SelectValue placeholder="Select version" />
+                            <SelectValue placeholder="Select version">
+                                {selectedVersionLabel}
+                            </SelectValue>
                         </SelectTrigger>
                         <SelectContent>
-                            <SelectItem value={DEFAULT_VERSION_OPTION}>
-                                Default
-                            </SelectItem>
-                            {versions.map((version) => (
-                                <SelectItem
-                                    key={version.id}
-                                    value={version.id}
-                                >
-                                    v{version.version_number} – {version.name}
+                            <SelectGroup>
+                                <SelectItem value={DEFAULT_VERSION_OPTION}>
+                                    Default
                                 </SelectItem>
-                            ))}
+                                {versions.map((version) => (
+                                    <SelectItem
+                                        key={version.id}
+                                        value={version.id}
+                                    >
+                                        v{version.version_number} –{" "}
+                                        {version.name}
+                                    </SelectItem>
+                                ))}
+                            </SelectGroup>
                         </SelectContent>
                     </Select>
                 )}
@@ -199,7 +220,7 @@ export const EditorToolbar = (): JSX.Element | undefined => {
                             size="sm"
                             variant="outline"
                         >
-                            <Rocket className="mr-2 size-4" />
+                            <Rocket data-icon="inline-start" />
                             Deploy
                         </Button>
                     )}
@@ -212,7 +233,7 @@ export const EditorToolbar = (): JSX.Element | undefined => {
                         size="sm"
                         variant="outline"
                     >
-                        <Rocket className="mr-2 size-4" />
+                        <Rocket data-icon="inline-start" />
                         Deploy
                     </Button>
                 )}
@@ -227,23 +248,27 @@ export const EditorToolbar = (): JSX.Element | undefined => {
                             size="sm"
                             variant="outline"
                         >
-                            <Trash2 className="mr-2 size-4" />
+                            <Trash2 data-icon="inline-start" />
                             Delete
                         </Button>
                     )}
                 {selectedTemplate !== undefined && (
                     <TooltipProvider>
                         <Tooltip>
-                            <TooltipTrigger asChild>
-                                <Button
-                                    disabled={!isModified}
-                                    onClick={toggleDiff}
-                                    size="icon-sm"
-                                    variant={showDiff ? "secondary" : "outline"}
-                                >
-                                    <GitCompareArrows className="size-4" />
-                                </Button>
-                            </TooltipTrigger>
+                            <TooltipTrigger
+                                render={
+                                    <Button
+                                        disabled={!isModified}
+                                        onClick={toggleDiff}
+                                        size="icon-sm"
+                                        variant={
+                                            showDiff ? "secondary" : "outline"
+                                        }
+                                    >
+                                        <GitCompareArrows />
+                                    </Button>
+                                }
+                            />
                             <TooltipContent>
                                 {showDiff ? "Hide" : "Show"} diff
                             </TooltipContent>
@@ -253,17 +278,19 @@ export const EditorToolbar = (): JSX.Element | undefined => {
                 {selectedTemplate !== undefined && (
                     <TooltipProvider>
                         <Tooltip>
-                            <TooltipTrigger asChild>
-                                <Button
-                                    onClick={toggleWrapLines}
-                                    size="icon-sm"
-                                    variant={
-                                        wrapLines ? "secondary" : "outline"
-                                    }
-                                >
-                                    <WrapText className="size-4" />
-                                </Button>
-                            </TooltipTrigger>
+                            <TooltipTrigger
+                                render={
+                                    <Button
+                                        onClick={toggleWrapLines}
+                                        size="icon-sm"
+                                        variant={
+                                            wrapLines ? "secondary" : "outline"
+                                        }
+                                    >
+                                        <WrapText />
+                                    </Button>
+                                }
+                            />
                             <TooltipContent>
                                 {wrapLines ? "Disable" : "Enable"} line wrapping
                             </TooltipContent>
@@ -283,19 +310,21 @@ export const EditorToolbar = (): JSX.Element | undefined => {
                 {showTestChatToggle && (
                     <TooltipProvider>
                         <Tooltip>
-                            <TooltipTrigger asChild>
-                                <Button
-                                    onClick={toggleChatPanel}
-                                    size="icon-sm"
-                                    variant={
-                                        isChatPanelOpen
-                                            ? "secondary"
-                                            : "outline"
-                                    }
-                                >
-                                    <MessageSquareText className="size-4" />
-                                </Button>
-                            </TooltipTrigger>
+                            <TooltipTrigger
+                                render={
+                                    <Button
+                                        onClick={toggleChatPanel}
+                                        size="icon-sm"
+                                        variant={
+                                            isChatPanelOpen
+                                                ? "secondary"
+                                                : "outline"
+                                        }
+                                    >
+                                        <MessageSquareText />
+                                    </Button>
+                                }
+                            />
                             <TooltipContent>
                                 {isChatPanelOpen ? "Hide" : "Show"} test chat
                             </TooltipContent>

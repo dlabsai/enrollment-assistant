@@ -21,6 +21,7 @@ import {
     formatTimeSeriesTooltipLabel,
     isHourlyTimeRange,
 } from "../../lib/time-series";
+import { formatUsageCost } from "../lib/formatters";
 import type { UsageDaily } from "../types";
 
 interface CostChartProps {
@@ -34,15 +35,6 @@ const chartConfig = {
         color: "var(--chart-4)",
     },
 } satisfies ChartConfig;
-
-const formatCost = (cost: number): string => {
-    if (cost > 0 && cost < 0.0001) {
-        return "<$0.0001";
-    }
-    return cost < 0.01 && cost > 0
-        ? `$${cost.toFixed(4)}`
-        : `$${cost.toFixed(2)}`;
-};
 
 export const CostChart = ({ data, timeRange }: CostChartProps): JSX.Element => {
     const isHourly = isHourlyTimeRange(timeRange);
@@ -94,7 +86,7 @@ export const CostChart = ({ data, timeRange }: CostChartProps): JSX.Element => {
                         />
                         <YAxis
                             axisLine={false}
-                            tickFormatter={(value: number) => formatCost(value)}
+                            tickFormatter={(value: number) => formatUsageCost(value)}
                             tickLine={false}
                             width={64}
                         />
@@ -103,13 +95,16 @@ export const CostChart = ({ data, timeRange }: CostChartProps): JSX.Element => {
                                 <ChartTooltipContent
                                     formatter={(value) =>
                                         typeof value === "number"
-                                            ? formatCost(value)
+                                            ? formatUsageCost(value)
                                             : value
                                     }
                                     indicator="line"
-                                    labelFormatter={(value: string) =>
+                                    labelFormatter={(value) =>
                                         formatTimeSeriesTooltipLabel(
-                                            value,
+                                            typeof value === "string" ||
+                                                typeof value === "number"
+                                                ? String(value)
+                                                : "",
                                             timeRange,
                                         )
                                     }

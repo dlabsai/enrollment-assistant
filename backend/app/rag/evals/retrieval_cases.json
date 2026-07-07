@@ -1,0 +1,173 @@
+{
+  "name": "demo_university_rag_retrieval_v2",
+  "description": "Synthetic Demo University retrieval cases for aligned website, catalog, and internal training-material content.",
+  "version": 2,
+  "cases": [
+    {
+      "id": "demo_ai_bachelors_program",
+      "query": "Does Demo University offer a bachelor's program in artificial intelligence?",
+      "audience": "public",
+      "source": "synthetic",
+      "failure_mode": "website_program_lookup",
+      "regression": true,
+      "document_types": ["website_program"],
+      "required_sources": [
+        {"type": "website_program", "id": 2002, "title": "Artificial Intelligence, BS"}
+      ],
+      "acceptable_sources": [],
+      "forbidden_sources": [{"type": "training_material", "id": -4011}],
+      "expected_terms": ["Machine-learning foundations", "responsible AI", "Software Engineering, BS"],
+      "pass_criteria": {
+        "source_hit_at_k": 10,
+        "expected_terms_in_top_k": 10,
+        "forbidden_source_miss_at_k": 10,
+        "source_policy": "any_required_or_acceptable"
+      },
+      "notes": "Public program search should find the richer website AI bachelor's page without relying on internal training materials."
+    },
+    {
+      "id": "demo_transfer_credit_internal_guidance",
+      "query": "What should staff tell a transfer student about unofficial transcripts and transfer-credit review?",
+      "audience": "internal",
+      "source": "synthetic",
+      "failure_mode": "internal_training_material_lookup",
+      "regression": true,
+      "document_types": ["training_material"],
+      "required_sources": [
+        {"type": "training_material", "id": -4004, "title": "Transfer Credit Evaluation"}
+      ],
+      "acceptable_sources": [
+        {"type": "training_material", "id": -4001, "title": "Application and File Completion"}
+      ],
+      "forbidden_sources": [],
+      "expected_terms": ["Unofficial transcripts", "official transcripts", "final transfer-credit evaluation"],
+      "pass_criteria": {
+        "source_hit_at_k": 10,
+        "expected_terms_in_top_k": 10,
+        "forbidden_source_miss_at_k": 10,
+        "source_policy": "any_required_or_acceptable"
+      },
+      "notes": "Internal source priority should surface staff training before public transfer-student pages."
+    },
+    {
+      "id": "demo_catalog_policy_source_of_truth",
+      "query": "Where should staff direct students for academic policies and procedures?",
+      "audience": "internal",
+      "source": "synthetic",
+      "failure_mode": "catalog_page_lookup",
+      "regression": true,
+      "document_types": ["catalog_page"],
+      "required_sources": [
+        {"type": "catalog_page", "id": 5001, "title": "Academic Policies"}
+      ],
+      "acceptable_sources": [
+        {"type": "catalog_page", "id": 5003, "title": "Catalog Home"}
+      ],
+      "forbidden_sources": [],
+      "expected_terms": ["official source", "academic policies and procedures", "do not interpret policy exceptions"],
+      "pass_criteria": {
+        "source_hit_at_k": 10,
+        "expected_terms_in_top_k": 10,
+        "forbidden_source_miss_at_k": 10,
+        "source_policy": "any_required_or_acceptable"
+      },
+      "notes": "Catalog pages are normal RAG content and policy source-of-truth evidence."
+    },
+    {
+      "id": "demo_mba_catalog_courses",
+      "query": "What core courses are listed for the MBA in the catalog?",
+      "audience": "internal",
+      "source": "synthetic",
+      "failure_mode": "catalog_program_course_lookup",
+      "regression": true,
+      "document_types": ["catalog_program", "catalog_course"],
+      "required_sources": [
+        {"type": "catalog_program", "id": 6004, "title": "Business Administration, MBA"}
+      ],
+      "acceptable_sources": [
+        {"type": "catalog_course", "id": 7011, "title": "BUS 520 - Strategic Management"},
+        {"type": "catalog_course", "id": 7015, "title": "BUS 690 - MBA Capstone"}
+      ],
+      "forbidden_sources": [],
+      "expected_terms": ["BUS 520", "BUS 690", "36"],
+      "pass_criteria": {
+        "source_hit_at_k": 10,
+        "expected_terms_in_top_k": 10,
+        "forbidden_source_miss_at_k": 10,
+        "source_policy": "any_required_or_acceptable"
+      },
+      "notes": "Catalog program/course content is available as ordinary grounding content."
+    },
+    {
+      "id": "demo_financial_aid_staff_process",
+      "query": "How should staff explain financial aid timing without promising award amounts?",
+      "audience": "internal",
+      "source": "synthetic",
+      "failure_mode": "staff_process_lookup",
+      "regression": true,
+      "document_types": ["training_material"],
+      "required_sources": [
+        {"type": "training_material", "id": -4006, "title": "Financial Aid Conversation Guide"}
+      ],
+      "acceptable_sources": [],
+      "forbidden_sources": [],
+      "expected_terms": ["Eligibility and amounts", "required review", "refund timing"],
+      "pass_criteria": {
+        "source_hit_at_k": 10,
+        "expected_terms_in_top_k": 10,
+        "forbidden_source_miss_at_k": 10,
+        "source_policy": "any_required_or_acceptable"
+      },
+      "notes": "Staff financial-aid answers should ground in internal process guidance."
+    },
+    {
+      "id": "demo_counseling_timeline_and_field_experience",
+      "query": "Why does the Clinical Mental Health Counseling MS take longer than a short certificate?",
+      "audience": "internal",
+      "source": "synthetic",
+      "failure_mode": "program_timeline_lookup",
+      "regression": true,
+      "document_types": ["training_material", "website_program", "catalog_program"],
+      "required_sources": [
+        {"type": "training_material", "id": -4009, "title": "Clinical Mental Health Counseling Field Experience - Current Admissions Guidance"}
+      ],
+      "acceptable_sources": [
+        {"type": "website_program", "id": 2005, "title": "Clinical Mental Health Counseling, MS"},
+        {"type": "catalog_program", "id": 6005, "title": "Clinical Mental Health Counseling, MS"}
+      ],
+      "forbidden_sources": [],
+      "expected_terms": ["60-credit", "structured course sequence", "field-experience"],
+      "pass_criteria": {
+        "source_hit_at_k": 10,
+        "expected_terms_in_top_k": 10,
+        "forbidden_source_miss_at_k": 10,
+        "source_policy": "any_required_or_acceptable"
+      },
+      "notes": "Internal timeline answers should prefer current training guidance and can supplement with website/catalog program context."
+    },
+    {
+      "id": "demo_counseling_conflict_escalation",
+      "query": "Internal counseling documents conflict on practicum hours. What should staff verify?",
+      "audience": "internal",
+      "source": "synthetic",
+      "failure_mode": "conflicting_training_materials",
+      "regression": true,
+      "document_types": ["training_material"],
+      "required_sources": [
+        {"type": "training_material", "id": -4008, "title": "Source Conflict Escalation"},
+        {"type": "training_material", "id": -4009, "title": "Clinical Mental Health Counseling Field Experience - Current Admissions Guidance"},
+        {"type": "training_material", "id": -4010, "title": "Clinical Mental Health Counseling One-Page Sheet - Legacy"}
+      ],
+      "acceptable_sources": [],
+      "forbidden_sources": [],
+      "expected_terms": ["documents conflict", "Documents to verify", "admissions operations"],
+      "pass_criteria": {
+        "source_hit_at_k": 10,
+        "expected_terms_in_top_k": 10,
+        "forbidden_source_miss_at_k": 10,
+        "source_policy": "all_required"
+      },
+      "notes": "Conflict handling should retrieve both conflicting synthetic training materials plus the escalation playbook."
+    }
+  ]
+}

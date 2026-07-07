@@ -9,6 +9,7 @@ import {
 } from "@va/shared/components/ui/card";
 import type { JSX } from "react";
 
+import { formatLocaleNumber } from "../../lib/number-format";
 import type { ChatAnalyticsSummary } from "../../usage/types";
 
 interface ChatSummaryCardsProps {
@@ -16,7 +17,9 @@ interface ChatSummaryCardsProps {
 }
 
 const formatAvg = (value: number): string =>
-    value % 1 === 0 ? value.toFixed(0) : value.toFixed(1);
+    formatLocaleNumber(value, {
+        maximumFractionDigits: value % 1 === 0 ? 0 : 1,
+    });
 
 const cardGridClassName =
     "*:data-[slot=card]:from-primary/5 *:data-[slot=card]:to-card dark:*:data-[slot=card]:bg-card grid grid-cols-1 gap-4 *:data-[slot=card]:bg-gradient-to-t *:data-[slot=card]:shadow-xs @xl/main:grid-cols-2 @4xl/main:grid-cols-3";
@@ -29,7 +32,7 @@ export const ChatSummaryCards = ({
             <CardHeader>
                 <CardDescription>Total chats</CardDescription>
                 <CardTitle className="text-2xl font-semibold tabular-nums @[250px]/card:text-3xl">
-                    {summary.total_conversations.toLocaleString()}
+                    {formatLocaleNumber(summary.total_conversations)}
                 </CardTitle>
                 <CardAction>
                     <IconMessage className="text-muted-foreground size-5" />
@@ -41,16 +44,16 @@ export const ChatSummaryCards = ({
         </Card>
         <Card className="@container/card">
             <CardHeader>
-                <CardDescription>Total chat turns</CardDescription>
+                <CardDescription>Total messages</CardDescription>
                 <CardTitle className="text-2xl font-semibold tabular-nums @[250px]/card:text-3xl">
-                    {summary.total_messages.toLocaleString()}
+                    {formatLocaleNumber(summary.total_messages)}
                 </CardTitle>
                 <CardAction>
                     <IconMessages className="text-muted-foreground size-5" />
                 </CardAction>
             </CardHeader>
             <CardContent className="text-muted-foreground text-sm">
-                Chat turn = user + assistant message
+                User and assistant messages
             </CardContent>
         </Card>
         <Card className="@container/card">

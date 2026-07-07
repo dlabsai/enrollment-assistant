@@ -15,6 +15,7 @@ import {
     ChartTooltipContent,
 } from "@/components/ui/chart";
 
+import { formatLocaleNumber } from "../../lib/number-format";
 import type { ChatAnalyticsHourly, PublicUsageHourly } from "../../usage/types";
 
 type MessagesByHourDatum = ChatAnalyticsHourly | PublicUsageHourly;
@@ -30,18 +31,12 @@ const chartConfig = {
     },
 } satisfies ChartConfig;
 
-const formatHour = (hour: number): string => {
-    if (hour === 0) {
-        return "12a";
-    }
-    if (hour < 12) {
-        return `${hour}a`;
-    }
-    if (hour === 12) {
-        return "12p";
-    }
-    return `${hour - 12}p`;
-};
+const hourFormatter = new Intl.DateTimeFormat(undefined, {
+    hour: "numeric",
+});
+
+const formatHour = (hour: number): string =>
+    hourFormatter.format(new Date(2000, 0, 1, hour));
 
 const hasPayload = (value: unknown): value is { payload: unknown } =>
     typeof value === "object" && value !== null && "payload" in value;
@@ -109,7 +104,7 @@ export const MessagesByHourChart = ({
                             <ChartTooltipContent
                                 formatter={(value) =>
                                     typeof value === "number"
-                                        ? value.toLocaleString()
+                                        ? formatLocaleNumber(value)
                                         : value
                                 }
                                 labelFormatter={(labelValue, payload) => {

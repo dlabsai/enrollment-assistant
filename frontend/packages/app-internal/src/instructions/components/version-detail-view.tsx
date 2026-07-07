@@ -17,12 +17,14 @@ interface PromptDiffCardProps {
     filename: string;
     content: string;
     originalContent: string;
+    fillHeight?: boolean;
 }
 
 const PromptDiffCard = ({
     filename,
     content,
     originalContent,
+    fillHeight = false,
 }: PromptDiffCardProps): JSX.Element => {
     const wrapLines = useInstructionsStore((state) => state.wrapLines);
     const isDarkMode = useDarkMode();
@@ -36,14 +38,20 @@ const PromptDiffCard = ({
     );
 
     return (
-        <div className="border-border rounded-lg border">
+        <div
+            className={
+                fillHeight
+                    ? "border-border flex min-h-0 flex-1 flex-col rounded-lg border"
+                    : "border-border rounded-lg border"
+            }
+        >
             <div className="bg-muted/30 border-border flex items-center gap-2 border-b px-3 py-2">
                 <InstructionIcon filename={filename} />
                 <span className="font-medium">
                     {formatInstructionName(filename)}
                 </span>
             </div>
-            <div className="h-64">
+            <div className={fillHeight ? "min-h-0 flex-1" : "h-64"}>
                 <CodeMirrorMerge
                     className="h-full [&_.cm-editor]:h-full [&_.cm-mergeView]:h-full [&_.cm-scroller]:overflow-auto"
                     collapseUnchanged={{
@@ -85,9 +93,17 @@ export const VersionDetailView = (): JSX.Element | undefined => {
         return diskTemplate?.content !== prompt.content;
     });
 
+    const fillHeight = modifiedPrompts.length === 1;
+
     return (
         <ScrollArea className="min-h-0 flex-1">
-            <div className="space-y-6 p-3">
+            <div
+                className={
+                    fillHeight
+                        ? "flex h-full min-h-0 flex-col p-3"
+                        : "space-y-6 p-3"
+                }
+            >
                 {modifiedPrompts.map((prompt) => {
                     const diskTemplate = diskTemplates.find(
                         (template) => template.filename === prompt.filename,
@@ -96,6 +112,7 @@ export const VersionDetailView = (): JSX.Element | undefined => {
                         <PromptDiffCard
                             content={prompt.content}
                             filename={prompt.filename}
+                            fillHeight={fillHeight}
                             key={prompt.id}
                             originalContent={diskTemplate?.content ?? ""}
                         />

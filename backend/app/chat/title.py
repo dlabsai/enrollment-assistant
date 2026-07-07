@@ -1,15 +1,20 @@
 import logging
-from uuid import UUID
+from typing import TYPE_CHECKING
 
+from pydantic_ai import ModelRequest
+from pydantic_ai.direct import model_request
+from pydantic_ai.messages import TextPart
+
+from app.chat.agents import get_pydantic_ai_model_name
+from app.chat.config import TEMPLATES_DIR
+from app.chat.template_utils import get_runtime_jinja_environment
 from app.core.config import settings
 from app.core.db import get_session
-from app.llm.agents.title import (
-    create_title_agent,
-    render_title_prompt,
-    render_title_transcript_prompt,
-)
-from app.llm.runtime import run_agent_with_span
-from app.models import Conversation
+from app.models import Conversation, PromptSetScope
+from app.otel_genai import genai_agent_name_scope
+
+if TYPE_CHECKING:
+    from uuid import UUID
 
 logger = logging.getLogger(__name__)
 
@@ -41,27 +46,51 @@ def _normalize_title(title: str, fallback: str) -> str:
     return f"{first_line[:_TITLE_MAX_LENGTH].rstrip()}..."
 
 
+async def _render_title_prompt(user_prompt: str, *, is_internal: bool) -> str:
+    env = await get_runtime_jinja_environment(
+        TEMPLATES_DIR, is_internal=is_internal, scope=PromptSetScope.TITLE
+    )
+    template = env.get_template("title_agent.j2")
+    return template.render(user_prompt=user_prompt)
+
+
+async def _render_title_transcript_prompt(transcript: str, *, is_internal: bool) -> str:
+    env = await get_runtime_jinja_environment(
+        TEMPLATES_DIR, is_internal=is_internal, scope=PromptSetScope.TITLE_TRANSCRIPT
+    )
+    template = env.get_template("title_agent_transcript.j2")
+    return template.render(transcript=transcript)
+
+
+async def _run_title_prompt(prompt: str, *, agent_name: str) -> str:
+    with genai_agent_name_scope(agent_name):
+        response = await model_request(
+            get_pydantic_ai_model_name(settings.SUMMARIZER_MODEL),
+            [ModelRequest.user_text_prompt(prompt)],
+        )
+
+    first_part = response.parts[0]
+    if isinstance(first_part, TextPart):
+        return first_part.content
+
+    msg = "Title generation returned an unexpected response format"
+    raise ValueError(msg)
+
+
 async def generate_conversation_title(
     user_prompt: str, *, conversation_id: UUID | None = None, is_internal: bool = False
 ) -> str:
     fallback = build_fallback_title(user_prompt)
-
-    prompt = await render_title_prompt(user_prompt, is_internal=is_internal)
+    prompt = await _render_title_prompt(user_prompt.strip(), is_internal=is_internal)
 
     try:
-        agent = create_title_agent(settings.SUMMARIZER_MODEL)
-        result = await run_agent_with_span(
-            agent,
-            prompt=prompt,
-            span_name="generate_conversation_title",
-            agent_name="conversation_title",
-            is_internal=is_internal,
-            conversation_id=str(conversation_id) if conversation_id is not None else None,
-        )
-
-        return _normalize_title(result.output, fallback)
+        output = await _run_title_prompt(prompt, agent_name="title")
+        return _normalize_title(output, fallback)
     except Exception:
-        logger.exception("Error generating conversation title")
+        logger.exception(
+            "Error generating conversation title",
+            extra={"conversation_id": str(conversation_id) if conversation_id else None},
+        )
         return fallback
 
 
@@ -73,25 +102,19 @@ async def generate_conversation_title_from_transcript(
     fallback: str,
 ) -> str:
     normalized_transcript = transcript.strip()
-    if not normalized_transcript:
+    if normalized_transcript == "":
         return fallback
 
-    prompt = await render_title_transcript_prompt(normalized_transcript, is_internal=is_internal)
+    prompt = await _render_title_transcript_prompt(normalized_transcript, is_internal=is_internal)
 
     try:
-        agent = create_title_agent(settings.SUMMARIZER_MODEL)
-        result = await run_agent_with_span(
-            agent,
-            prompt=prompt,
-            span_name="generate_conversation_title_from_transcript",
-            agent_name="conversation_title",
-            is_internal=is_internal,
-            conversation_id=str(conversation_id) if conversation_id is not None else None,
-        )
-
-        return _normalize_title(result.output, fallback)
+        output = await _run_title_prompt(prompt, agent_name="title_transcript")
+        return _normalize_title(output, fallback)
     except Exception:
-        logger.exception("Error generating conversation title from transcript")
+        logger.exception(
+            "Error generating conversation title from transcript",
+            extra={"conversation_id": str(conversation_id) if conversation_id else None},
+        )
         return fallback
 
 
@@ -108,12 +131,12 @@ async def update_conversation_title(
             if not conversation:
                 logger.warning(
                     "Conversation not found while updating title",
-                    extra={"conversation_id": conversation_id},
+                    extra={"conversation_id": str(conversation_id)},
                 )
                 return
 
             conversation.title = title
     except Exception:
         logger.exception(
-            "Failed to update conversation title", extra={"conversation_id": conversation_id}
+            "Failed to update conversation title", extra={"conversation_id": str(conversation_id)}
         )

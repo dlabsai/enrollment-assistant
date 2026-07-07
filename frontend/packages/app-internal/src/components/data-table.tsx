@@ -15,6 +15,7 @@ import { Button } from "@va/shared/components/ui/button";
 import {
     Select,
     SelectContent,
+    SelectGroup,
     SelectItem,
     SelectTrigger,
     SelectValue,
@@ -40,6 +41,9 @@ import {
 } from "lucide-react";
 import { createElement, type JSX } from "react";
 
+import { formatLocaleNumber } from "../lib/number-format";
+import { DATA_TABLE_PAGE_SIZE_OPTIONS } from "./data-table-constants";
+
 type ColumnSkeleton<TData, TValue> =
     | JSX.Element
     | ((context: CellContext<TData, TValue>) => JSX.Element);
@@ -49,87 +53,116 @@ interface ColumnMeta<TData, TValue> {
 }
 
 interface DataTablePaginationProps<TData> {
+    rowCount: number;
     table: TableType<TData>;
 }
 
+const formatPaginationRange = ({
+    pageIndex,
+    pageSize,
+    rowCount,
+}: {
+    pageIndex: number;
+    pageSize: number;
+    rowCount: number;
+}): string => {
+    const safeRowCount = Math.max(0, rowCount);
+    const firstRow =
+        safeRowCount === 0
+            ? 0
+            : Math.min(pageIndex * pageSize + 1, safeRowCount);
+    const lastRow =
+        safeRowCount === 0
+            ? 0
+            : Math.min((pageIndex + 1) * pageSize, safeRowCount);
+
+    return `${formatLocaleNumber(firstRow)}-${formatLocaleNumber(lastRow)} of ${formatLocaleNumber(safeRowCount)}`;
+};
+
 const DataTablePagination = <TData,>({
+    rowCount,
     table,
-}: DataTablePaginationProps<TData>): JSX.Element => (
-    <div className="flex flex-col items-center justify-between gap-3 sm:flex-row">
-        <div className="text-muted-foreground text-sm">
-            Page {table.getState().pagination.pageIndex + 1} of{" "}
-            {table.getPageCount()}
-        </div>
-        <div className="flex items-center gap-2">
-            <Select
-                onValueChange={(value) => {
-                    table.setPageSize(Number(value));
-                }}
-                value={String(table.getState().pagination.pageSize)}
-            >
-                <SelectTrigger className="h-8 w-[110px]">
-                    <SelectValue placeholder="Rows" />
-                </SelectTrigger>
-                <SelectContent side="top">
-                    {[10, 20, 30, 40, 50].map((pageSize) => (
-                        <SelectItem
-                            key={pageSize}
-                            value={String(pageSize)}
-                        >
-                            {pageSize} rows
-                        </SelectItem>
-                    ))}
-                </SelectContent>
-            </Select>
-            <div className="flex items-center gap-1">
-                <Button
-                    className="h-8 w-8 p-0"
-                    disabled={!table.getCanPreviousPage()}
-                    onClick={() => {
-                        table.setPageIndex(0);
+}: DataTablePaginationProps<TData>): JSX.Element => {
+    const { pageIndex, pageSize } = table.getState().pagination;
+
+    return (
+        <div className="flex flex-col items-center justify-between gap-3 sm:flex-row">
+            <div className="text-muted-foreground text-sm">
+                {formatPaginationRange({ pageIndex, pageSize, rowCount })}
+            </div>
+            <div className="flex items-center gap-2">
+                <Select
+                    onValueChange={(value) => {
+                        table.setPageSize(Number(value));
                     }}
-                    size="icon-sm"
-                    variant="outline"
+                    value={String(table.getState().pagination.pageSize)}
                 >
-                    <ChevronsLeft className="size-4" />
-                </Button>
-                <Button
-                    className="h-8 w-8 p-0"
-                    disabled={!table.getCanPreviousPage()}
-                    onClick={() => {
-                        table.previousPage();
-                    }}
-                    size="icon-sm"
-                    variant="outline"
-                >
-                    <ChevronLeft className="size-4" />
-                </Button>
-                <Button
-                    className="h-8 w-8 p-0"
-                    disabled={!table.getCanNextPage()}
-                    onClick={() => {
-                        table.nextPage();
-                    }}
-                    size="icon-sm"
-                    variant="outline"
-                >
-                    <ChevronRight className="size-4" />
-                </Button>
-                <Button
-                    className="h-8 w-8 p-0"
-                    disabled={!table.getCanNextPage()}
-                    onClick={() => {
-                        table.setPageIndex(table.getPageCount() - 1);
-                    }}
-                    size="icon-sm"
-                    variant="outline"
-                >
-                    <ChevronsRight className="size-4" />
-                </Button>
+                    <SelectTrigger className="h-8 w-[110px]">
+                        <SelectValue placeholder="Rows" />
+                    </SelectTrigger>
+                    <SelectContent side="top">
+                        <SelectGroup>
+                            {DATA_TABLE_PAGE_SIZE_OPTIONS.map((pageSize) => (
+                                <SelectItem
+                                    key={pageSize}
+                                    value={String(pageSize)}
+                                >
+                                    {pageSize} rows
+                                </SelectItem>
+                            ))}
+                        </SelectGroup>
+                    </SelectContent>
+                </Select>
+                <div className="flex items-center gap-1">
+                    <Button
+                        className="h-8 w-8 p-0"
+                        disabled={!table.getCanPreviousPage()}
+                        onClick={() => {
+                            table.setPageIndex(0);
+                        }}
+                        size="icon-sm"
+                        variant="outline"
+                    >
+                        <ChevronsLeft className="size-4" />
+                    </Button>
+                    <Button
+                        className="h-8 w-8 p-0"
+                        disabled={!table.getCanPreviousPage()}
+                        onClick={() => {
+                            table.previousPage();
+                        }}
+                        size="icon-sm"
+                        variant="outline"
+                    >
+                        <ChevronLeft className="size-4" />
+                    </Button>
+                    <Button
+                        className="h-8 w-8 p-0"
+                        disabled={!table.getCanNextPage()}
+                        onClick={() => {
+                            table.nextPage();
+                        }}
+                        size="icon-sm"
+                        variant="outline"
+                    >
+                        <ChevronRight className="size-4" />
+                    </Button>
+                    <Button
+                        className="h-8 w-8 p-0"
+                        disabled={!table.getCanNextPage()}
+                        onClick={() => {
+                            table.setPageIndex(table.getPageCount() - 1);
+                        }}
+                        size="icon-sm"
+                        variant="outline"
+                    >
+                        <ChevronsRight className="size-4" />
+                    </Button>
+                </div>
             </div>
         </div>
-    </div>
-);
+    );
+};
 
 interface DataTableProps<TData, TValue> {
     columns: ColumnDef<TData, TValue>[];
@@ -139,11 +172,15 @@ interface DataTableProps<TData, TValue> {
     pagination: PaginationState;
     onPaginationChange: OnChangeFn<PaginationState>;
     pageCount: number;
+    rowCount: number;
+    tableClassName?: string;
+    wrapCellText?: boolean;
     manualPagination?: boolean;
     manualSorting?: boolean;
     emptyMessage?: string;
     isLoading?: boolean;
     onRowClick?: (row: TData) => void;
+    canRowClick?: (row: TData) => boolean;
     isRowSelected?: (row: TData) => boolean;
 }
 
@@ -155,11 +192,15 @@ export const DataTable = <TData, TValue>({
     pagination,
     onPaginationChange,
     pageCount,
+    rowCount,
+    tableClassName,
+    wrapCellText = false,
     manualPagination = true,
     manualSorting = true,
     emptyMessage = "No results.",
     isLoading = false,
     onRowClick,
+    canRowClick,
     isRowSelected,
 }: DataTableProps<TData, TValue>): JSX.Element => {
     // eslint-disable-next-line react-hooks/incompatible-library
@@ -182,11 +223,14 @@ export const DataTable = <TData, TValue>({
 
     const columnCount = table.getAllLeafColumns().length;
     const { rows } = table.getRowModel();
+    const cellClassName = wrapCellText
+        ? "whitespace-normal break-words"
+        : undefined;
 
     let bodyContent: JSX.Element | JSX.Element[] = (
         <TableRow>
             <TableCell
-                className="py-10 text-center text-sm"
+                className={cn("py-10 text-center text-sm", cellClassName)}
                 colSpan={columnCount}
             >
                 {emptyMessage}
@@ -212,7 +256,10 @@ export const DataTable = <TData, TValue>({
                                       <Skeleton className="h-5 w-full" />
                                   ));
                         return (
-                            <TableCell key={cell.id}>
+                            <TableCell
+                                className={cellClassName}
+                                key={cell.id}
+                            >
                                 <div className="relative">
                                     <div className="invisible">
                                         {flexRender(
@@ -244,7 +291,10 @@ export const DataTable = <TData, TValue>({
                                 | undefined;
                             const skeleton = skeletonMeta?.skeleton;
                             return (
-                                <TableCell key={column.id}>
+                                <TableCell
+                                    className={cellClassName}
+                                    key={column.id}
+                                >
                                     {typeof skeleton === "function" ? (
                                         <Skeleton className="h-5 w-full" />
                                     ) : (
@@ -263,19 +313,27 @@ export const DataTable = <TData, TValue>({
         bodyContent = rows.map((row) => {
             const selected =
                 isRowSelected?.(row.original) ?? row.getIsSelected();
+            const clickable =
+                onRowClick !== undefined &&
+                (canRowClick?.(row.original) ?? true);
             return (
                 <TableRow
                     className={cn(
-                        onRowClick && "hover:bg-muted/60 cursor-pointer",
+                        clickable && "hover:bg-muted/60 cursor-pointer",
                     )}
                     data-state={selected && "selected"}
                     key={row.id}
                     onClick={() => {
-                        onRowClick?.(row.original);
+                        if (clickable) {
+                            onRowClick?.(row.original);
+                        }
                     }}
                 >
                     {row.getVisibleCells().map((cell) => (
-                        <TableCell key={cell.id}>
+                        <TableCell
+                            className={cellClassName}
+                            key={cell.id}
+                        >
                             {flexRender(
                                 cell.column.columnDef.cell,
                                 cell.getContext(),
@@ -290,7 +348,7 @@ export const DataTable = <TData, TValue>({
     return (
         <div className="flex min-h-0 flex-1 flex-col gap-3">
             <div className="border-border flex min-h-0 flex-1 flex-col overflow-auto rounded-md border">
-                <Table>
+                <Table className={tableClassName}>
                     <TableHeader className="bg-background sticky top-0 z-10">
                         {table.getHeaderGroups().map((headerGroup) => (
                             <TableRow key={headerGroup.id}>
@@ -352,7 +410,10 @@ export const DataTable = <TData, TValue>({
                 </Table>
             </div>
             <div className="shrink-0">
-                <DataTablePagination table={table} />
+                <DataTablePagination
+                    rowCount={rowCount}
+                    table={table}
+                />
             </div>
         </div>
     );

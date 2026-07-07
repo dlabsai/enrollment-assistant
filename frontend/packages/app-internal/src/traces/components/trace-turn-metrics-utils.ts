@@ -1,3 +1,4 @@
+import { formatLocaleNumber } from "../../lib/number-format";
 import { formatDurationMs } from "../lib/trace-utils";
 
 export const getNumericAttribute = (
@@ -20,19 +21,9 @@ export const formatNumeric = (value: number | undefined): string => {
         return "-";
     }
     if (Number.isInteger(value)) {
-        return value.toLocaleString("en-US");
+        return formatLocaleNumber(value);
     }
-    return value.toLocaleString("en-US", { maximumFractionDigits: 4 });
-};
-
-export const formatCost = (value: number | undefined): string => {
-    if (value === undefined) {
-        return "-";
-    }
-    return value.toLocaleString("en-US", {
-        minimumFractionDigits: 2,
-        maximumFractionDigits: 6,
-    });
+    return formatLocaleNumber(value, { maximumFractionDigits: 4 });
 };
 
 export const formatOffsetMs = (value: number | undefined): string => {
@@ -40,9 +31,12 @@ export const formatOffsetMs = (value: number | undefined): string => {
         return "-";
     }
     if (value < 1000) {
-        return `${Math.round(value)}ms`;
+        return `${formatLocaleNumber(Math.round(value))}ms`;
     }
-    return `${(value / 1000).toFixed(2)}s`;
+    return `${formatLocaleNumber(value / 1000, {
+        minimumFractionDigits: 2,
+        maximumFractionDigits: 2,
+    })}s`;
 };
 
 export const formatOffset = (value: number | undefined): string => {
@@ -55,17 +49,4 @@ export const formatOffset = (value: number | undefined): string => {
     return formatDurationMs(value);
 };
 
-export const formatTimestampWithSeconds = (
-    value: string | null | undefined,
-): string => {
-    if (value === null || value === undefined || value.trim() === "") {
-        return "-";
-    }
-    return new Date(value).toLocaleString("en-US", {
-        month: "short",
-        day: "numeric",
-        hour: "2-digit",
-        minute: "2-digit",
-        second: "2-digit",
-    });
-};
+export { formatTimestampWithSeconds } from "../../lib/date-format";

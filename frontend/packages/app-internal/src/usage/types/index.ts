@@ -1,4 +1,4 @@
-export interface ChatCompletionTraceBasic {
+export interface UsageTraceBasic {
     created_at: string;
     model: string;
     prompt_tokens: number | null;
@@ -75,7 +75,7 @@ export interface UsageOverviewApi {
     summary: UsageSummaryApi;
     daily: UsageDailyApi[];
     models: UsageModelApi[];
-    latest_traces: ChatCompletionTraceBasic[];
+    latest_traces: UsageTraceBasic[];
 }
 
 export interface ChatAnalyticsDaily {

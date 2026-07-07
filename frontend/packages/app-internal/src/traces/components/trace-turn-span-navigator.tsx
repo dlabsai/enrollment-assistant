@@ -9,15 +9,12 @@ import {
 } from "lucide-react";
 import { type JSX, useMemo, useState } from "react";
 
-import {
-    buildSpanTree,
-    getSpanEnd,
-    getSpanStart,
-    getStringAttribute,
-} from "../lib/trace-utils";
+import { buildSpanTree, getStringAttribute } from "../lib/trace-utils";
 import {
     buildSpanHierarchy,
     formatSpanDuration,
+    getSpanTimelineLayout,
+    getTraceTimeRange,
     type SpanTreeNode,
 } from "../lib/trace-view-utils";
 import type { TraceSpan } from "../types";
@@ -34,24 +31,13 @@ const SpanTimelineList = ({
     onSelectSpan: (spanId: string) => void;
 }): JSX.Element => {
     const flattened = useMemo(() => buildSpanTree(spans), [spans]);
-    const spanStartTimes = spans
-        .map((span) => getSpanStart(span))
-        .filter((value): value is number => value !== undefined);
-    const spanEndTimes = spans
-        .map((span) => getSpanEnd(span))
-        .filter((value): value is number => value !== undefined);
-
-    const traceStart =
-        spanStartTimes.length > 0 ? Math.min(...spanStartTimes) : undefined;
-    const traceEnd =
-        spanEndTimes.length > 0 ? Math.max(...spanEndTimes) : undefined;
-    const traceDuration =
-        traceStart !== undefined && traceEnd !== undefined
-            ? traceEnd - traceStart
-            : undefined;
+    const { end: traceEnd, start: traceStart } = useMemo(
+        () => getTraceTimeRange(spans),
+        [spans],
+    );
 
     return (
-        <div className="space-y-2 px-4 py-3">
+        <div className="px-4 py-3">
             {flattened.map(({ span, depth }) => {
                 const attributes = span.attributes ?? {};
                 const agentName = getStringAttribute(
@@ -62,25 +48,13 @@ const SpanTimelineList = ({
                     attributes,
                     "gen_ai.request.model",
                 );
-                const spanStart = getSpanStart(span);
-                const spanEnd = getSpanEnd(span);
-                const startOffset =
-                    traceStart !== undefined && spanStart !== undefined
-                        ? spanStart - traceStart
-                        : undefined;
-                const duration =
-                    spanStart !== undefined && spanEnd !== undefined
-                        ? spanEnd - spanStart
-                        : undefined;
-
-                const offsetPct =
-                    traceDuration !== undefined && startOffset !== undefined
-                        ? Math.max((startOffset / traceDuration) * 100, 0)
-                        : 0;
-                const widthPct =
-                    traceDuration !== undefined && duration !== undefined
-                        ? Math.max((duration / traceDuration) * 100, 2)
-                        : 2;
+                const timelineLayout = getSpanTimelineLayout(
+                    span,
+                    traceStart,
+                    traceEnd,
+                );
+                const offsetPct = timelineLayout?.offsetPct ?? 0;
+                const widthPct = timelineLayout?.widthPct ?? 2;
 
                 const labelParts = [agentName, model].filter(
                     (item): item is string =>
@@ -89,7 +63,7 @@ const SpanTimelineList = ({
 
                 return (
                     <button
-                        className="hover:border-border hover:bg-muted/40 data-[selected=true]:border-primary/40 data-[selected=true]:bg-primary/5 flex w-full flex-col gap-2 rounded-md border border-transparent px-2 py-2 text-left"
+                        className="hover:border-primary/50 hover:bg-primary/10 data-[selected=true]:border-primary data-[selected=true]:bg-primary/15 data-[selected=true]:ring-primary/30 flex w-full flex-col gap-2 rounded-none border border-transparent px-2 py-2 text-left transition-none data-[selected=true]:shadow-sm data-[selected=true]:ring-1"
                         data-selected={selectedSpanId === span.span_id}
                         key={span.span_id}
                         onClick={() => {
@@ -178,12 +152,9 @@ const SpanTreeList = ({
             const isExpanded = expandedSpanIds.has(span.span_id);
 
             return (
-                <div
-                    className="space-y-2"
-                    key={span.span_id}
-                >
+                <div key={span.span_id}>
                     <div
-                        className="hover:border-border hover:bg-muted/40 data-[selected=true]:border-primary/40 data-[selected=true]:bg-primary/5 flex w-full flex-col gap-2 rounded-md border border-transparent px-2 py-2 text-left"
+                        className="hover:border-primary/50 hover:bg-primary/10 data-[selected=true]:border-primary data-[selected=true]:bg-primary/15 data-[selected=true]:ring-primary/30 flex w-full flex-col gap-2 rounded-none border border-transparent px-2 py-2 text-left transition-none data-[selected=true]:shadow-sm data-[selected=true]:ring-1"
                         data-selected={selectedSpanId === span.span_id}
                         onClick={() => {
                             handleSpanSelect(span.span_id);
@@ -245,15 +216,13 @@ const SpanTreeList = ({
                         ) : undefined}
                     </div>
                     {hasChildren && isExpanded ? (
-                        <div className="space-y-2">
-                            {renderNodes(children, depth + 1)}
-                        </div>
+                        <div>{renderNodes(children, depth + 1)}</div>
                     ) : undefined}
                 </div>
             );
         });
 
-    return <div className="space-y-2 px-4 py-3">{renderNodes(tree, 0)}</div>;
+    return <div className="px-4 py-3">{renderNodes(tree, 0)}</div>;
 };
 
 export const SpanNavigator = ({

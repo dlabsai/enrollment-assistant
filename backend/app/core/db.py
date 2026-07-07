@@ -1,30 +1,21 @@
-from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
+from typing import TYPE_CHECKING
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
 
-from app.core import config
+from app.core.config import settings
 
-
-def _build_database_url() -> str:
-    return str(config.settings.SQLALCHEMY_DATABASE_URI).replace(
-        "postgresql://", "postgresql+psycopg://"
-    )
-
-
-def init_engine(database_url: str | None = None) -> None:
-    """(Re)initialize the database engine and session factory."""
-    global engine, async_session_factory  # noqa: PLW0603
-
-    engine = create_async_engine(
-        database_url or _build_database_url(), echo=False, poolclass=NullPool
-    )
-    async_session_factory = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
-
+if TYPE_CHECKING:
+    from collections.abc import AsyncGenerator
 
 # Use NullPool to avoid connection limits - each request gets a fresh connection
-init_engine()
+engine = create_async_engine(
+    str(settings.SQLALCHEMY_DATABASE_URI).replace("postgresql://", "postgresql+psycopg://"),
+    echo=False,
+    poolclass=NullPool,
+)
+async_session_factory = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
 
 
 @asynccontextmanager
@@ -33,7 +24,7 @@ async def get_session() -> AsyncGenerator[AsyncSession]:
         try:
             yield session
             await session.commit()
-        except Exception:
+        except:
             await session.rollback()
             raise
         finally:

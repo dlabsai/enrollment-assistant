@@ -2,7 +2,11 @@ import type { Theme } from "react-base16-styling";
 import type { ShouldExpandNodeInitially } from "react-json-tree";
 
 import type { TraceSpan } from "../types";
-import { formatDurationMs, getSpanStart } from "./trace-utils";
+import {
+    formatDurationMs,
+    getResolvedSpanTiming,
+    getResolvedTraceTiming,
+} from "./trace-utils";
 
 const JSON_TREE_EXPAND_DEPTH = 2;
 // Measured Structured first render after reload (Raw → Structured tab switch).
@@ -18,6 +22,21 @@ const JSON_TREE_EXPAND_DEPTH = 2;
 export interface SpanTreeNode {
     span: TraceSpan;
     children: SpanTreeNode[];
+}
+
+interface TraceTimeRange {
+    start: number | undefined;
+    end: number | undefined;
+    durationMs: number | undefined;
+}
+
+interface SpanTimelineLayout {
+    start: number;
+    end: number;
+    durationMs: number;
+    offsetMs: number;
+    offsetPct: number;
+    widthPct: number;
 }
 
 export const buildSpanHierarchy = (spans: TraceSpan[]): SpanTreeNode[] => {
@@ -45,8 +64,8 @@ export const buildSpanHierarchy = (spans: TraceSpan[]): SpanTreeNode[] => {
 
     const sortNodes = (items: SpanTreeNode[]): void => {
         items.sort((left, right) => {
-            const leftStart = getSpanStart(left.span) ?? 0;
-            const rightStart = getSpanStart(right.span) ?? 0;
+            const leftStart = getResolvedSpanTiming(left.span).start ?? 0;
+            const rightStart = getResolvedSpanTiming(right.span).start ?? 0;
             return leftStart - rightStart;
         });
         for (const item of items) {
@@ -58,8 +77,51 @@ export const buildSpanHierarchy = (spans: TraceSpan[]): SpanTreeNode[] => {
     return roots;
 };
 
+export const getTraceTimeRange = (spans: TraceSpan[]): TraceTimeRange => {
+    const { durationMs, end, start } = getResolvedTraceTiming(spans);
+    return {
+        start,
+        end,
+        durationMs,
+    };
+};
+
+export const getSpanTimelineLayout = (
+    span: TraceSpan,
+    traceStart: number | undefined,
+    traceEnd: number | undefined,
+): SpanTimelineLayout | undefined => {
+    const timing = getResolvedSpanTiming(span);
+    const rangeDuration =
+        traceStart !== undefined &&
+        traceEnd !== undefined &&
+        traceEnd > traceStart
+            ? traceEnd - traceStart
+            : undefined;
+
+    if (
+        timing.start === undefined ||
+        timing.end === undefined ||
+        timing.durationMs === undefined ||
+        rangeDuration === undefined ||
+        traceStart === undefined
+    ) {
+        return undefined;
+    }
+
+    const offsetMs = timing.start - traceStart;
+    return {
+        start: timing.start,
+        end: timing.end,
+        durationMs: timing.durationMs,
+        offsetMs,
+        offsetPct: Math.max((offsetMs / rangeDuration) * 100, 0),
+        widthPct: Math.max((timing.durationMs / rangeDuration) * 100, 2),
+    };
+};
+
 export const formatSpanDuration = (span: TraceSpan): string =>
-    formatDurationMs(span.duration_ms);
+    formatDurationMs(getResolvedSpanTiming(span).durationMs);
 
 export const shouldExpandJsonNode: ShouldExpandNodeInitially = (
     _keyPath,

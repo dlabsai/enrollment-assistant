@@ -5,17 +5,13 @@ const MODEL_PRESETS_STORAGE_KEY = "va.internal.evals.model-presets";
 interface StoredEvalModelConfig {
     chatbotModel?: string;
     guardrailModel?: string;
-    extractorModel?: string;
     evaluationModel?: string;
-    searchModel?: string;
 }
 
 export interface EvalModelPreset {
     name: string;
     chatbotModel?: string;
-    searchModel?: string;
     guardrailModel?: string;
-    extractorModel?: string;
     evaluationModel?: string;
 }
 
@@ -42,14 +38,8 @@ export const readStoredModelConfig = (): StoredEvalModelConfig | undefined => {
         if (typeof parsed.guardrailModel === "string") {
             safeParsed.guardrailModel = parsed.guardrailModel;
         }
-        if (typeof parsed.extractorModel === "string") {
-            safeParsed.extractorModel = parsed.extractorModel;
-        }
         if (typeof parsed.evaluationModel === "string") {
             safeParsed.evaluationModel = parsed.evaluationModel;
-        }
-        if (typeof parsed.searchModel === "string") {
-            safeParsed.searchModel = parsed.searchModel;
         }
         return safeParsed;
     } catch {
@@ -106,22 +96,10 @@ export const readStoredModelPresets = (): EvalModelPreset[] => {
                         preset.chatbotModel = entry.chatbotModel;
                     }
                     if (
-                        typeof entry.searchModel === "string" &&
-                        entry.searchModel !== ""
-                    ) {
-                        preset.searchModel = entry.searchModel;
-                    }
-                    if (
                         typeof entry.guardrailModel === "string" &&
                         entry.guardrailModel !== ""
                     ) {
                         preset.guardrailModel = entry.guardrailModel;
-                    }
-                    if (
-                        typeof entry.extractorModel === "string" &&
-                        entry.extractorModel !== ""
-                    ) {
-                        preset.extractorModel = entry.extractorModel;
                     }
                     if (
                         typeof entry.evaluationModel === "string" &&

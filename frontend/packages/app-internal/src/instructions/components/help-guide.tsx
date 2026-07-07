@@ -40,9 +40,9 @@ export const HelpGuide = (): JSX.Element => {
                             Select a section and instruction template from the
                             sidebar. Sections group assistant and helper
                             templates, and each section is versioned together.
-                            Use the section titles to see whether you are
-                            editing internal or public instructions. An asterisk
-                            indicates unsaved edits.
+                            This internal workspace shows internal VA
+                            instructions only. An asterisk indicates unsaved
+                            edits.
                         </p>
                         <ol className="mt-2 list-inside list-decimal space-y-1">
                             <li>
@@ -82,8 +82,8 @@ export const HelpGuide = (): JSX.Element => {
                         </p>
                         <p className="mt-1">
                             Open the chat panel with the message icon, then
-                            select a platform and version to test. Test chat
-                            uses saved versions, not unsaved edits.
+                            select a version to test. Test chat uses saved
+                            versions, not unsaved edits.
                         </p>
                     </div>
                     <div>
@@ -115,13 +115,7 @@ export const HelpGuide = (): JSX.Element => {
                             workflows.
                         </p>
                         <pre className="bg-muted/40 text-muted-foreground mt-2 rounded-md p-3 text-xs leading-relaxed whitespace-pre-wrap">
-                            {`Public chats
-  -> Title (Public) (async title after first message)
-  -> sync job
-     -> Summary (Public) (CRM summary)
-     -> RFI Extraction (Public) (program/online flags)
-
-Internal chats
+                            {`Internal chats
   -> Title (Internal) (initial title)
   -> Title Transcript (Internal) (title from transcript + regenerate)
   -> Summary (Internal) (internal summary after each message)`}
@@ -160,7 +154,7 @@ export const HelpButton = (): JSX.Element | undefined => {
             size="sm"
             variant="outline"
         >
-            <HelpCircle className="mr-2 size-4" />
+            <HelpCircle data-icon="inline-start" />
             Help
         </Button>
     );

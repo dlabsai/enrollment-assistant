@@ -1,3 +1,3 @@
 #!/bin/bash
 
-uv run fastapi dev app/app.py
+uv run fastapi dev app/main.py --reload-dir app

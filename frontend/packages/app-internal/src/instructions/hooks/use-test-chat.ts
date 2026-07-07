@@ -29,8 +29,8 @@ export const useTestChat = ({
     const api = useAuthenticatedApi();
     const [isLoading, setIsLoading] = useState(false);
     const abortControllerRef = useRef<AbortController | undefined>(undefined);
-    const chatIdRef = useRef<string | undefined>(chatId);
-    const parentMessageIdRef = useRef<string | undefined>(parentMessageId);
+    const chatIdRef = useRef(chatId);
+    const parentMessageIdRef = useRef(parentMessageId);
 
     const handleSendMessage = useCallback(
         async (userMessage: string): Promise<void> => {

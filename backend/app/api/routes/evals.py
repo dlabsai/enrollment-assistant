@@ -1,469 +1,753 @@
 from __future__ import annotations
 
-import asyncio
-import contextlib
 import json
-import os
-import re
 from datetime import UTC, datetime
+from math import isfinite
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated
-from uuid import uuid4
+from typing import TYPE_CHECKING, Annotated, NoReturn, cast
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel
+from sqlalchemy import ColumnElement, case, func, select
 
-from app.api.deps import get_current_user, require_user_roles
-from app.api.schemas import (
-    EvalReportDetailOut,
-    EvalReportSummaryOut,
-    EvalRunLogFileOut,
-    EvalRunRequest,
-    EvalTestCasesOut,
+from app.api.deps import CurrentUser, SessionDep, require_permission
+from app.api.schemas import PageOut, PaginationParams
+from app.api.trace_projection import TraceOverviewItemOut, build_trace_overview
+from app.core.db import get_session
+from app.core.rbac import PermissionKey
+from app.evals.case_management import (
+    EvalCaseConflictError,
+    EvalCaseDefinition,
+    EvalCaseManagementError,
+    EvalCaseNotFoundError,
+    EvalCaseValidationError,
+    create_eval_case_overlay,
+    delete_eval_case_overlay,
+    list_active_eval_case_ids,
+    list_eval_case_definitions,
+    resolve_eval_case_payloads_for_run,
+    restore_disk_eval_case_overlay,
+    update_eval_case_overlay,
 )
-from app.models import UserRole
-
-router = APIRouter(
-    prefix="/evals",
-    tags=["evals"],
-    dependencies=[Depends(require_user_roles(get_current_user, UserRole.ADMIN, UserRole.DEV))],
+from app.evals.runtime import EvalRunRequestConfig, EvalSuite, parse_test_cases_filter
+from app.evals.service import (
+    EVAL_RUN_MANAGER,
+    EvalRunAlreadyRunningError,
+    EvalRunNotFoundError,
+    EvalRunPaths,
 )
+from app.evals.service import EvalRunSnapshot as EvalRunSnapshotModel
+from app.evals.storage import (
+    EvalReportSortBy,
+    EvalReportSummaryRecord,
+    count_eval_reports,
+    eval_report_session,
+    list_eval_report_summaries,
+)
+from app.evals.storage import get_eval_report as get_stored_eval_report
+from app.models import EvalCaseResult, EvalCaseRunResult, EvalRunRecord, OtelSpan
 
-REPORTS_DIR = Path(__file__).resolve().parents[3] / "reports"
-LOGS_DIR = REPORTS_DIR / "logs"
-REPORT_LOG_MAP_DIR = LOGS_DIR / "reports"
-BACKEND_ROOT = REPORTS_DIR.parent
+router = APIRouter(prefix="/evals", tags=["evals"])
 
-_EVAL_SUITES: dict[str, Path] = {
-    "chatbot": BACKEND_ROOT / "tests" / "chat" / "test_eval_chatbot.py",
-    "guardrails": BACKEND_ROOT / "tests" / "chat" / "test_eval_guardrails.py",
-    "search": BACKEND_ROOT / "tests" / "chat" / "test_eval_search.py",
-}
+EvalsAccessUser = Annotated[CurrentUser, Depends(require_permission(PermissionKey.ACCESS_EVALS))]
+EvalsStreamAccessUser = Annotated[
+    CurrentUser, Depends(require_permission(PermissionKey.ACCESS_EVALS), scope="function")
+]
 
-_NAME_RE = re.compile(r"^# Evaluation Report: (.+)")
-_GENERATED_RE = re.compile(r"^\*\*Generated:\*\* (.+)")
-_REPEATS_RE = re.compile(r"^\*\*Repeats:\*\* (\d+) \| \*\*Concurrency:\*\* (\d+)")
-_FILENAME_RE = re.compile(r"^eval_(.+)_(\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2})\.md$")
-_TEST_CASE_ID_RE = re.compile(r"test_case_id\s*=\s*(['\"])(.*?)\1")
-
-
-class EvalReportLogMap(BaseModel):
-    log_id: str
-
-
-def _parse_filename_metadata(filename: str) -> tuple[str | None, datetime | None]:
-    match = _FILENAME_RE.match(filename)
-    if match is None:
-        return None, None
-    name = match.group(1)
-    timestamp = match.group(2)
-    try:
-        generated_at = datetime.strptime(timestamp, "%Y-%m-%d_%H-%M-%S").replace(tzinfo=UTC)
-    except ValueError:
-        generated_at = None
-    return name, generated_at
+BACKEND_ROOT = Path(__file__).resolve().parents[3]
+LOGS_DIR = BACKEND_ROOT / "reports" / "logs"
 
 
-def _read_report_metadata(report_path: Path) -> tuple[str, datetime, int | None, int | None]:
-    name: str | None = None
-    generated_at: datetime | None = None
-    repeats: int | None = None
-    concurrency: int | None = None
-
-    try:
-        with report_path.open("r", encoding="utf-8") as handle:
-            for _ in range(25):
-                line = handle.readline()
-                if line == "":
-                    break
-                cleaned = line.strip()
-                if cleaned == "":
-                    continue
-                if name is None:
-                    match = _NAME_RE.match(cleaned)
-                    if match is not None:
-                        name = match.group(1).strip()
-                        continue
-                if generated_at is None:
-                    match = _GENERATED_RE.match(cleaned)
-                    if match is not None:
-                        generated_value = match.group(1).strip()
-                        try:
-                            generated_at = datetime.fromisoformat(generated_value)
-                            if generated_at.tzinfo is None:
-                                generated_at = generated_at.replace(tzinfo=UTC)
-                        except ValueError:
-                            generated_at = None
-                        continue
-                if repeats is None:
-                    match = _REPEATS_RE.match(cleaned)
-                    if match is not None:
-                        repeats = int(match.group(1))
-                        concurrency = int(match.group(2))
-                        continue
-                if name is not None and generated_at is not None and repeats is not None:
-                    break
-    except OSError:
-        pass
-
-    filename_name, filename_generated_at = _parse_filename_metadata(report_path.name)
-    if name is None:
-        name = filename_name or report_path.stem
-    if generated_at is None:
-        generated_at = filename_generated_at
-    if generated_at is None:
-        generated_at = datetime.fromtimestamp(report_path.stat().st_mtime, tz=UTC)
-
-    return name, generated_at, repeats, concurrency
+class EvalReportSummaryOut(BaseModel):
+    id: str
+    title: str
+    name: str
+    suite: str
+    generated_at: datetime
+    repeats: int
+    concurrency: int
+    pass_threshold: float
+    status: str
+    case_count: int
+    run_count: int
+    is_internal: bool | None
+    model_configs: dict[str, object]
+    pass_rate_average: float | None
+    duration_median_average: float | None
 
 
-def _resolve_report_path(report_id: str) -> Path:
-    if "/" in report_id or "\\" in report_id:
-        raise HTTPException(status_code=404, detail="Report not found")
-    if not report_id.endswith(".md"):
-        raise HTTPException(status_code=404, detail="Report not found")
-    report_path = REPORTS_DIR / report_id
-    if not report_path.exists() or not report_path.is_file():
-        raise HTTPException(status_code=404, detail="Report not found")
-    return report_path
+class EvalEvaluationResultOut(BaseModel):
+    name: str
+    value: object
+    reason: str | None = None
 
 
-def _resolve_log_path(log_id: str) -> Path:
-    if "/" in log_id or "\\" in log_id:
-        raise HTTPException(status_code=404, detail="Log not found")
-    if not log_id.endswith(".log"):
-        raise HTTPException(status_code=404, detail="Log not found")
-    log_path = LOGS_DIR / log_id
-    if not log_path.exists() or not log_path.is_file():
-        raise HTTPException(status_code=404, detail="Log not found")
-    return log_path
+class EvalCaseRunResultOut(BaseModel):
+    run_index: int
+    output: object | None
+    duration: float
+    error: str | None
+    otel_trace_id: str | None
+    otel_span_id: str | None
+    assertions: dict[str, EvalEvaluationResultOut]
+    scores: dict[str, EvalEvaluationResultOut]
+    labels: dict[str, EvalEvaluationResultOut]
 
 
-def _resolve_report_log_map(report_id: str) -> Path:
-    if "/" in report_id or "\\" in report_id:
-        raise HTTPException(status_code=404, detail="Log not found")
-    if not report_id.endswith(".md"):
-        raise HTTPException(status_code=404, detail="Log not found")
-    return REPORT_LOG_MAP_DIR / f"{report_id}.json"
+class EvalCaseResultOut(BaseModel):
+    name: str
+    inputs: object
+    expected_output: object | None
+    metadata: object | None
+    stats: dict[str, object]
+    runs: list[EvalCaseRunResultOut]
+
+
+class EvalReportDetailOut(EvalReportSummaryOut):
+    config: dict[str, object]
+    additional_settings: dict[str, object]
+    cases: list[EvalCaseResultOut]
+
+
+class EvalTestCasesOut(BaseModel):
+    suite: str
+    cases: list[str]
+
+
+class EvalCasePayloadIn(BaseModel):
+    suite: str
+    payload: dict[str, object]
+
+
+class EvalCaseOut(BaseModel):
+    suite: str
+    case_id: str
+    status: str
+    active: bool
+    payload: dict[str, object]
+    payload_hash: str
+    canonical_payload: dict[str, object] | None
+    disk_hash: str | None
+    overlay_base_disk_hash: str | None
+    has_disk_changes: bool
+    created_at: datetime | None
+    updated_at: datetime | None
+
+
+class EvalRunSnapshotOut(BaseModel):
+    run_id: str
+    suite: str
+    status: str
+    report_id: str | None
+    error_message: str | None
+    started_at: datetime
+    completed_at: datetime | None
+
+
+class TraceSummaryOut(BaseModel):
+    trace_id: str
+    started_at: datetime | None
+    duration_ms: float | None
+    span_count: int
+    root_span_name: str | None
+    model: str | None
+    is_error: bool
+    is_public: bool | None
+    conversation_id: str | None
+    is_ai: bool
+
+
+class TraceSpanOut(BaseModel):
+    span_id: str
+    parent_span_id: str | None
+    name: str
+    kind: str | None
+    status_code: str | None
+    status_message: str | None
+    start_time: datetime | None
+    end_time: datetime | None
+    duration_ms: float | None
+    attributes: dict[str, object] | None
+    events: list[dict[str, object]] | None
+    links: list[dict[str, object]] | None
+    resource: dict[str, object] | None
+    scope: dict[str, object] | None
+
+
+class TraceDetailOut(BaseModel):
+    trace_id: str
+    started_at: datetime | None
+    duration_ms: float | None
+    span_count: int
+    is_public: bool | None
+    conversation_id: str | None
+    spans: list[TraceSpanOut]
+    overview: list[TraceOverviewItemOut]
+
+
+class EvalRunRequest(BaseModel):
+    suite: str
+    repeat: int = 1
+    max_concurrency: int = 5
+    test_cases: str | None = None
+    pass_threshold: float = 0.9
+    chatbot_model: str | None = None
+    guardrail_model: str | None = None
+    evaluation_model: str | None = None
+    rebuild_rag: bool = False
 
 
 def _format_sse(event: str, payload: dict[str, object]) -> str:
     return f"event: {event}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
 
-def _resolve_eval_suite(suite: str) -> Path:
-    test_path = _EVAL_SUITES.get(suite)
-    if test_path is None:
-        raise HTTPException(status_code=400, detail="Unsupported eval suite")
-    if not test_path.exists():
-        raise HTTPException(status_code=404, detail="Eval suite not found")
-    return test_path
+def _eval_run_snapshot_out(snapshot: EvalRunSnapshotModel) -> EvalRunSnapshotOut:
+    return EvalRunSnapshotOut(
+        run_id=snapshot.run_id,
+        suite=snapshot.suite,
+        status=snapshot.status,
+        report_id=snapshot.report_id,
+        error_message=snapshot.error_message,
+        started_at=snapshot.started_at,
+        completed_at=snapshot.completed_at,
+    )
 
 
-def _extract_test_case_ids(test_path: Path) -> list[str]:
+def _trace_duration_ms(started_at: datetime | None, ended_at: datetime | None) -> float | None:
+    if started_at is None or ended_at is None:
+        return None
+    return (ended_at - started_at).total_seconds() * 1000
+
+
+def _span_time_expr() -> ColumnElement[datetime]:
+    return func.coalesce(OtelSpan.start_time, OtelSpan.span_time, OtelSpan.created_at)
+
+
+def _trace_span_out(span: OtelSpan) -> TraceSpanOut:
+    return TraceSpanOut(
+        span_id=span.span_id,
+        parent_span_id=span.parent_span_id,
+        name=span.name,
+        kind=span.kind,
+        status_code=span.status_code,
+        status_message=span.status_message,
+        start_time=span.start_time,
+        end_time=span.end_time,
+        duration_ms=span.duration_ms,
+        attributes=span.attributes,
+        events=span.events,
+        links=span.links,
+        resource=span.resource,
+        scope=span.scope,
+    )
+
+
+def _resolve_eval_suite_name(suite: str) -> EvalSuite:
     try:
-        content = test_path.read_text(encoding="utf-8")
-    except OSError:
-        return []
-
-    cases: list[str] = []
-    seen: set[str] = set()
-    for match in _TEST_CASE_ID_RE.finditer(content):
-        case_id = match.group(2)
-        if case_id in seen:
-            continue
-        seen.add(case_id)
-        cases.append(case_id)
-
-    return cases
+        return EvalSuite(suite)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail="Unsupported eval suite") from error
 
 
-def _build_eval_command(run_request: EvalRunRequest, test_path: Path) -> list[str]:
-    command = ["uv", "run", "pytest", str(test_path), "-v", "-s"]
-
-    command.extend(["--repeat", str(run_request.repeat)])
-    command.extend(["--max-concurrency", str(run_request.max_concurrency)])
-    command.extend(["--pass-threshold", str(run_request.pass_threshold)])
-    if run_request.test_cases is not None and run_request.test_cases.strip() != "":
-        command.extend(["--test-cases", run_request.test_cases])
-    if run_request.chatbot_model:
-        command.extend(["--chatbot-model", run_request.chatbot_model])
-    if run_request.guardrail_model:
-        command.extend(["--guardrail-model", run_request.guardrail_model])
-    if run_request.search_model:
-        command.extend(["--search-model", run_request.search_model])
-    if run_request.extractor_model:
-        command.extend(["--extractor-model", run_request.extractor_model])
-    if run_request.evaluation_model:
-        command.extend(["--evaluation-model", run_request.evaluation_model])
-
-    return command
+def _humanize_eval_name(name: str) -> str:
+    words = [word for word in name.replace("-", "_").split("_") if word]
+    if not words:
+        return "Eval Run"
+    acronyms = {"ai", "api", "llm", "rag", "url", "va"}
+    return " ".join(word.upper() if word.lower() in acronyms else word.title() for word in words)
 
 
-def _build_eval_env(run_request: EvalRunRequest) -> dict[str, str]:
-    env = os.environ.copy()
-    overrides = {
-        "CHATBOT_MODEL": run_request.chatbot_model,
-        "GUARDRAIL_MODEL": run_request.guardrail_model,
-        "EXTRACTOR_MODEL": run_request.extractor_model,
-        "EVALUATION_MODEL": run_request.evaluation_model,
-        "SEARCH_AGENT_MODEL": run_request.search_model,
-    }
-    for key, value in overrides.items():
-        if value is None:
-            continue
-        trimmed = value.strip()
-        if trimmed != "":
-            env[key] = trimmed
-    return env
+def _report_is_internal(report: EvalRunRecord) -> bool | None:
+    values: set[bool] = set()
+    for case_record in report.cases:
+        if isinstance(case_record.inputs, dict):
+            is_internal = case_record.inputs.get("is_internal")
+            if isinstance(is_internal, bool):
+                values.add(is_internal)
+    return values.pop() if len(values) == 1 else None
+
+
+def _case_stat_number(case_record: EvalCaseResult, key: str) -> float | None:
+    value = case_record.stats.get(key)
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return None
+    number = float(value)
+    return number if isfinite(number) else None
+
+
+def _average_defined(values: list[float]) -> float | None:
+    return sum(values) / len(values) if values else None
+
+
+def _report_pass_rate_average(report: EvalRunRecord) -> float | None:
+    return _average_defined(
+        [
+            pass_rate
+            for case_record in report.cases
+            if (pass_rate := _case_stat_number(case_record, "pass_rate")) is not None
+        ]
+    )
+
+
+def _report_duration_median_average(report: EvalRunRecord) -> float | None:
+    return _average_defined(
+        [
+            duration_median
+            for case_record in report.cases
+            if (duration_median := _case_stat_number(case_record, "duration_median")) is not None
+        ]
+    )
+
+
+def _result_out(payload: object) -> EvalEvaluationResultOut:
+    if not isinstance(payload, dict):
+        return EvalEvaluationResultOut(name="result", value=payload, reason=None)
+    value_by_key = cast(dict[str, object], payload)
+    reason = value_by_key.get("reason")
+    return EvalEvaluationResultOut(
+        name=str(value_by_key.get("name", "result")),
+        value=value_by_key.get("value"),
+        reason=str(reason) if reason is not None else None,
+    )
+
+
+def _result_map_out(values: dict[str, object]) -> dict[str, EvalEvaluationResultOut]:
+    return {key: _result_out(value) for key, value in values.items()}
+
+
+def _case_run_out(run: EvalCaseRunResult) -> EvalCaseRunResultOut:
+    return EvalCaseRunResultOut(
+        run_index=run.run_index,
+        output=run.output,
+        duration=run.duration,
+        error=run.error,
+        otel_trace_id=run.otel_trace_id,
+        otel_span_id=run.otel_span_id,
+        assertions=_result_map_out(run.assertions),
+        scores=_result_map_out(run.scores),
+        labels=_result_map_out(run.labels),
+    )
+
+
+def _case_out(case_record: EvalCaseResult) -> EvalCaseResultOut:
+    return EvalCaseResultOut(
+        name=case_record.name,
+        inputs=case_record.inputs,
+        expected_output=case_record.expected_output,
+        metadata=case_record.metadata_json,
+        stats=case_record.stats,
+        runs=[_case_run_out(run) for run in case_record.runs],
+    )
+
+
+def _case_definition_out(case_definition: EvalCaseDefinition) -> EvalCaseOut:
+    return EvalCaseOut(
+        suite=case_definition.suite.value,
+        case_id=case_definition.case_id,
+        status=case_definition.status,
+        active=case_definition.active,
+        payload=case_definition.payload,
+        payload_hash=case_definition.payload_hash,
+        canonical_payload=case_definition.canonical_payload,
+        disk_hash=case_definition.disk_hash,
+        overlay_base_disk_hash=case_definition.overlay_base_disk_hash,
+        has_disk_changes=case_definition.has_disk_changes,
+        created_at=case_definition.created_at,
+        updated_at=case_definition.updated_at,
+    )
+
+
+def _raise_case_management_error(error: EvalCaseManagementError) -> NoReturn:
+    if isinstance(error, EvalCaseNotFoundError):
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    if isinstance(error, EvalCaseConflictError):
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    if isinstance(error, EvalCaseValidationError):
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    raise HTTPException(status_code=400, detail=str(error)) from error
+
+
+def _report_summary_out(report: EvalRunRecord) -> EvalReportSummaryOut:
+    return _report_summary_record_out(
+        EvalReportSummaryRecord(
+            report_id=report.report_id,
+            name=report.name,
+            suite=report.suite,
+            generated_at=report.generated_at,
+            repeats=report.repeats,
+            max_concurrency=report.max_concurrency,
+            pass_threshold=report.pass_threshold,
+            status=report.status,
+            case_count=len(report.cases),
+            run_count=sum(len(case_record.runs) for case_record in report.cases),
+            is_internal=_report_is_internal(report),
+            model_configs=report.model_configs,
+            pass_rate_average=_report_pass_rate_average(report),
+            duration_median_average=_report_duration_median_average(report),
+        )
+    )
+
+
+def _report_summary_record_out(summary: EvalReportSummaryRecord) -> EvalReportSummaryOut:
+    return EvalReportSummaryOut(
+        id=summary.report_id,
+        title=_humanize_eval_name(summary.name or summary.suite),
+        name=summary.name,
+        suite=summary.suite,
+        generated_at=summary.generated_at,
+        repeats=summary.repeats,
+        concurrency=summary.max_concurrency,
+        pass_threshold=summary.pass_threshold,
+        status=summary.status,
+        case_count=summary.case_count,
+        run_count=summary.run_count,
+        is_internal=summary.is_internal,
+        model_configs=summary.model_configs,
+        pass_rate_average=summary.pass_rate_average,
+        duration_median_average=summary.duration_median_average,
+    )
+
+
+def _report_detail_out(report: EvalRunRecord) -> EvalReportDetailOut:
+    summary = _report_summary_out(report)
+    return EvalReportDetailOut(
+        **summary.model_dump(),
+        config=report.config,
+        additional_settings=report.additional_settings,
+        cases=[_case_out(case_record) for case_record in report.cases],
+    )
 
 
 @router.get("/test-cases", response_model=EvalTestCasesOut)
-async def list_eval_test_cases(suite: Annotated[str, Query()]) -> EvalTestCasesOut:
-    test_path = _resolve_eval_suite(suite)
-    cases = _extract_test_case_ids(test_path)
+async def list_eval_test_cases(
+    session: SessionDep, suite: Annotated[str, Query()], _current_user: EvalsAccessUser
+) -> EvalTestCasesOut:
+    del _current_user
+    suite_name = _resolve_eval_suite_name(suite)
+    cases = await list_active_eval_case_ids(session, suite_name)
     return EvalTestCasesOut(suite=suite, cases=cases)
 
 
-@router.get("/reports", response_model=list[EvalReportSummaryOut])
-async def list_eval_reports(
-    limit: Annotated[int, Query(ge=1, le=200)] = 50, search: Annotated[str | None, Query()] = None
-) -> list[EvalReportSummaryOut]:
-    if not REPORTS_DIR.exists():
-        return []
+@router.get("/cases", response_model=list[EvalCaseOut])
+async def list_eval_cases(
+    session: SessionDep, suite: Annotated[str, Query()], _current_user: EvalsAccessUser
+) -> list[EvalCaseOut]:
+    del _current_user
+    suite_name = _resolve_eval_suite_name(suite)
+    try:
+        cases = await list_eval_case_definitions(session, suite_name)
+    except EvalCaseManagementError as error:
+        _raise_case_management_error(error)
+    return [_case_definition_out(case_definition) for case_definition in cases]
 
-    search_value = search.lower() if search is not None else None
-    reports: list[EvalReportSummaryOut] = []
 
-    for report_path in REPORTS_DIR.iterdir():
-        if not report_path.is_file():
-            continue
-        if report_path.suffix != ".md" or not report_path.name.startswith("eval_"):
-            continue
+@router.post("/cases", response_model=EvalCaseOut)
+async def create_eval_case(
+    payload: EvalCasePayloadIn, session: SessionDep, current_user: EvalsAccessUser
+) -> EvalCaseOut:
+    suite_name = _resolve_eval_suite_name(payload.suite)
+    try:
+        case_definition = await create_eval_case_overlay(
+            session, suite=suite_name, payload=payload.payload, user_id=current_user.id
+        )
+    except EvalCaseManagementError as error:
+        _raise_case_management_error(error)
+    return _case_definition_out(case_definition)
 
-        name, generated_at, repeats, concurrency = _read_report_metadata(report_path)
-        if search_value is not None and (
-            search_value not in name.lower() and search_value not in report_path.name.lower()
-        ):
-            continue
 
-        reports.append(
-            EvalReportSummaryOut(
-                id=report_path.name,
-                name=name,
-                generated_at=generated_at,
-                repeats=repeats,
-                concurrency=concurrency,
-                filename=report_path.name,
-                size_bytes=report_path.stat().st_size,
-            )
+@router.put("/cases/{case_id}", response_model=EvalCaseOut)
+async def update_eval_case(
+    case_id: str, payload: EvalCasePayloadIn, session: SessionDep, current_user: EvalsAccessUser
+) -> EvalCaseOut:
+    suite_name = _resolve_eval_suite_name(payload.suite)
+    try:
+        case_definition = await update_eval_case_overlay(
+            session,
+            suite=suite_name,
+            case_id=case_id,
+            payload=payload.payload,
+            user_id=current_user.id,
+        )
+    except EvalCaseManagementError as error:
+        _raise_case_management_error(error)
+    return _case_definition_out(case_definition)
+
+
+@router.delete("/cases/{case_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_eval_case(
+    case_id: str, session: SessionDep, suite: Annotated[str, Query()], current_user: EvalsAccessUser
+) -> None:
+    suite_name = _resolve_eval_suite_name(suite)
+    try:
+        await delete_eval_case_overlay(
+            session, suite=suite_name, case_id=case_id, user_id=current_user.id
+        )
+    except EvalCaseManagementError as error:
+        _raise_case_management_error(error)
+
+
+@router.post("/cases/{case_id}/restore", response_model=EvalCaseOut)
+async def restore_eval_case(
+    case_id: str,
+    session: SessionDep,
+    suite: Annotated[str, Query()],
+    _current_user: EvalsAccessUser,
+) -> EvalCaseOut:
+    del _current_user
+    suite_name = _resolve_eval_suite_name(suite)
+    try:
+        case_definition = await restore_disk_eval_case_overlay(
+            session, suite=suite_name, case_id=case_id
+        )
+    except EvalCaseManagementError as error:
+        _raise_case_management_error(error)
+    return _case_definition_out(case_definition)
+
+
+@router.get("/trace-index", response_model=PageOut[TraceSummaryOut])
+async def get_eval_trace_index(
+    _current_user: EvalsAccessUser,
+    page_params: Annotated[PaginationParams, Depends()],
+    ai_only: Annotated[bool, Query()] = False,
+    start: Annotated[datetime | None, Query()] = None,
+    end: Annotated[datetime | None, Query()] = None,
+) -> PageOut[TraceSummaryOut]:
+    del _current_user
+    if start is not None and end is not None and start > end:
+        raise HTTPException(status_code=400, detail="Invalid time range")
+
+    span_time_expr = _span_time_expr()
+    started_at_expr = func.min(span_time_expr).label("started_at")
+    ended_at_expr = func.max(func.coalesce(OtelSpan.end_time, OtelSpan.created_at)).label(
+        "ended_at"
+    )
+    latest_start_expr = func.max(span_time_expr).label("latest_start")
+    span_count_expr = func.count(OtelSpan.id).label("span_count")
+    root_name_expr = func.max(
+        case((OtelSpan.parent_span_id.is_(None), OtelSpan.name), else_=None)
+    ).label("root_span_name")
+    error_expr = func.bool_or(OtelSpan.status_code == "ERROR").label("is_error")
+    ai_expr = func.bool_or(OtelSpan.is_ai).label("is_ai")
+    model_expr = func.max(OtelSpan.request_model).label("model")
+
+    stmt = select(
+        OtelSpan.trace_id,
+        started_at_expr,
+        ended_at_expr,
+        latest_start_expr,
+        span_count_expr,
+        root_name_expr,
+        error_expr,
+        ai_expr,
+        model_expr,
+    ).group_by(OtelSpan.trace_id)
+    if ai_only:
+        ai_trace_ids = select(func.distinct(OtelSpan.trace_id)).where(OtelSpan.is_ai.is_(True))
+        stmt = stmt.where(OtelSpan.trace_id.in_(ai_trace_ids))
+    if start is not None:
+        stmt = stmt.having(started_at_expr >= start)
+    if end is not None:
+        stmt = stmt.having(started_at_expr <= end)
+
+    async with eval_report_session() as session:
+        rows = (await session.execute(stmt)).all()
+
+    items = [
+        TraceSummaryOut(
+            trace_id=row.trace_id,
+            started_at=row.started_at,
+            duration_ms=_trace_duration_ms(row.started_at, row.ended_at),
+            span_count=row.span_count,
+            root_span_name=row.root_span_name,
+            model=row.model,
+            is_error=bool(row.is_error),
+            is_public=None,
+            conversation_id=None,
+            is_ai=bool(row.is_ai),
+        )
+        for row in rows
+    ]
+
+    earliest_time = datetime.min.replace(tzinfo=UTC)
+    if page_params.sort_by == "duration_ms":
+        items.sort(key=lambda item: item.duration_ms or 0.0, reverse=page_params.descending)
+    elif page_params.sort_by == "span_count":
+        items.sort(key=lambda item: item.span_count, reverse=page_params.descending)
+    elif page_params.sort_by == "latest_start":
+        latest_start_by_trace = {row.trace_id: row.latest_start for row in rows}
+        items.sort(
+            key=lambda item: latest_start_by_trace.get(item.trace_id) or earliest_time,
+            reverse=page_params.descending,
+        )
+    else:
+        items.sort(
+            key=lambda item: item.started_at or earliest_time, reverse=page_params.descending
         )
 
-    reports.sort(key=lambda report: report.generated_at, reverse=True)
-    return reports[:limit]
+    total = len(items)
+    end_offset = page_params.offset + page_params.limit if page_params.limit > 0 else None
+    return PageOut[TraceSummaryOut](items=items[page_params.offset : end_offset], total=total)
+
+
+@router.get("/trace/{trace_id}", response_model=TraceDetailOut)
+async def get_eval_trace_detail(trace_id: str, _current_user: EvalsAccessUser) -> TraceDetailOut:
+    del _current_user
+    span_time_expr = _span_time_expr()
+    async with eval_report_session() as session:
+        spans = list(
+            (
+                await session.execute(
+                    select(OtelSpan)
+                    .where(OtelSpan.trace_id == trace_id)
+                    .order_by(span_time_expr.asc())
+                )
+            )
+            .scalars()
+            .all()
+        )
+
+    if not spans:
+        raise HTTPException(status_code=404, detail="Trace not found")
+
+    start_times = [span.start_time or span.span_time or span.created_at for span in spans]
+    end_times = [span.end_time or span.created_at for span in spans]
+    started_at = min(start_times) if start_times else None
+    ended_at = max(end_times) if end_times else None
+    return TraceDetailOut(
+        trace_id=trace_id,
+        started_at=started_at,
+        duration_ms=_trace_duration_ms(started_at, ended_at),
+        span_count=len(spans),
+        is_public=None,
+        conversation_id=None,
+        spans=[_trace_span_out(span) for span in spans],
+        overview=build_trace_overview(spans),
+    )
+
+
+@router.get("/reports", response_model=PageOut[EvalReportSummaryOut])
+async def list_eval_reports(
+    _current_user: EvalsAccessUser,
+    limit: Annotated[int, Query(ge=1, le=200)] = 25,
+    offset: Annotated[int, Query(ge=0)] = 0,
+    search: Annotated[str | None, Query()] = None,
+    sort_by: Annotated[EvalReportSortBy, Query()] = "generated_at",
+    descending: Annotated[bool, Query()] = True,
+) -> PageOut[EvalReportSummaryOut]:
+    del _current_user
+    async with eval_report_session() as session:
+        total = await count_eval_reports(session, search=search)
+        reports = await list_eval_report_summaries(
+            session,
+            descending=descending,
+            limit=limit,
+            offset=offset,
+            search=search,
+            sort_by=sort_by,
+        )
+
+    return PageOut[EvalReportSummaryOut](
+        items=[_report_summary_record_out(report) for report in reports], total=total
+    )
 
 
 @router.get("/reports/{report_id}", response_model=EvalReportDetailOut)
-async def get_eval_report(report_id: str) -> EvalReportDetailOut:
-    if not REPORTS_DIR.exists():
+async def get_eval_report(report_id: str, _current_user: EvalsAccessUser) -> EvalReportDetailOut:
+    del _current_user
+    async with eval_report_session() as session:
+        report = await get_stored_eval_report(session, report_id)
+
+    if report is None:
         raise HTTPException(status_code=404, detail="Report not found")
 
-    report_path = _resolve_report_path(report_id)
-    name, generated_at, repeats, concurrency = _read_report_metadata(report_path)
-
-    return EvalReportDetailOut(
-        id=report_path.name,
-        name=name,
-        generated_at=generated_at,
-        repeats=repeats,
-        concurrency=concurrency,
-        filename=report_path.name,
-        size_bytes=report_path.stat().st_size,
-        content=report_path.read_text(encoding="utf-8"),
-    )
-
-
-@router.get("/runs/logs/{log_id}", response_model=EvalRunLogFileOut)
-async def get_eval_run_log(log_id: str) -> EvalRunLogFileOut:
-    if not LOGS_DIR.exists():
-        raise HTTPException(status_code=404, detail="Log not found")
-
-    log_path = _resolve_log_path(log_id)
-
-    return EvalRunLogFileOut(
-        id=log_path.name,
-        filename=log_path.name,
-        size_bytes=log_path.stat().st_size,
-        content=log_path.read_text(encoding="utf-8"),
-    )
-
-
-@router.get("/reports/{report_id}/log", response_model=EvalRunLogFileOut)
-async def get_eval_report_log(report_id: str) -> EvalRunLogFileOut:
-    if not REPORTS_DIR.exists():
-        raise HTTPException(status_code=404, detail="Log not found")
-
-    _resolve_report_path(report_id)
-    map_path = _resolve_report_log_map(report_id)
-    if not map_path.exists() or not map_path.is_file():
-        raise HTTPException(status_code=404, detail="Log not found")
-
-    try:
-        payload = EvalReportLogMap.model_validate_json(map_path.read_text(encoding="utf-8"))
-    except (OSError, ValidationError) as error:
-        raise HTTPException(status_code=404, detail="Log not found") from error
-
-    log_id = payload.log_id
-
-    log_path = _resolve_log_path(log_id)
-
-    return EvalRunLogFileOut(
-        id=log_path.name,
-        filename=log_path.name,
-        size_bytes=log_path.stat().st_size,
-        content=log_path.read_text(encoding="utf-8"),
-    )
+    return _report_detail_out(report)
 
 
 @router.post("/runs/stream")
-async def run_eval_stream(run_request: EvalRunRequest, request: Request) -> StreamingResponse:
+async def run_eval_stream(
+    run_request: EvalRunRequest, request: Request, current_user: EvalsStreamAccessUser
+) -> StreamingResponse:
     if run_request.repeat < 1:
         raise HTTPException(status_code=400, detail="Repeat must be at least 1")
+
     if run_request.max_concurrency < 1:
         raise HTTPException(status_code=400, detail="Max concurrency must be at least 1")
+
     if not 0 < run_request.pass_threshold <= 1:
         raise HTTPException(status_code=400, detail="Pass threshold must be between 0 and 1")
 
-    test_path = _resolve_eval_suite(run_request.suite)
-    command = _build_eval_command(run_request, test_path)
-    env = _build_eval_env(run_request)
-    existing_reports = {path.name for path in REPORTS_DIR.glob("eval_*.md")}
-    log_id = (
-        f"eval_run_{run_request.suite}_"
-        f"{datetime.now(UTC).strftime('%Y-%m-%d_%H-%M-%S')}_{uuid4().hex}.log"
+    suite = _resolve_eval_suite_name(run_request.suite)
+    selected_test_cases = parse_test_cases_filter(run_request.test_cases)
+    try:
+        async with get_session() as session:
+            case_payloads = await resolve_eval_case_payloads_for_run(
+                session, suite, selected_test_cases
+            )
+    except EvalCaseManagementError as error:
+        _raise_case_management_error(error)
+
+    config = EvalRunRequestConfig(
+        suite=suite,
+        repeat=run_request.repeat,
+        max_concurrency=run_request.max_concurrency,
+        test_cases=selected_test_cases,
+        case_payloads=case_payloads,
+        pass_threshold=run_request.pass_threshold,
+        rebuild_rag=run_request.rebuild_rag,
+        chatbot_model=run_request.chatbot_model,
+        guardrail_model=run_request.guardrail_model,
+        evaluation_model=run_request.evaluation_model,
     )
-    log_path = LOGS_DIR / log_id
+    paths = EvalRunPaths(logs_dir=LOGS_DIR)
+    try:
+        job = EVAL_RUN_MANAGER.start_run(config, paths=paths, user_id=current_user.id)
+    except EvalRunAlreadyRunningError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
 
     async def event_stream() -> AsyncGenerator[str]:
-        LOGS_DIR.mkdir(parents=True, exist_ok=True)
-        log_handle = log_path.open("a", encoding="utf-8")
-        log_lock = asyncio.Lock()
-
-        async def append_log(label: str, message: str) -> None:
-            async with log_lock:
-                log_handle.write(f"[{label}] {message}\n")
-                log_handle.flush()
-
-        try:
-            queue: asyncio.Queue[tuple[str, dict[str, object]]] = asyncio.Queue()
-            command_line = " ".join(command)
-            yield _format_sse(
-                "status",
-                {
-                    "status": "start",
-                    "suite": run_request.suite,
-                    "command": command_line,
-                    "log_id": log_id,
-                },
-            )
-
-            await append_log("command", f"$ {command_line}")
-            await queue.put(("log", {"stream": "command", "message": f"$ {command_line}"}))
-
-            try:
-                process = await asyncio.create_subprocess_exec(
-                    *command,
-                    cwd=str(BACKEND_ROOT),
-                    env=env,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
-                )
-            except FileNotFoundError:
-                yield _format_sse(
-                    "error",
-                    {"message": "Failed to start evals. Ensure uv is available on the backend."},
-                )
+        async for event in job.subscribe():
+            if await request.is_disconnected():
                 return
-
-            if process.stdout is None or process.stderr is None:
-                yield _format_sse("error", {"message": "Eval process streams are unavailable."})
-                return
-
-            async def read_stream(stream: asyncio.StreamReader, label: str) -> None:
-                while True:
-                    line = await stream.readline()
-                    if line == b"":
-                        break
-                    message = line.decode("utf-8", errors="replace").rstrip()
-                    await append_log(label, message)
-                    await queue.put(("log", {"stream": label, "message": message}))
-                await queue.put(("stream_end", {"stream": label}))
-
-            tasks = [
-                asyncio.create_task(read_stream(process.stdout, "stdout")),
-                asyncio.create_task(read_stream(process.stderr, "stderr")),
-            ]
-
-            completed_streams = 0
-            disconnected = False
-
-            while completed_streams < len(tasks):
-                if await request.is_disconnected():
-                    disconnected = True
-                    process.terminate()
-                    break
-                try:
-                    event, payload = await asyncio.wait_for(queue.get(), timeout=0.5)
-                except TimeoutError:
-                    continue
-                if event == "stream_end":
-                    completed_streams += 1
-                    continue
-                yield _format_sse(event, payload)
-
-            if disconnected:
-                for task in tasks:
-                    task.cancel()
-                await process.wait()
-                yield _format_sse("status", {"status": "cancelled"})
-                return
-
-            for task in tasks:
-                task.cancel()
-
-            exit_code = await process.wait()
-
-            current_reports = set(REPORTS_DIR.glob("eval_*.md"))
-            new_reports = [path for path in current_reports if path.name not in existing_reports]
-            if new_reports:
-                newest = max(new_reports, key=lambda path: path.stat().st_mtime)
-                name, generated_at, repeats, concurrency = _read_report_metadata(newest)
-                REPORT_LOG_MAP_DIR.mkdir(parents=True, exist_ok=True)
-                map_path = _resolve_report_log_map(newest.name)
-                with contextlib.suppress(OSError):
-                    map_path.write_text(
-                        json.dumps({"log_id": log_id}, ensure_ascii=False), encoding="utf-8"
-                    )
-                yield _format_sse(
-                    "report",
-                    {
-                        "report_id": newest.name,
-                        "name": name,
-                        "generated_at": generated_at.isoformat(),
-                        "repeats": repeats,
-                        "concurrency": concurrency,
-                    },
-                )
-
-            if exit_code == 0:
-                yield _format_sse("status", {"status": "complete", "exit_code": exit_code})
-            else:
-                yield _format_sse("status", {"status": "error", "exit_code": exit_code})
-        finally:
-            log_handle.close()
+            yield _format_sse(event.event, event.payload)
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+
+@router.get("/runs/current", response_model=EvalRunSnapshotOut | None)
+async def get_current_eval_run(current_user: EvalsAccessUser) -> EvalRunSnapshotOut | None:
+    job = EVAL_RUN_MANAGER.current_run(current_user.id)
+    if job is None:
+        return None
+    return _eval_run_snapshot_out(job.snapshot())
+
+
+@router.post("/runs/{run_id}/stream")
+async def stream_existing_eval_run(
+    run_id: str, request: Request, current_user: EvalsStreamAccessUser
+) -> StreamingResponse:
+    try:
+        job = EVAL_RUN_MANAGER.get_run(run_id, user_id=current_user.id)
+    except EvalRunNotFoundError as error:
+        raise HTTPException(status_code=404, detail="Eval run not found") from error
+
+    async def event_stream() -> AsyncGenerator[str]:
+        async for event in job.subscribe():
+            if await request.is_disconnected():
+                return
+            yield _format_sse(event.event, event.payload)
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+
+@router.post("/runs/{run_id}/cancel", response_model=EvalRunSnapshotOut)
+async def cancel_eval_run(run_id: str, current_user: EvalsAccessUser) -> EvalRunSnapshotOut:
+    try:
+        job = EVAL_RUN_MANAGER.get_run(run_id, user_id=current_user.id)
+    except EvalRunNotFoundError as error:
+        raise HTTPException(status_code=404, detail="Eval run not found") from error
+    await job.cancel()
+    return _eval_run_snapshot_out(job.snapshot())

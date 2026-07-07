@@ -7,6 +7,7 @@ import {
     CollapsibleTrigger,
 } from "@va/shared/components/ui/collapsible";
 import { cn } from "@va/shared/lib/utils";
+import type { DynamicToolUIPart, ToolUIPart } from "ai";
 import {
     CheckCircleIcon,
     ChevronDownIcon,
@@ -32,58 +33,49 @@ export const Tool = ({ className, ...props }: ToolProps) => (
     />
 );
 
-export type ToolState =
-    | "input-streaming"
-    | "input-available"
-    | "approval-requested"
-    | "approval-responded"
-    | "output-available"
-    | "output-error"
-    | "output-denied";
+export type ToolPart = ToolUIPart | DynamicToolUIPart;
 
 export type ToolHeaderProps = {
     title?: string;
     className?: string;
-    type: string;
-    state: ToolState;
-    toolName?: string;
+} & (
+    | { type: ToolUIPart["type"]; state: ToolUIPart["state"]; toolName?: never }
+    | {
+          type: DynamicToolUIPart["type"];
+          state: DynamicToolUIPart["state"];
+          toolName: string;
+      }
+);
+
+const statusLabels: Record<ToolPart["state"], string> = {
+    "approval-requested": "Awaiting Approval",
+    "approval-responded": "Responded",
+    "input-available": "Running",
+    "input-streaming": "Pending",
+    "output-available": "Completed",
+    "output-denied": "Denied",
+    "output-error": "Error",
 };
 
-export const getStatusBadge = (status: ToolState) => {
-    const labels: Record<ToolState, string> = {
-        "input-streaming": "Pending",
-        "input-available": "Running",
-        "approval-requested": "Awaiting Approval",
-        "approval-responded": "Responded",
-        "output-available": "Completed",
-        "output-error": "Error",
-        "output-denied": "Denied",
-    };
-
-    const icons: Record<ToolState, ReactNode> = {
-        "input-streaming": <CircleIcon className="size-4" />,
-        "input-available": <ClockIcon className="size-4 animate-pulse" />,
-        "approval-requested": <ClockIcon className="size-4 text-yellow-600" />,
-        "approval-responded": (
-            <CheckCircleIcon className="size-4 text-blue-600" />
-        ),
-        "output-available": (
-            <CheckCircleIcon className="size-4 text-green-600" />
-        ),
-        "output-error": <XCircleIcon className="size-4 text-red-600" />,
-        "output-denied": <XCircleIcon className="size-4 text-orange-600" />,
-    };
-
-    return (
-        <Badge
-            className="gap-1.5 rounded-full text-xs"
-            variant="secondary"
-        >
-            {icons[status]}
-            {labels[status]}
-        </Badge>
-    );
+const statusIcons: Record<ToolPart["state"], ReactNode> = {
+    "approval-requested": <ClockIcon className="size-4 text-yellow-600" />,
+    "approval-responded": <CheckCircleIcon className="size-4 text-blue-600" />,
+    "input-available": <ClockIcon className="size-4 animate-pulse" />,
+    "input-streaming": <CircleIcon className="size-4" />,
+    "output-available": <CheckCircleIcon className="size-4 text-green-600" />,
+    "output-denied": <XCircleIcon className="size-4 text-orange-600" />,
+    "output-error": <XCircleIcon className="size-4 text-red-600" />,
 };
+
+export const getStatusBadge = (status: ToolPart["state"]) => (
+    <Badge
+        className="gap-1.5 rounded-full text-xs"
+        variant="secondary"
+    >
+        {statusIcons[status]}
+        {statusLabels[status]}
+    </Badge>
+);
 
 export const ToolHeader = ({
     className,
@@ -121,7 +113,7 @@ export type ToolContentProps = ComponentProps<typeof CollapsibleContent>;
 export const ToolContent = ({ className, ...props }: ToolContentProps) => (
     <CollapsibleContent
         className={cn(
-            "data-[state=closed]:fade-out-0 data-[state=closed]:slide-out-to-top-2 data-[state=open]:slide-in-from-top-2 text-popover-foreground data-[state=closed]:animate-out data-[state=open]:animate-in outline-none",
+            "data-[state=closed]:fade-out-0 data-[state=closed]:slide-out-to-top-2 data-[state=open]:slide-in-from-top-2 text-popover-foreground data-[state=closed]:animate-out data-[state=open]:animate-in space-y-4 p-4 outline-none",
             className,
         )}
         {...props}
@@ -129,18 +121,18 @@ export const ToolContent = ({ className, ...props }: ToolContentProps) => (
 );
 
 export type ToolInputProps = ComponentProps<"div"> & {
-    input: unknown;
+    input: ToolPart["input"];
 };
 
 export const ToolInput = ({ className, input, ...props }: ToolInputProps) => (
     <div
-        className={cn("space-y-2 overflow-hidden p-4", className)}
+        className={cn("space-y-2 overflow-hidden", className)}
         {...props}
     >
         <h4 className="text-muted-foreground text-xs font-medium tracking-wide uppercase">
             Parameters
         </h4>
-        <div className="bg-muted/50 rounded-md [&_code]:break-words [&_code]:whitespace-pre-wrap [&_pre]:break-words [&_pre]:whitespace-pre-wrap">
+        <div className="bg-muted/50 rounded-md">
             <CodeBlock
                 code={JSON.stringify(input, null, 2)}
                 language="json"
@@ -150,8 +142,8 @@ export const ToolInput = ({ className, input, ...props }: ToolInputProps) => (
 );
 
 export type ToolOutputProps = ComponentProps<"div"> & {
-    output: unknown;
-    errorText: string | undefined;
+    output: ToolPart["output"];
+    errorText: ToolPart["errorText"];
 };
 
 export const ToolOutput = ({
@@ -184,7 +176,7 @@ export const ToolOutput = ({
 
     return (
         <div
-            className={cn("space-y-2 p-4", className)}
+            className={cn("space-y-2", className)}
             {...props}
         >
             <h4 className="text-muted-foreground text-xs font-medium tracking-wide uppercase">
@@ -192,7 +184,7 @@ export const ToolOutput = ({
             </h4>
             <div
                 className={cn(
-                    "rounded-md text-xs [&_code]:break-words [&_code]:whitespace-pre-wrap [&_pre]:break-words [&_pre]:whitespace-pre-wrap [&_table]:w-full",
+                    "overflow-x-auto rounded-md text-xs [&_table]:w-full",
                     errorText
                         ? "bg-destructive/10 text-destructive"
                         : "bg-muted/50 text-foreground",

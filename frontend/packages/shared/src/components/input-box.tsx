@@ -140,18 +140,20 @@ export const InputBox = ({
                     <div className="flex items-center gap-1.5">
                         {showSTTButton && (
                             <Tooltip>
-                                <TooltipTrigger asChild>
-                                    <div className="border border-transparent">
-                                        <STTButton
-                                            disabled={disabled}
-                                            isRecording={isRecording}
-                                            onClick={handleSTTClick}
-                                            suppressFocusRing={
-                                                variant === "public-widget"
-                                            }
-                                        />
-                                    </div>
-                                </TooltipTrigger>
+                                <TooltipTrigger
+                                    render={
+                                        <div className="border border-transparent">
+                                            <STTButton
+                                                disabled={disabled}
+                                                isRecording={isRecording}
+                                                onClick={handleSTTClick}
+                                                suppressFocusRing={
+                                                    variant === "public-widget"
+                                                }
+                                            />
+                                        </div>
+                                    }
+                                />
                                 <TooltipContent
                                     side="top"
                                     sideOffset={4}
@@ -164,23 +166,25 @@ export const InputBox = ({
                         {actionsAccessory}
 
                         <Tooltip>
-                            <TooltipTrigger asChild>
-                                <div className="flex border border-transparent">
-                                    <Button
-                                        aria-label="Send message"
-                                        className="rounded-full"
-                                        disabled={isSendDisabled}
-                                        onClick={handleSend}
-                                        size="icon"
-                                        type="button"
-                                    >
-                                        <ArrowUp
-                                            aria-hidden="true"
-                                            className="size-4"
-                                        />
-                                    </Button>
-                                </div>
-                            </TooltipTrigger>
+                            <TooltipTrigger
+                                render={
+                                    <div className="flex border border-transparent">
+                                        <Button
+                                            aria-label="Send message"
+                                            className="rounded-full"
+                                            disabled={isSendDisabled}
+                                            onClick={handleSend}
+                                            size="icon"
+                                            type="button"
+                                        >
+                                            <ArrowUp
+                                                aria-hidden="true"
+                                                className="size-4"
+                                            />
+                                        </Button>
+                                    </div>
+                                }
+                            />
                             <TooltipContent
                                 side="top"
                                 sideOffset={4}

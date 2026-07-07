@@ -1,10 +1,12 @@
-from typing import Any
-from uuid import UUID
+from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import Message
+
+if TYPE_CHECKING:
+    from uuid import UUID
 
 
 async def get_conversation_path(session: AsyncSession, message_id: UUID) -> list[Message]:

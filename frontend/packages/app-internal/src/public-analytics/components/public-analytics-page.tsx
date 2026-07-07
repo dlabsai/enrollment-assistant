@@ -4,7 +4,7 @@ import { type JSX, useEffect, useMemo, useState } from "react";
 
 import { PageHeader, PageHeaderGroup } from "../../components/page-header";
 import { PageSection, PageShell } from "../../components/page-shell";
-import { PageError, PageLoading } from "../../components/page-state";
+import { LoadingState, PageError } from "../../components/page-state";
 import { TimeRangeFilter } from "../../components/time-range-filter";
 import {
     type CustomTimeRange,
@@ -124,7 +124,7 @@ export const PublicAnalyticsPage = (): JSX.Element => {
     }, [customRange, timeRange]);
 
     if (loading && !hasLoaded) {
-        return <PageLoading />;
+        return <LoadingState />;
     }
 
     if (error !== undefined || summary === undefined) {
@@ -152,18 +152,16 @@ export const PublicAnalyticsPage = (): JSX.Element => {
                         setTimeRange("30d");
                         setCustomRange({});
                     }}
-                    size="sm"
                     variant="outline"
                 >
-                    <Filter className="mr-2 size-4" />
+                    <Filter data-icon="inline-start" />
                     Clear
                 </Button>
                 <Button
                     onClick={() => void refresh()}
-                    size="sm"
                     variant="outline"
                 >
-                    <RefreshCw className="mr-2 size-4" />
+                    <RefreshCw data-icon="inline-start" />
                     Refresh
                 </Button>
             </PageHeader>

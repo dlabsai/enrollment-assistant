@@ -1,18 +1,20 @@
+import { formatEstimatedUsdCost } from "../../lib/number-format";
 import {
     extractRequestMessages,
     extractRequestTools,
     extractResponseMessages,
     extractResponseToolCalls,
     extractToolResults,
-    getSpanEnd,
-    getSpanStart,
+    getResolvedSpanTiming,
     getStringAttribute,
     type TraceMessage,
 } from "../lib/trace-utils";
-import { formatSpanDuration } from "../lib/trace-view-utils";
+import {
+    formatSpanDuration,
+    getSpanTimelineLayout,
+} from "../lib/trace-view-utils";
 import type { TraceSpan } from "../types";
 import {
-    formatCost,
     formatNumeric,
     formatOffset,
     formatTimestampWithSeconds,
@@ -40,6 +42,7 @@ interface SpanDetailModel {
     metadataEntries: { label: string; value: string }[];
     usageEntries: { label: string; value: string }[];
     appEntries: { key: string; value: unknown }[];
+    systemInstructions?: string;
     prompt?: string;
     requestMessages: TraceMessage[];
     requestTools: ToolCall[];
@@ -78,6 +81,10 @@ export const buildSpanDetailModel = ({
         attributes,
         "gen_ai.operation.name",
     );
+    const systemInstructions = getStringAttribute(
+        attributes,
+        "gen_ai.system_instructions",
+    );
     const inputTokens = getNumericAttribute(
         attributes,
         "gen_ai.usage.input_tokens",
@@ -88,7 +95,7 @@ export const buildSpanDetailModel = ({
     );
     const cacheTokens = getNumericAttribute(
         attributes,
-        "gen_ai.usage.details.cache_read_tokens",
+        "gen_ai.usage.cache_read.input_tokens",
     );
     const cost = getNumericAttribute(attributes, "operation.cost");
 
@@ -99,28 +106,11 @@ export const buildSpanDetailModel = ({
             value,
         }));
 
-    const spanStart = getSpanStart(span);
-    const spanEnd = getSpanEnd(span);
-    const offset =
-        traceStart !== undefined && spanStart !== undefined
-            ? spanStart - traceStart
-            : undefined;
-    const duration =
-        spanStart !== undefined && spanEnd !== undefined
-            ? spanEnd - spanStart
-            : undefined;
-    const traceDuration =
-        traceStart !== undefined && traceEnd !== undefined
-            ? traceEnd - traceStart
-            : undefined;
-    const offsetPct =
-        traceDuration !== undefined && offset !== undefined
-            ? Math.max((offset / traceDuration) * 100, 0)
-            : 0;
-    const widthPct =
-        traceDuration !== undefined && duration !== undefined
-            ? Math.max((duration / traceDuration) * 100, 2)
-            : 2;
+    const timing = getResolvedSpanTiming(span);
+    const timelineLayout = getSpanTimelineLayout(span, traceStart, traceEnd);
+    const offset = timelineLayout?.offsetMs;
+    const offsetPct = timelineLayout?.offsetPct ?? 0;
+    const widthPct = timelineLayout?.widthPct ?? 2;
 
     const metadataEntries = [
         { label: "Model", value: model },
@@ -134,7 +124,7 @@ export const buildSpanDetailModel = ({
         { label: "Input tokens", value: formatNumeric(inputTokens) },
         { label: "Output tokens", value: formatNumeric(outputTokens) },
         { label: "Cache read tokens", value: formatNumeric(cacheTokens) },
-        { label: "Cost", value: formatCost(cost) },
+        { label: "Cost", value: formatEstimatedUsdCost(cost) },
     ].filter((entry) => entry.value !== "-");
 
     return {
@@ -146,13 +136,14 @@ export const buildSpanDetailModel = ({
         offsetPct,
         widthPct,
         timing: {
-            start: formatTimestampWithSeconds(span.start_time),
-            end: formatTimestampWithSeconds(span.end_time),
+            start: formatTimestampWithSeconds(timing.start),
+            end: formatTimestampWithSeconds(timing.end),
             offset: formatOffset(offset),
         },
         metadataEntries,
         usageEntries,
         appEntries,
+        systemInstructions: systemInstructions ?? undefined,
         prompt: prompt ?? undefined,
         requestMessages,
         requestTools,

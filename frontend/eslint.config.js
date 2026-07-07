@@ -1,3 +1,4 @@
+import { fixupConfigRules } from "@eslint/compat";
 import js from "@eslint/js";
 import { defineConfig, globalIgnores } from "eslint/config";
 import { importX } from "eslint-plugin-import-x";
@@ -12,19 +13,35 @@ import eslintPluginUnicorn from "eslint-plugin-unicorn";
 import globals from "globals";
 import tseslint from "typescript-eslint";
 
+const jsxTsFiles = ["**/*.{ts,tsx}"];
+
+const reactCompatConfigs = fixupConfigRules(react.configs.flat.all).map(
+    (config) => ({
+        ...config,
+        files: jsxTsFiles,
+    }),
+);
+
+const reactHooksCompatConfigs = fixupConfigRules(
+    reactHooks.configs.flat["recommended-latest"],
+).map((config) => ({
+    ...config,
+    files: jsxTsFiles,
+}));
+
 export default defineConfig([
     globalIgnores([
         "packages/shared/src/components/ui",
         "packages/shared/src/components/ai-elements",
         "packages/app-internal/src/components/ui",
     ]),
+    ...reactCompatConfigs,
+    ...reactHooksCompatConfigs,
     {
-        files: ["**/*.{ts,tsx}"],
+        files: jsxTsFiles,
         extends: [
             js.configs.all,
             tseslint.configs.all,
-            react.configs.flat.all,
-            reactHooks.configs.flat["recommended-latest"],
             reactX.configs["strict-type-checked"],
             reactDom.configs.strict,
             reactRefresh.configs.vite,
@@ -63,9 +80,9 @@ export default defineConfig([
         },
         rules: {
             "@typescript-eslint/switch-exhaustiveness-check": "off",
-            "react-naming-convention/component-name": "error",
-            "react-naming-convention/filename": "off",
-            "react-naming-convention/filename-extension": "error",
+            "react-naming-convention/context-name": "error",
+            "react-naming-convention/id-name": "error",
+            "react-naming-convention/ref-name": "error",
             // js.configs.all
             camelcase: "off",
             "capitalized-comments": "off",
@@ -122,6 +139,7 @@ export default defineConfig([
             "simple-import-sort/exports": "error",
             // eslintPluginUnicorn.configs.all,
             "unicorn/no-keyword-prefix": "off",
+            "unicorn/no-null": "off", // Allow null where library callback types use it.
             "unicorn/no-nested-ternary": "off", // Prettier handles formatting.
             "unicorn/prefer-global-this": "off",
             "unicorn/prevent-abbreviations": "off",

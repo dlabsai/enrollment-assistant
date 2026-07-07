@@ -11,6 +11,7 @@ import {
 } from "@va/shared/components/ui/dialog";
 import { UNIVERSITY_NAME } from "@va/shared/config";
 import { useIsMobile } from "@va/shared/hooks/use-is-mobile";
+import { setDocumentTitle } from "@va/shared/lib/document-title";
 import { logger } from "@va/shared/lib/logger";
 import { cn } from "@va/shared/lib/utils";
 import { MessageCircle } from "lucide-react";
@@ -20,15 +21,8 @@ import { LoadingIndicator } from "@/components/loading-indicator";
 
 import { VISIBLE_BY_DEFAULT } from "../config";
 import { useChat } from "../hooks/use-chat";
-import {
-    submitConsentData,
-    submitConsentOnWidgetClose,
-} from "../lib/consent-api";
-import {
-    getConsentData,
-    hasCompleteConsentData,
-    setConsent,
-} from "../lib/storage";
+import { submitConsentData, submitConsentForCurrentChat } from "../lib/consent-api";
+import { getConsentData, hasCompleteConsentData } from "../lib/storage";
 import { ConsentBanner } from "./consent-banner";
 import { Footer } from "./footer";
 import { Header } from "./header";
@@ -38,20 +32,14 @@ const CHAT_HISTORY_KEY = "chat_history";
 
 const handleConsentSubmit = (chatId: string): void => {
     const consentData = getConsentData();
-    if (!consentData) {
+    if (consentData === undefined) {
         return;
     }
 
     const submit = async (): Promise<void> => {
-        try {
-            const result = await submitConsentData(consentData, [chatId]);
-            if (result.success) {
-                logger.log("Consent data submitted for chat:", chatId);
-            } else {
-                logger.error("Failed to submit consent data:", result.error);
-            }
-        } catch (error) {
-            logger.error("Error submitting consent data:", error);
+        const result = await submitConsentData(consentData, chatId);
+        if (!result.success) {
+            logger.error("Failed to submit consent data:", result.error);
         }
     };
 
@@ -59,26 +47,12 @@ const handleConsentSubmit = (chatId: string): void => {
 };
 
 export const PublicApp = (): JSX.Element => {
-    const [dialogPortalContainer, setDialogPortalContainer] = useState<
-        HTMLDivElement | undefined
-    >();
-
-    const handlePortalRef = useCallback((node: HTMLDivElement | null) => {
-        setDialogPortalContainer(node ?? undefined);
-    }, []);
-
     const [open, setOpen] = useState(() => VISIBLE_BY_DEFAULT);
     const [isModalOpen, setIsModalOpen] = useState(false);
     const [chatKey, setChatKey] = useState(0);
     const [isVisible, setIsVisible] = useState(() => VISIBLE_BY_DEFAULT);
     const [shouldRender, setShouldRender] = useState(() => VISIBLE_BY_DEFAULT);
-    const [consentGiven, setConsentGiven] = useState(() => {
-        const consentStatus = hasCompleteConsentData();
-        if (!consentStatus) {
-            setConsent(false);
-        }
-        return consentStatus;
-    });
+    const [consentGiven, setConsentGiven] = useState(() => hasCompleteConsentData());
     // Public widget is a fixed-width panel; only go full-screen on small phones.
     const isMobile = useIsMobile(480);
     const visibilityTimeoutRef = useRef<
@@ -90,6 +64,10 @@ export const PublicApp = (): JSX.Element => {
         consentGiven,
         onConsentSubmit: handleConsentSubmit,
     });
+
+    useEffect(() => {
+        setDocumentTitle(`${UNIVERSITY_NAME} Enrollment Assistant`);
+    }, []);
 
     const clearVisibilityTimers = useCallback(() => {
         if (visibilityTimeoutRef.current !== undefined) {
@@ -122,29 +100,22 @@ export const PublicApp = (): JSX.Element => {
             visibilityTimeoutRef.current = undefined;
         }, 300);
 
-        void submitConsentOnWidgetClose();
-    }, [clearVisibilityTimers]);
-
-    const handleDeclineConsent = useCallback(() => {
-        handleClose();
-    }, [handleClose]);
+        if (consentGiven) {
+            void submitConsentForCurrentChat();
+        }
+    }, [clearVisibilityTimers, consentGiven]);
 
     const handleConsentAccept = useCallback(() => {
-        setConsent(true);
         setConsentGiven(true);
     }, []);
 
     const handleConsentDecline = useCallback(() => {
-        setConsent(false);
         setConsentGiven(false);
-        handleDeclineConsent();
-    }, [handleDeclineConsent]);
-
-    const isMountedRef = useRef(true);
+        handleClose();
+    }, [handleClose]);
 
     useEffect(
         () => (): void => {
-            isMountedRef.current = false;
             clearVisibilityTimers();
         },
         [clearVisibilityTimers],
@@ -180,15 +151,12 @@ export const PublicApp = (): JSX.Element => {
     );
 
     return (
-        <div
-            className="public"
-            ref={handlePortalRef}
-        >
+        <div className="public">
             {!open && !shouldRender && (
                 <button
                     aria-controls={CHAT_WIDGET_ID}
                     aria-expanded={open}
-                    aria-label="Open enrollment agent"
+                    aria-label="Open enrollment assistant"
                     className="bg-primary text-primary-foreground hover:bg-primary/90 focus-visible:ring-ring/40 font-widget text-widget fixed right-6 bottom-6 z-40 flex items-center gap-2 rounded-full px-5 py-3 text-sm font-semibold shadow-lg shadow-black/20 transition focus-visible:ring-2 focus-visible:outline-none"
                     onClick={handleOpen}
                     type="button"
@@ -203,7 +171,7 @@ export const PublicApp = (): JSX.Element => {
 
             {shouldRender && (
                 <section
-                    aria-label={`${UNIVERSITY_NAME} enrollment agent`}
+                    aria-label={`${UNIVERSITY_NAME} enrollment assistant`}
                     aria-modal={isMobile}
                     className={chatPanelClasses}
                     id={CHAT_WIDGET_ID}
@@ -254,7 +222,6 @@ export const PublicApp = (): JSX.Element => {
             >
                 <DialogContent
                     className="font-widget text-widget"
-                    portalContainer={dialogPortalContainer}
                     showCloseButton={false}
                 >
                     <DialogHeader>

@@ -12,6 +12,7 @@ interface FetchTraceIndexParams {
     platform: TracePlatformFilter;
     start?: string;
     end?: string;
+    source?: "runtime" | "evals";
 }
 
 export const fetchTraceIndex = async (
@@ -36,18 +37,28 @@ export const fetchTraceIndex = async (
     if (params.end !== undefined) {
         queryParams.set("end", params.end);
     }
+    const pathPrefix = params.source === "evals" ? "/evals" : "/usage";
     const query = queryParams.toString();
-    const path = query ? `/usage/trace-index?${query}` : "/usage/trace-index";
+    const path = query
+        ? `${pathPrefix}/trace-index?${query}`
+        : `${pathPrefix}/trace-index`;
     return api.get<TraceSummaryPage>(path);
 };
 
 export const fetchTraceDetail = async (
     api: AuthenticatedApi,
     traceId: string,
-): Promise<TraceDetail> => api.get<TraceDetail>(`/usage/trace/${traceId}`);
+    source: "runtime" | "evals" = "runtime",
+): Promise<TraceDetail> => {
+    const pathPrefix = source === "evals" ? "/evals" : "/usage";
+    return api.get<TraceDetail>(`${pathPrefix}/trace/${traceId}`);
+};
 
 export const fetchTraceDetailByMessageId = async (
     api: AuthenticatedApi,
     messageId: string,
+    source: "page" | "chat_trace" | "chat_activity" | "chats_trace" = "page",
 ): Promise<TraceDetail> =>
-    api.get<TraceDetail>(`/usage/trace-by-message/${messageId}`);
+    api.get<TraceDetail>(
+        `/usage/trace-by-message/${messageId}?source=${source}`,
+    );

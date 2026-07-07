@@ -8,6 +8,7 @@ import {
 import {
     Select,
     SelectContent,
+    SelectGroup,
     SelectItem,
     SelectTrigger,
     SelectValue,
@@ -68,12 +69,15 @@ export const TimeRangeFilter = ({
         ? { from: customRange.start, to: customRange.end }
         : undefined;
     const rangeLabel = formatRangeLabel(customRange);
+    const selectedTimeRangeLabel =
+        timeRangeOptions.find((option) => option.value === value)?.label ??
+        "Last 30 days";
 
     return (
         <div className="flex flex-wrap items-center gap-2">
             <Select
                 onValueChange={(next) => {
-                    if (isTimeRangeValue(next)) {
+                    if (next !== null && isTimeRangeValue(next)) {
                         if (
                             next === "custom" &&
                             !customRange.start &&
@@ -88,40 +92,43 @@ export const TimeRangeFilter = ({
             >
                 <SelectTrigger
                     aria-label="Select time range"
-                    className="h-8 w-[170px]"
-                    size="sm"
+                    className="w-[170px]"
                 >
-                    <SelectValue />
+                    <SelectValue>{selectedTimeRangeLabel}</SelectValue>
                 </SelectTrigger>
                 <SelectContent className="rounded-xl">
-                    {timeRangeOptions.map((option) => (
-                        <SelectItem
-                            className="rounded-lg"
-                            key={option.value}
-                            value={option.value}
-                        >
-                            {option.label}
-                        </SelectItem>
-                    ))}
+                    <SelectGroup>
+                        {timeRangeOptions.map((option) => (
+                            <SelectItem
+                                className="rounded-lg"
+                                key={option.value}
+                                value={option.value}
+                            >
+                                {option.label}
+                            </SelectItem>
+                        ))}
+                    </SelectGroup>
                 </SelectContent>
             </Select>
             {value === "custom" && (
                 <Popover>
-                    <PopoverTrigger asChild>
-                        <Button
-                            className={cn(
-                                "h-8 w-auto justify-start font-normal",
-                                !customRange.start && "text-muted-foreground",
-                            )}
-                            size="sm"
-                            variant="outline"
-                        >
-                            <CalendarIcon className="mr-2 size-4" />
-                            <span className="whitespace-nowrap">
-                                {rangeLabel}
-                            </span>
-                        </Button>
-                    </PopoverTrigger>
+                    <PopoverTrigger
+                        render={
+                            <Button
+                                className={cn(
+                                    "w-auto justify-start font-normal",
+                                    !customRange.start &&
+                                        "text-muted-foreground",
+                                )}
+                                variant="outline"
+                            >
+                                <CalendarIcon data-icon="inline-start" />
+                                <span className="whitespace-nowrap">
+                                    {rangeLabel}
+                                </span>
+                            </Button>
+                        }
+                    />
                     <PopoverContent
                         align="start"
                         className="w-auto p-0"

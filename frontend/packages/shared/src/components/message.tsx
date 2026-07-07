@@ -14,9 +14,11 @@ interface MessageProps {
     isPlayingTTS: boolean;
     onPlayTTS?: (messageId: string) => void;
     footer?: ReactNode;
+    footerAside?: ReactNode;
     belowContent?: ReactNode;
     hideFooterUntilHover?: boolean;
     highlightQuery?: string;
+    highlightPhrase?: boolean;
 }
 
 const isElement = (node: Parent): node is Element => node.type === "element";
@@ -24,6 +26,7 @@ const isElement = (node: Parent): node is Element => node.type === "element";
 const createHighlightRehypePlugin = (
     query: string,
     highlightClassName: string,
+    phrase = false,
 ): Pluggable | undefined => {
     const trimmedQuery = query.trim();
     if (trimmedQuery === "") {
@@ -47,7 +50,7 @@ const createHighlightRehypePlugin = (
                     return;
                 }
 
-                const parts = splitHighlightText(node.value, trimmedQuery);
+                const parts = splitHighlightText(node.value, trimmedQuery, phrase);
                 const hasHighlights = parts.some((part) => part.highlight);
                 if (!hasHighlights) {
                     return;
@@ -85,23 +88,28 @@ export const Message = memo(
         isPlayingTTS,
         onPlayTTS,
         footer,
+        footerAside,
         belowContent,
         hideFooterUntilHover = false,
         highlightQuery = "",
+        highlightPhrase = false,
     }: MessageProps) => {
         const isUser = message.role === "user";
         const shouldHideFooter = hideFooterUntilHover && !isUser;
         const shouldHideUserFooter = isUser;
         const showFooterRow =
-            footer !== undefined || (!isUser && onPlayTTS !== undefined);
+            footer !== undefined ||
+            footerAside !== undefined ||
+            (!isUser && onPlayTTS !== undefined);
 
         const highlightRehypePlugin = useMemo(
             () =>
                 createHighlightRehypePlugin(
                     highlightQuery,
                     DEFAULT_HIGHLIGHT_CLASS,
+                    highlightPhrase,
                 ),
-            [highlightQuery],
+            [highlightPhrase, highlightQuery],
         );
 
         const content = useMemo(() => {
@@ -114,6 +122,7 @@ export const Message = memo(
                     <div className="max-w-none wrap-break-word whitespace-normal">
                         <p>
                             <HighlightedText
+                                phrase={highlightPhrase}
                                 query={highlightQuery}
                                 text={message.content}
                             />
@@ -125,6 +134,7 @@ export const Message = memo(
             return (
                 <Streamdown
                     className="max-w-none wrap-break-word"
+                    key={`${message.id}-${highlightQuery}-${highlightPhrase}`}
                     rehypePlugins={
                         highlightRehypePlugin
                             ? [highlightRehypePlugin]
@@ -134,7 +144,7 @@ export const Message = memo(
                     {message.content}
                 </Streamdown>
             );
-        }, [highlightQuery, highlightRehypePlugin, isUser, message]);
+        }, [highlightPhrase, highlightQuery, highlightRehypePlugin, isUser, message]);
 
         return (
             <div
@@ -165,18 +175,26 @@ export const Message = memo(
                                     shouldHideUserFooter
                                         ? "mt-1 flex h-6 min-h-6 flex-nowrap items-center gap-1 overflow-hidden opacity-0 transition-opacity group-focus-within:opacity-100 group-hover:opacity-100"
                                         : shouldHideFooter
-                                          ? "mt-2 flex flex-wrap items-center gap-1 opacity-0 transition-opacity group-focus-within:opacity-100 group-hover:opacity-100"
-                                          : "mt-2 flex flex-wrap items-center gap-1"
+                                          ? "mt-2 flex w-full flex-wrap items-center gap-1 opacity-0 transition-opacity group-focus-within:opacity-100 group-hover:opacity-100"
+                                          : "mt-2 flex w-full flex-wrap items-center gap-1"
                                 }
                             >
-                                {footer}
-                                {!isUser && onPlayTTS !== undefined && (
-                                    <TTSButton
-                                        isPlaying={isPlayingTTS}
-                                        onClick={() => {
-                                            onPlayTTS(message.id);
-                                        }}
-                                    />
+                                <div className="flex flex-wrap items-center gap-1">
+                                    {footer}
+                                    {isUser ||
+                                    onPlayTTS === undefined ? undefined : (
+                                        <TTSButton
+                                            isPlaying={isPlayingTTS}
+                                            onClick={() => {
+                                                onPlayTTS(message.id);
+                                            }}
+                                        />
+                                    )}
+                                </div>
+                                {footerAside === undefined ? undefined : (
+                                    <div className="text-muted-foreground text-xs">
+                                        {footerAside}
+                                    </div>
                                 )}
                             </div>
                             {isUser ? <div className="h-4" /> : undefined}

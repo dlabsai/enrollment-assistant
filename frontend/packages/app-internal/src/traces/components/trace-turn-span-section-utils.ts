@@ -1,4 +1,4 @@
-import { getSpanStart, getStringAttribute } from "../lib/trace-utils";
+import { getResolvedSpanTiming, getStringAttribute } from "../lib/trace-utils";
 import type { TraceSpan } from "../types";
 
 export interface SpanSectionMeta {
@@ -11,8 +11,8 @@ export const buildSpanSections = (spans: TraceSpan[]): SpanSectionMeta[] => {
     const ordered = spans
         .map((span, index) => ({ span, index }))
         .toSorted((left, right) => {
-            const leftStart = getSpanStart(left.span) ?? 0;
-            const rightStart = getSpanStart(right.span) ?? 0;
+            const leftStart = getResolvedSpanTiming(left.span).start ?? 0;
+            const rightStart = getResolvedSpanTiming(right.span).start ?? 0;
             if (leftStart === rightStart) {
                 return left.index - right.index;
             }

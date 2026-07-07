@@ -8,7 +8,7 @@ import { type JSX, useEffect, useMemo, useState } from "react";
 
 import { PageHeader, PageHeaderGroup } from "../../components/page-header";
 import { PageSection, PageShell } from "../../components/page-shell";
-import { PageError, PageLoading } from "../../components/page-state";
+import { LoadingState, PageError } from "../../components/page-state";
 import { TimeRangeFilter } from "../../components/time-range-filter";
 import {
     type CustomTimeRange,
@@ -23,7 +23,7 @@ import { MessagesByHourChart } from "./messages-by-hour-chart";
 import { ResponseTimeChart } from "./response-time-chart";
 
 const platformOptions = [
-    { label: "Both", value: "both" },
+    { label: "All platforms", value: "both" },
     { label: "Internal", value: "internal" },
     { label: "Public", value: "public" },
 ] as const;
@@ -154,7 +154,7 @@ export const AnalyticsPage = (): JSX.Element => {
     }, [customRange, platform, timeRange]);
 
     if (loading && !hasLoaded) {
-        return <PageLoading />;
+        return <LoadingState />;
     }
 
     if (error !== undefined || summary === undefined) {
@@ -169,17 +169,17 @@ export const AnalyticsPage = (): JSX.Element => {
     return (
         <PageShell variant="dashboard">
             <PageHeader title="Chat Analytics">
-                <PageHeaderGroup label="Platform">
+                <PageHeaderGroup>
                     <ToggleGroup
+                        aria-label="Platform"
                         onValueChange={(value) => {
-                            const next = isPlatformFilter(value)
-                                ? value
+                            const [nextValue] = value;
+                            const next = isPlatformFilter(nextValue)
+                                ? nextValue
                                 : "both";
                             setPlatform(next);
                         }}
-                        size="sm"
-                        type="single"
-                        value={platform}
+                        value={[platform]}
                         variant="outline"
                     >
                         {platformOptions.map((option) => (
@@ -206,18 +206,16 @@ export const AnalyticsPage = (): JSX.Element => {
                         setTimeRange("30d");
                         setCustomRange({});
                     }}
-                    size="sm"
                     variant="outline"
                 >
-                    <Filter className="mr-2 size-4" />
+                    <Filter data-icon="inline-start" />
                     Clear
                 </Button>
                 <Button
                     onClick={() => void refresh()}
-                    size="sm"
                     variant="outline"
                 >
-                    <RefreshCw className="mr-2 size-4" />
+                    <RefreshCw data-icon="inline-start" />
                     Refresh
                 </Button>
             </PageHeader>

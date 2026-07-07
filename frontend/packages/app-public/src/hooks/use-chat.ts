@@ -5,7 +5,6 @@ import { useCallback, useRef, useState } from "react";
 
 import { sendChatMessage } from "../lib/chat-api";
 import {
-    addConsentChatId,
     createChatHistory,
     fetchChatHistory,
     getChatId,
@@ -41,7 +40,6 @@ export const useChat = ({
     const [isLoading, setIsLoading] = useState(false);
 
     const sessionRef = useRef(0);
-    const consentSubmittedForChatRef = useRef<string | undefined>(undefined);
 
     const addMessage = useCallback((message: ChatMessage): void => {
         setMessages((prev) => [...prev, message]);
@@ -84,15 +82,8 @@ export const useChat = ({
                             const isNewChat = previousChatId !== newChatId;
 
                             storeChatId(newChatId);
-                            addConsentChatId(newChatId);
 
-                            if (
-                                isNewChat &&
-                                consentSubmittedForChatRef.current !==
-                                    newChatId &&
-                                onConsentSubmit
-                            ) {
-                                consentSubmittedForChatRef.current = newChatId;
+                            if (isNewChat && onConsentSubmit) {
                                 onConsentSubmit(newChatId);
                             }
                         },

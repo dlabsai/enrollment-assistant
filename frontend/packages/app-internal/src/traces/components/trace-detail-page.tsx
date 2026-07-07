@@ -6,6 +6,7 @@ import { type JSX, useCallback, useMemo } from "react";
 
 import { PageHeader } from "../../components/page-header";
 import { PageSection, PageShell } from "../../components/page-shell";
+import { formatLocaleNumber } from "../../lib/number-format";
 import { useTraceDetail } from "../hooks/use-trace-detail";
 import {
     formatDurationMs,
@@ -16,12 +17,23 @@ import { TraceDetailPanel } from "./trace-detail-panel";
 
 const formatTraceId = (traceId: string): string => traceId;
 
-export const TraceDetailPage = (): JSX.Element => {
-    const { traceId } = useParams({ from: "/traces/$traceId" });
-    const search = useSearch({ from: "/traces/$traceId" });
-    const navigate = useNavigate({ from: "/traces/$traceId" });
+type TraceDetailView = "span" | "summary";
 
-    const { detail, loading, error, refresh } = useTraceDetail(traceId);
+interface TraceDetailContentProps {
+    routePath: "/traces/$traceId" | "/eval-traces/$traceId";
+    source: "runtime" | "evals";
+    traceId: string;
+}
+
+const TraceDetailContent = ({
+    routePath,
+    source,
+    traceId,
+}: TraceDetailContentProps): JSX.Element => {
+    const search = useSearch({ strict: false });
+    const navigate = useNavigate();
+
+    const { detail, loading, error, refresh } = useTraceDetail(traceId, source);
 
     const detailTitle = `Trace ${formatTraceId(traceId)}`;
     const detailDescription = useMemo(() => {
@@ -39,7 +51,7 @@ export const TraceDetailPage = (): JSX.Element => {
                 </Badge>
                 <span>{formatTimestamp(detail.started_at)}</span>
                 <span>{formatDurationMs(detail.duration_ms)}</span>
-                <span>{detail.span_count} spans</span>
+                <span>{formatLocaleNumber(detail.span_count)} spans</span>
             </span>
         );
     }, [detail]);
@@ -49,13 +61,16 @@ export const TraceDetailPage = (): JSX.Element => {
             void navigate({
                 params: { traceId },
                 search: (prev) => ({
-                    ...prev,
                     span: spanId,
+                    view:
+                        prev.view === "span" || prev.view === "summary"
+                            ? prev.view
+                            : undefined,
                 }),
-                to: "/traces/$traceId",
+                to: routePath,
             });
         },
-        [navigate, traceId],
+        [navigate, routePath, traceId],
     );
 
     const handleSpanSync = useCallback(
@@ -64,13 +79,33 @@ export const TraceDetailPage = (): JSX.Element => {
                 params: { traceId },
                 replace: true,
                 search: (prev) => ({
-                    ...prev,
                     span: spanId,
+                    view:
+                        prev.view === "span" || prev.view === "summary"
+                            ? prev.view
+                            : undefined,
                 }),
-                to: "/traces/$traceId",
+                to: routePath,
             });
         },
-        [navigate, traceId],
+        [navigate, routePath, traceId],
+    );
+
+    const handleViewChange = useCallback(
+        (view: TraceDetailView): void => {
+            void navigate({
+                params: { traceId },
+                search: (prev) => ({
+                    span:
+                        typeof prev.span === "string" && prev.span !== ""
+                            ? prev.span
+                            : undefined,
+                    view,
+                }),
+                to: routePath,
+            });
+        },
+        [navigate, routePath, traceId],
     );
 
     return (
@@ -79,16 +114,13 @@ export const TraceDetailPage = (): JSX.Element => {
             variant="dashboard"
         >
             <PageHeader title={detailTitle}>
-                <div className="ml-auto flex items-center gap-2">
-                    <Button
-                        onClick={() => void refresh()}
-                        size="sm"
-                        variant="outline"
-                    >
-                        <RefreshCw className="mr-2 size-4" />
-                        Refresh
-                    </Button>
-                </div>
+                <Button
+                    onClick={() => void refresh()}
+                    variant="outline"
+                >
+                    <RefreshCw data-icon="inline-start" />
+                    Refresh
+                </Button>
             </PageHeader>
 
             <PageSection className="flex min-h-0 flex-1 flex-col gap-4">
@@ -102,10 +134,38 @@ export const TraceDetailPage = (): JSX.Element => {
                         loading={loading}
                         onSpanChange={handleSpanChange}
                         onSpanSync={handleSpanSync}
+                        onViewChange={handleViewChange}
                         selectedSpanId={search.span}
+                        view={
+                            search.view === "span" || search.view === "summary"
+                                ? (search.view as TraceDetailView)
+                                : undefined
+                        }
                     />
                 </div>
             </PageSection>
         </PageShell>
+    );
+};
+
+export const TraceDetailPage = (): JSX.Element => {
+    const { traceId } = useParams({ from: "/traces/$traceId" });
+    return (
+        <TraceDetailContent
+            routePath="/traces/$traceId"
+            source="runtime"
+            traceId={traceId}
+        />
+    );
+};
+
+export const EvalTraceDetailPage = (): JSX.Element => {
+    const { traceId } = useParams({ from: "/eval-traces/$traceId" });
+    return (
+        <TraceDetailContent
+            routePath="/eval-traces/$traceId"
+            source="evals"
+            traceId={traceId}
+        />
     );
 };

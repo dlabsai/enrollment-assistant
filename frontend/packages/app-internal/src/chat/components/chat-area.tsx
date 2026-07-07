@@ -16,13 +16,6 @@ import {
     SelectTrigger,
     SelectValue,
 } from "@va/shared/components/ui/select";
-import {
-    Sheet,
-    SheetContent,
-    SheetDescription,
-    SheetHeader,
-    SheetTitle,
-} from "@va/shared/components/ui/sheet";
 import { Textarea } from "@va/shared/components/ui/textarea";
 import {
     Tooltip,
@@ -31,10 +24,10 @@ import {
 } from "@va/shared/components/ui/tooltip";
 import type { ChatMessage } from "@va/shared/types";
 import {
-    Activity,
     ChevronLeft,
     ChevronRight,
     Copy,
+    Link,
     ListTree,
     Pencil,
     RefreshCw,
@@ -43,37 +36,54 @@ import {
 import { type JSX, useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 
+import { useAuth } from "../../auth/contexts/auth-context";
 import { useAuthenticatedApi } from "../../auth/hooks/use-authenticated-api";
+import { hasPermission } from "../../auth/lib/permissions";
+import { ChatTurnTraceSheet } from "../../chats/components/chat-turn-trace-sheet";
 import { ModelSelectionDialogContent } from "../../components/model-selection-dialog-content";
-import { TraceTurnDebugView } from "../../traces/components/trace-turn-debug-view";
-import { useTraceDetailByMessage } from "../../traces/hooks/use-trace-detail-by-message";
+import { formatLocaleNumber } from "../../lib/number-format";
 import { useChatActions, useChatStore } from "../contexts/chat-store-context";
 import { fetchInternalModels } from "../lib/api";
+import {
+    buildResponseLink,
+    type ResponseLinkTarget,
+} from "../lib/response-link";
 import {
     selectCurrentChat,
     selectCurrentDraft,
     selectIsCurrentLoading,
 } from "../lib/store";
 import type { Message, ModelOverrides } from "../types";
+import { renderGenerationTimeFooter } from "./generation-time-footer";
+import { GuardrailsFooter } from "./guardrails-footer";
+import { InvestigationButton } from "./investigation-button";
 import { MessageFeedback } from "./message-feedback";
+import { useMessageSourcePanelState } from "./message-source-state";
+import {
+    MessageSourceButtons,
+    MessageSourcePanels,
+} from "./message-source-ui";
+import { renderMessageTimestampFooter } from "./message-timestamp-footer";
+import { renderResponseCostFooter } from "./response-cost-footer";
 
-const convertToChatMessages = (
-    messages: Message[],
-): {
-    id: string;
-    role: Message["role"];
-    content: string;
-    timestamp: number;
-}[] =>
+const convertToChatMessages = (messages: Message[]): ChatMessage[] =>
     messages.map((message) => ({
         id: message.id,
         role: message.role,
         content: message.content,
         timestamp: message.createdAt,
+        toolSourcesUsed: message.toolSourcesUsed,
+        groundingSourcesUsed: message.groundingSourcesUsed,
+        groundingSourceStatus: message.groundingSourceStatus,
     }));
 
 interface ChatAreaProps {
+    allowFeedback?: boolean;
+    allowInvestigations?: boolean;
     canSendMessages?: boolean;
+    focusMessageId?: string;
+    modelSelectionMode?: "chat" | "investigation";
+    responseLinkTarget?: ResponseLinkTarget;
 }
 
 const HIDE_MESSAGE_ACTIONS_UNTIL_HOVER = false;
@@ -85,43 +95,46 @@ const COMMAND_UNSELECTED_VALUE = "__va_model_unselected__";
 const MODEL_CONFIG_STORAGE_KEY = "va.internal.chat.model-config";
 const MODEL_FAVORITES_STORAGE_KEY = "va.internal.chat.model-favorites";
 const MODEL_PRESETS_STORAGE_KEY = "va.internal.chat.model-presets";
-type ModelTarget = "search" | "chatbot" | "guardrails";
+type ModelTarget = "chatbot" | "guardrails";
 const MODEL_TARGET_TABS: { value: ModelTarget; label: string }[] = [
-    { value: "search", label: "Search" },
     { value: "chatbot", label: "Chatbot" },
     { value: "guardrails", label: "Guardrails" },
 ];
 
 type ReasoningEffort = "none" | "low" | "medium" | "high" | "xhigh";
 
-type Gpt5Series = "5" | "5.1" | "5.2";
-
-const REASONING_EFFORT_OPTIONS: Record<Gpt5Series, ReasoningEffort[]> = {
-    "5": ["low", "medium", "high"],
-    "5.1": ["none", "low", "medium", "high"],
-    "5.2": ["none", "low", "medium", "high", "xhigh"],
-};
-
-const getGpt5Series = (model: string): Gpt5Series | undefined => {
-    const match = /gpt-5(?:\.(?<minor>1|2))?/u.exec(model);
-    if (!match) {
-        return undefined;
-    }
-    if (match.groups?.minor === "1") {
-        return "5.1";
-    }
-    if (match.groups?.minor === "2") {
-        return "5.2";
-    }
-    return "5";
-};
+const GPT5_REASONING_EFFORT_OPTIONS: ReasoningEffort[] = [
+    "low",
+    "medium",
+    "high",
+];
+const GPT51_REASONING_EFFORT_OPTIONS: ReasoningEffort[] = [
+    "none",
+    "low",
+    "medium",
+    "high",
+];
+const GPT52_PLUS_REASONING_EFFORT_OPTIONS: ReasoningEffort[] = [
+    "none",
+    "low",
+    "medium",
+    "high",
+    "xhigh",
+];
 
 const getReasoningEffortOptions = (model: string): ReasoningEffort[] => {
-    const series = getGpt5Series(model);
-    if (!series) {
+    const match = /gpt-5(?:\.(?<minor>\d+))?/u.exec(model);
+    if (!match) {
         return [];
     }
-    return REASONING_EFFORT_OPTIONS[series];
+    const minor = match.groups?.minor;
+    if (minor === undefined) {
+        return GPT5_REASONING_EFFORT_OPTIONS;
+    }
+    if (minor === "1") {
+        return GPT51_REASONING_EFFORT_OPTIONS;
+    }
+    return GPT52_PLUS_REASONING_EFFORT_OPTIONS;
 };
 
 const isReasoningEffort = (value: string): value is ReasoningEffort =>
@@ -156,12 +169,23 @@ const copyMessageToClipboard = async (content: string): Promise<void> => {
     }
 };
 
+const copyResponseLinkToClipboard = async (
+    conversationId: string,
+    messageId: string,
+    target: ResponseLinkTarget,
+): Promise<void> => {
+    try {
+        await navigator.clipboard.writeText(buildResponseLink(conversationId, messageId, target));
+        toast.success("Copied response link");
+    } catch {
+        toast.error("Failed to copy response link");
+    }
+};
+
 interface StoredModelConfig {
     chatbotModel?: string;
-    searchModel?: string;
     guardrailModel?: string;
     chatbotReasoningEffort?: string;
-    searchReasoningEffort?: string;
     guardrailReasoningEffort?: string;
 }
 
@@ -185,9 +209,6 @@ const readStoredModelConfig = (): StoredModelConfig | undefined => {
         ) {
             safeParsed.chatbotModel = parsed.chatbotModel;
         }
-        if ("searchModel" in parsed && typeof parsed.searchModel === "string") {
-            safeParsed.searchModel = parsed.searchModel;
-        }
         if (
             "guardrailModel" in parsed &&
             typeof parsed.guardrailModel === "string"
@@ -199,12 +220,6 @@ const readStoredModelConfig = (): StoredModelConfig | undefined => {
             typeof parsed.chatbotReasoningEffort === "string"
         ) {
             safeParsed.chatbotReasoningEffort = parsed.chatbotReasoningEffort;
-        }
-        if (
-            "searchReasoningEffort" in parsed &&
-            typeof parsed.searchReasoningEffort === "string"
-        ) {
-            safeParsed.searchReasoningEffort = parsed.searchReasoningEffort;
         }
         if (
             "guardrailReasoningEffort" in parsed &&
@@ -223,10 +238,8 @@ const readStoredModelConfig = (): StoredModelConfig | undefined => {
 interface ModelPreset {
     name: string;
     chatbotModel?: string;
-    searchModel?: string;
     guardrailModel?: string;
     chatbotReasoningEffort?: ReasoningEffort;
-    searchReasoningEffort?: ReasoningEffort;
     guardrailReasoningEffort?: ReasoningEffort;
 }
 
@@ -282,10 +295,6 @@ const readStoredModelPresets = (): ModelPreset[] => {
                     ) {
                         preset.chatbotModel = chatbotModel;
                     }
-                    const { searchModel } = entry;
-                    if (typeof searchModel === "string" && searchModel !== "") {
-                        preset.searchModel = searchModel;
-                    }
                     const { guardrailModel } = entry;
                     if (
                         typeof guardrailModel === "string" &&
@@ -299,13 +308,6 @@ const readStoredModelPresets = (): ModelPreset[] => {
                         isReasoningEffort(chatbotReasoningEffort)
                     ) {
                         preset.chatbotReasoningEffort = chatbotReasoningEffort;
-                    }
-                    const { searchReasoningEffort } = entry;
-                    if (
-                        typeof searchReasoningEffort === "string" &&
-                        isReasoningEffort(searchReasoningEffort)
-                    ) {
-                        preset.searchReasoningEffort = searchReasoningEffort;
                     }
                     const { guardrailReasoningEffort } = entry;
                     if (
@@ -327,9 +329,15 @@ const readStoredModelPresets = (): ModelPreset[] => {
 };
 
 export const ChatArea = ({
+    allowFeedback = true,
+    allowInvestigations = true,
     canSendMessages = true,
+    focusMessageId,
+    modelSelectionMode = "chat",
+    responseLinkTarget = "chat",
 }: ChatAreaProps): JSX.Element => {
     const api = useAuthenticatedApi();
+    const { user } = useAuth();
     const currentChatId = useChatStore((state) => state.currentChatId);
     const currentChat = useChatStore(selectCurrentChat);
     const isLoading = useChatStore(selectIsCurrentLoading);
@@ -339,23 +347,29 @@ export const ChatArea = ({
             ? undefined
             : state.conversationTrees.get(currentChatId),
     );
+    const canRegenerate = hasPermission(user, "chat_regenerate");
+    const canViewActivity = hasPermission(user, "chat_view_activity");
+    const canViewTrace = hasPermission(user, "chat_view_trace");
+    const canUseModelSelection = hasPermission(user, "chat_model_selection");
+    const canViewDurationTooltip = hasPermission(user, "chat_duration_tooltip");
+    const canViewResponseCost = hasPermission(user, "chat_view_response_cost");
+    const canViewGuardrailsFailures = hasPermission(
+        user,
+        "chat_view_guardrails_failures",
+    );
+    const canViewSources = hasPermission(user, "chat_view_sources");
+    const canViewTools = hasPermission(user, "chat_view_tools");
+    const enableChatModelSelector =
+        ENABLE_CHAT_MODEL_SELECTOR && canUseModelSelection;
 
     const [availableModels, setAvailableModels] = useState<string[]>([]);
-    const [modelsLoading, setModelsLoading] = useState(
-        ENABLE_CHAT_MODEL_SELECTOR,
-    );
+    const [modelsLoading, setModelsLoading] = useState(enableChatModelSelector);
     const [modelsError, setModelsError] = useState<string | undefined>();
     const [commandValue, setCommandValue] = useState(COMMAND_UNSELECTED_VALUE);
     const [chatbotModel, setChatbotModel] = useState(() => {
         const stored = readStoredModelConfig();
         return typeof stored?.chatbotModel === "string"
             ? stored.chatbotModel
-            : "";
-    });
-    const [searchModel, setSearchModel] = useState(() => {
-        const stored = readStoredModelConfig();
-        return typeof stored?.searchModel === "string"
-            ? stored.searchModel
             : "";
     });
     const [guardrailModel, setGuardrailModel] = useState(() => {
@@ -373,18 +387,6 @@ export const ChatArea = ({
             isReasoningEffort(stored.chatbotReasoningEffort)
         ) {
             return stored.chatbotReasoningEffort;
-        }
-        return "";
-    });
-    const [searchReasoningEffort, setSearchReasoningEffort] = useState<
-        ReasoningEffort | ""
-    >(() => {
-        const stored = readStoredModelConfig();
-        if (
-            typeof stored?.searchReasoningEffort === "string" &&
-            isReasoningEffort(stored.searchReasoningEffort)
-        ) {
-            return stored.searchReasoningEffort;
         }
         return "";
     });
@@ -414,6 +416,13 @@ export const ChatArea = ({
     const [isModelDialogOpen, setIsModelDialogOpen] = useState(false);
     const [isModelTooltipOpen, setIsModelTooltipOpen] = useState(false);
     const [modelTarget, setModelTarget] = useState<ModelTarget>("chatbot");
+    const isInvestigationModelSelection = modelSelectionMode === "investigation";
+    const modelTargetTabs = isInvestigationModelSelection
+        ? ([{ value: "chatbot", label: "Investigation" }] satisfies {
+              value: ModelTarget;
+              label: string;
+          }[])
+        : MODEL_TARGET_TABS;
 
     const [editDialogOpen, setEditDialogOpen] = useState(false);
     const [editValue, setEditValue] = useState("");
@@ -421,29 +430,24 @@ export const ChatArea = ({
 
     const [tracePanelOpen, setTracePanelOpen] = useState(false);
     const [traceMessageId, setTraceMessageId] = useState<string | undefined>();
-    const {
-        detail: traceDetail,
-        loading: traceLoading,
-        error: traceError,
-    } = useTraceDetailByMessage(traceMessageId);
+    const sourcePanelState = useMessageSourcePanelState();
+
+    const effectiveModelTarget: ModelTarget = isInvestigationModelSelection
+        ? "chatbot"
+        : modelTarget;
 
     useEffect(() => {
-        if (!ENABLE_CHAT_MODEL_SELECTOR || typeof window === "undefined") {
+        if (!enableChatModelSelector || typeof window === "undefined") {
             return;
         }
 
         const payload = {
             chatbotModel,
-            searchModel,
             guardrailModel,
             chatbotReasoningEffort:
                 chatbotReasoningEffort === ""
                     ? undefined
                     : chatbotReasoningEffort,
-            searchReasoningEffort:
-                searchReasoningEffort === ""
-                    ? undefined
-                    : searchReasoningEffort,
             guardrailReasoningEffort:
                 guardrailReasoningEffort === ""
                     ? undefined
@@ -457,14 +461,13 @@ export const ChatArea = ({
     }, [
         chatbotModel,
         chatbotReasoningEffort,
+        enableChatModelSelector,
         guardrailModel,
         guardrailReasoningEffort,
-        searchModel,
-        searchReasoningEffort,
     ]);
 
     useEffect(() => {
-        if (!ENABLE_CHAT_MODEL_SELECTOR || typeof window === "undefined") {
+        if (!enableChatModelSelector || typeof window === "undefined") {
             return;
         }
 
@@ -472,10 +475,10 @@ export const ChatArea = ({
             MODEL_FAVORITES_STORAGE_KEY,
             JSON.stringify(favoriteModels),
         );
-    }, [favoriteModels]);
+    }, [enableChatModelSelector, favoriteModels]);
 
     useEffect(() => {
-        if (!ENABLE_CHAT_MODEL_SELECTOR || typeof window === "undefined") {
+        if (!enableChatModelSelector || typeof window === "undefined") {
             return;
         }
 
@@ -483,10 +486,10 @@ export const ChatArea = ({
             MODEL_PRESETS_STORAGE_KEY,
             JSON.stringify(modelPresets),
         );
-    }, [modelPresets]);
+    }, [enableChatModelSelector, modelPresets]);
 
     useEffect((): (() => void) | undefined => {
-        if (!ENABLE_CHAT_MODEL_SELECTOR) {
+        if (!enableChatModelSelector) {
             return undefined;
         }
 
@@ -525,7 +528,7 @@ export const ChatArea = ({
         return () => {
             mounted = false;
         };
-    }, [api]);
+    }, [api, enableChatModelSelector]);
 
     const messages = useMemo(
         () =>
@@ -561,23 +564,21 @@ export const ChatArea = ({
         return map;
     }, [conversationTree?.currentBranchPath]);
 
-    const loadingActivity = currentChat?.loadingActivity ?? [];
-    const loadingActivityLog = currentChat?.loadingActivityLog ?? [];
+    const loadingActivity = useMemo(() => {
+        const activity = currentChat?.loadingActivity ?? [];
+        if (canViewActivity) {
+            return activity;
+        }
+        return activity.filter((entry) => entry.kind === "agent");
+    }, [canViewActivity, currentChat?.loadingActivity]);
 
-    const messageActivityLog = useChatStore(
-        (state) => state.messageActivityLog,
-    );
-    const messageActivityLogLoading = useChatStore(
-        (state) => state.messageActivityLogLoading,
-    );
-
-    const [openActivityMessageIdsByChat, setOpenActivityMessageIdsByChat] =
-        useState(() => new Map<string, Set<string>>());
-    const chatActivityKey = currentChatId ?? "__new__";
-    const openActivityMessageIds = useMemo(
-        () => openActivityMessageIdsByChat.get(chatActivityKey) ?? new Set(),
-        [chatActivityKey, openActivityMessageIdsByChat],
-    );
+    const loadingActivityLog = useMemo(() => {
+        const activityLog = currentChat?.loadingActivityLog ?? [];
+        if (canViewActivity) {
+            return activityLog;
+        }
+        return activityLog.filter((entry) => entry.kind === "agent");
+    }, [canViewActivity, currentChat?.loadingActivityLog]);
 
     const messagesInitialized = useMemo(() => {
         if (currentChatId === undefined) {
@@ -592,30 +593,25 @@ export const ChatArea = ({
         return currentChat.messages.length > 0;
     }, [currentChatId, currentChat]);
 
-    const { sendMessage, setDraft, loadMessageActivityLog, setActiveChild } =
-        useChatActions();
+    const { sendMessage, setDraft, setActiveChild } = useChatActions();
 
     const modelOverrides = useMemo((): ModelOverrides | undefined => {
         const overrides: ModelOverrides = {};
         if (chatbotModel !== "") {
             overrides.chatbotModel = chatbotModel;
         }
-        if (searchModel !== "") {
-            overrides.searchModel = searchModel;
-        }
-        if (guardrailModel !== "") {
-            overrides.guardrailModel = guardrailModel;
-        }
         if (isReasoningEffortSupported(chatbotModel, chatbotReasoningEffort)) {
             overrides.chatbotReasoningEffort = chatbotReasoningEffort;
         }
-        if (isReasoningEffortSupported(searchModel, searchReasoningEffort)) {
-            overrides.searchReasoningEffort = searchReasoningEffort;
-        }
-        if (
-            isReasoningEffortSupported(guardrailModel, guardrailReasoningEffort)
-        ) {
-            overrides.guardrailReasoningEffort = guardrailReasoningEffort;
+        if (!isInvestigationModelSelection) {
+            if (guardrailModel !== "") {
+                overrides.guardrailModel = guardrailModel;
+            }
+            if (
+                isReasoningEffortSupported(guardrailModel, guardrailReasoningEffort)
+            ) {
+                overrides.guardrailReasoningEffort = guardrailReasoningEffort;
+            }
         }
         return Object.keys(overrides).length > 0 ? overrides : undefined;
     }, [
@@ -623,8 +619,7 @@ export const ChatArea = ({
         chatbotReasoningEffort,
         guardrailModel,
         guardrailReasoningEffort,
-        searchModel,
-        searchReasoningEffort,
+        isInvestigationModelSelection,
     ]);
 
     const handleSendMessage = (content: string): void => {
@@ -695,11 +690,79 @@ export const ChatArea = ({
         setTracePanelOpen(true);
     };
 
-    const selectorDisabled = !ENABLE_CHAT_MODEL_SELECTOR;
+    const selectorDisabled = !enableChatModelSelector;
     const childrenByParent = conversationTree?.childrenByParent;
     const messageActionsDisabled = !canSendMessages || isLoading;
-    const hasTraceMessageId =
-        traceMessageId !== undefined && traceMessageId.trim() !== "";
+
+    const renderTraceButton = (messageId: string): JSX.Element => (
+        <Tooltip>
+            <TooltipTrigger
+                render={
+                    <Button
+                        aria-label="Trace"
+                        className="text-muted-foreground rounded-full transition"
+                        disabled={messageActionsDisabled}
+                        onClick={() => {
+                            openTracePanel(messageId);
+                        }}
+                        size="icon-sm"
+                        type="button"
+                        variant="ghost"
+                    >
+                        <ListTree className="size-4" />
+                        <span className="sr-only">Trace</span>
+                    </Button>
+                }
+            />
+            <TooltipContent>Show trace</TooltipContent>
+        </Tooltip>
+    );
+
+    const renderResponseLinkButton = (messageId: string): JSX.Element | undefined => {
+        if (
+            !canViewResponseCost ||
+            currentChatId === undefined ||
+            currentChatId.startsWith("__temp_")
+        ) {
+            return undefined;
+        }
+        return (
+            <Tooltip>
+                <TooltipTrigger
+                    render={
+                        <Button
+                            aria-label="Copy response link"
+                            className="text-muted-foreground rounded-full transition"
+                            disabled={messageActionsDisabled}
+                            onClick={() => {
+                                void copyResponseLinkToClipboard(
+                                    currentChatId,
+                                    messageId,
+                                    responseLinkTarget,
+                                );
+                            }}
+                            size="icon-sm"
+                            type="button"
+                            variant="ghost"
+                        >
+                            <Link className="size-4" />
+                            <span className="sr-only">Copy response link</span>
+                        </Button>
+                    }
+                />
+                <TooltipContent>Copy response link</TooltipContent>
+            </Tooltip>
+        );
+    };
+
+    const renderInvestigationButton = (messageId: string): JSX.Element | undefined =>
+        allowInvestigations ? (
+            <InvestigationButton
+                conversationId={currentChatId}
+                disabled={messageActionsDisabled}
+                messageId={messageId}
+            />
+        ) : undefined;
 
     const renderBranchSwitcher = (
         parentMessageId: string | undefined,
@@ -749,7 +812,7 @@ export const ChatArea = ({
                     <ChevronLeft className="size-3" />
                 </button>
                 <span>
-                    {resolvedIndex + 1} / {siblings.length}
+                    {formatLocaleNumber(resolvedIndex + 1)} / {formatLocaleNumber(siblings.length)}
                 </span>
                 <button
                     aria-label="Next branch"
@@ -808,13 +871,16 @@ export const ChatArea = ({
         }));
     }, [availableModels, favoriteModelSet]);
 
-    const hasOverrides =
+    const hasInvestigationOverrides =
         chatbotModel !== "" ||
-        searchModel !== "" ||
+        isReasoningEffortSupported(chatbotModel, chatbotReasoningEffort);
+    const hasChatOverrides =
+        hasInvestigationOverrides ||
         guardrailModel !== "" ||
-        isReasoningEffortSupported(chatbotModel, chatbotReasoningEffort) ||
-        isReasoningEffortSupported(searchModel, searchReasoningEffort) ||
         isReasoningEffortSupported(guardrailModel, guardrailReasoningEffort);
+    const hasOverrides = isInvestigationModelSelection
+        ? hasInvestigationOverrides
+        : hasChatOverrides;
 
     const overrideSummary = useMemo((): string[] => {
         const summarize = (
@@ -830,7 +896,7 @@ export const ChatArea = ({
                 parts.push(model);
             }
             if (isReasoningEffortSupported(model, reasoningEffort)) {
-                parts.push(`effort ${reasoningEffort}`);
+                parts.push(`effort ${getReasoningEffortLabel(reasoningEffort)}`);
             }
             if (parts.length === 0) {
                 return undefined;
@@ -838,9 +904,19 @@ export const ChatArea = ({
             return `${label}: ${parts.join(", ")}`;
         };
 
+        const chatbotSummary = summarize(
+            isInvestigationModelSelection ? "Investigation" : "Chatbot",
+            chatbotModel,
+            chatbotReasoningEffort,
+        );
+        if (isInvestigationModelSelection) {
+            return [chatbotSummary].filter(
+                (value): value is string => value !== undefined,
+            );
+        }
+
         return [
-            summarize("Search", searchModel, searchReasoningEffort),
-            summarize("Chatbot", chatbotModel, chatbotReasoningEffort),
+            chatbotSummary,
             summarize("Guardrails", guardrailModel, guardrailReasoningEffort),
         ].filter((value): value is string => value !== undefined);
     }, [
@@ -848,8 +924,7 @@ export const ChatArea = ({
         chatbotReasoningEffort,
         guardrailModel,
         guardrailReasoningEffort,
-        searchModel,
-        searchReasoningEffort,
+        isInvestigationModelSelection,
     ]);
 
     const normalizedChatbotEffort = isReasoningEffortSupported(
@@ -857,12 +932,6 @@ export const ChatArea = ({
         chatbotReasoningEffort,
     )
         ? chatbotReasoningEffort
-        : "";
-    const normalizedSearchEffort = isReasoningEffortSupported(
-        searchModel,
-        searchReasoningEffort,
-    )
-        ? searchReasoningEffort
         : "";
     const normalizedGuardrailEffort = isReasoningEffortSupported(
         guardrailModel,
@@ -879,12 +948,6 @@ export const ChatArea = ({
             )
                 ? (preset.chatbotReasoningEffort ?? "")
                 : "";
-            const presetSearchEffort = isReasoningEffortSupported(
-                preset.searchModel ?? "",
-                preset.searchReasoningEffort ?? "",
-            )
-                ? (preset.searchReasoningEffort ?? "")
-                : "";
             const presetGuardrailEffort = isReasoningEffortSupported(
                 preset.guardrailModel ?? "",
                 preset.guardrailReasoningEffort ?? "",
@@ -892,13 +955,16 @@ export const ChatArea = ({
                 ? (preset.guardrailReasoningEffort ?? "")
                 : "";
 
-            if (
+            const chatbotMatches =
                 (preset.chatbotModel ?? "") === chatbotModel &&
-                (preset.searchModel ?? "") === searchModel &&
+                presetChatbotEffort === normalizedChatbotEffort;
+            const hiddenTargetsMatch =
                 (preset.guardrailModel ?? "") === guardrailModel &&
-                presetChatbotEffort === normalizedChatbotEffort &&
-                presetSearchEffort === normalizedSearchEffort &&
-                presetGuardrailEffort === normalizedGuardrailEffort
+                presetGuardrailEffort === normalizedGuardrailEffort;
+
+            if (
+                chatbotMatches &&
+                (isInvestigationModelSelection || hiddenTargetsMatch)
             ) {
                 return preset.name;
             }
@@ -907,11 +973,10 @@ export const ChatArea = ({
     }, [
         chatbotModel,
         guardrailModel,
+        isInvestigationModelSelection,
         modelPresets,
         normalizedChatbotEffort,
         normalizedGuardrailEffort,
-        normalizedSearchEffort,
-        searchModel,
     ]);
 
     const sortedPresets = useMemo(
@@ -930,19 +995,14 @@ export const ChatArea = ({
         if (chatbotModel !== "") {
             preset.chatbotModel = chatbotModel;
         }
-        if (searchModel !== "") {
-            preset.searchModel = searchModel;
-        }
-        if (guardrailModel !== "") {
+        if (!isInvestigationModelSelection && guardrailModel !== "") {
             preset.guardrailModel = guardrailModel;
         }
         if (isReasoningEffortSupported(chatbotModel, chatbotReasoningEffort)) {
             preset.chatbotReasoningEffort = chatbotReasoningEffort;
         }
-        if (isReasoningEffortSupported(searchModel, searchReasoningEffort)) {
-            preset.searchReasoningEffort = searchReasoningEffort;
-        }
         if (
+            !isInvestigationModelSelection &&
             isReasoningEffortSupported(guardrailModel, guardrailReasoningEffort)
         ) {
             preset.guardrailReasoningEffort = guardrailReasoningEffort;
@@ -952,10 +1012,11 @@ export const ChatArea = ({
 
     const applyPreset = (preset: ModelPreset): void => {
         setChatbotModel(preset.chatbotModel ?? "");
-        setSearchModel(preset.searchModel ?? "");
-        setGuardrailModel(preset.guardrailModel ?? "");
         setChatbotReasoningEffort(preset.chatbotReasoningEffort ?? "");
-        setSearchReasoningEffort(preset.searchReasoningEffort ?? "");
+        if (isInvestigationModelSelection) {
+            return;
+        }
+        setGuardrailModel(preset.guardrailModel ?? "");
         setGuardrailReasoningEffort(preset.guardrailReasoningEffort ?? "");
     };
 
@@ -1011,11 +1072,7 @@ export const ChatArea = ({
 
     const setModelForTarget = (value: string): void => {
         const normalizedValue = value === "" ? "" : value;
-        if (modelTarget === "search") {
-            setSearchModel(normalizedValue);
-            return;
-        }
-        if (modelTarget === "guardrails") {
+        if (effectiveModelTarget === "guardrails") {
             setGuardrailModel(normalizedValue);
             return;
         }
@@ -1023,18 +1080,12 @@ export const ChatArea = ({
     };
 
     const currentTargetValue =
-        modelTarget === "search"
-            ? searchModel
-            : modelTarget === "guardrails"
-              ? guardrailModel
-              : chatbotModel;
+        effectiveModelTarget === "guardrails" ? guardrailModel : chatbotModel;
 
     const currentReasoningEffort =
-        modelTarget === "search"
-            ? searchReasoningEffort
-            : modelTarget === "guardrails"
-              ? guardrailReasoningEffort
-              : chatbotReasoningEffort;
+        effectiveModelTarget === "guardrails"
+            ? guardrailReasoningEffort
+            : chatbotReasoningEffort;
 
     const availableReasoningEfforts =
         getReasoningEffortOptions(currentTargetValue);
@@ -1045,6 +1096,10 @@ export const ChatArea = ({
     )
         ? currentReasoningEffort
         : "";
+    const selectedReasoningEffortLabel =
+        normalizedReasoningEffort === ""
+            ? "Default"
+            : getReasoningEffortLabel(normalizedReasoningEffort);
 
     const setReasoningEffortForTarget = (value: string): void => {
         const normalizedValue =
@@ -1054,22 +1109,14 @@ export const ChatArea = ({
                   ? value
                   : "";
         if (!isReasoningEffortSupported(currentTargetValue, normalizedValue)) {
-            if (modelTarget === "search") {
-                setSearchReasoningEffort("");
-                return;
-            }
-            if (modelTarget === "guardrails") {
+            if (effectiveModelTarget === "guardrails") {
                 setGuardrailReasoningEffort("");
                 return;
             }
             setChatbotReasoningEffort("");
             return;
         }
-        if (modelTarget === "search") {
-            setSearchReasoningEffort(normalizedValue);
-            return;
-        }
-        if (modelTarget === "guardrails") {
+        if (effectiveModelTarget === "guardrails") {
             setGuardrailReasoningEffort(normalizedValue);
             return;
         }
@@ -1090,7 +1137,7 @@ export const ChatArea = ({
         });
     };
 
-    const modelActionsAccessory = ENABLE_CHAT_MODEL_SELECTOR ? (
+    const modelActionsAccessory = enableChatModelSelector ? (
         <Dialog
             onOpenChange={(nextOpen) => {
                 setIsModelDialogOpen(nextOpen);
@@ -1110,25 +1157,29 @@ export const ChatArea = ({
                 }}
                 open={!isModelDialogOpen && isModelTooltipOpen}
             >
-                <TooltipTrigger asChild>
-                    <div className="flex border border-transparent">
-                        <DialogTrigger asChild>
-                            <Button
-                                aria-label="Choose models"
-                                className="relative rounded-full"
-                                disabled={selectorDisabled}
-                                size="icon"
-                                type="button"
-                                variant="ghost"
-                            >
-                                <SlidersHorizontal className="size-4" />
-                                {hasOverrides && (
-                                    <span className="bg-primary absolute -top-0.5 -right-0.5 size-2 rounded-full" />
-                                )}
-                            </Button>
-                        </DialogTrigger>
-                    </div>
-                </TooltipTrigger>
+                <TooltipTrigger
+                    render={
+                        <div className="flex border border-transparent">
+                            <DialogTrigger
+                                render={
+                                    <Button
+                                        aria-label="Choose models"
+                                        className="relative rounded-full"
+                                        disabled={selectorDisabled}
+                                        size="icon"
+                                        type="button"
+                                        variant="ghost"
+                                    >
+                                        <SlidersHorizontal className="size-4" />
+                                        {hasOverrides && (
+                                            <span className="bg-primary absolute -top-0.5 -right-0.5 size-2 rounded-full" />
+                                        )}
+                                    </Button>
+                                }
+                            />
+                        </div>
+                    }
+                />
                 <TooltipContent
                     side="top"
                     sideOffset={4}
@@ -1152,9 +1203,7 @@ export const ChatArea = ({
                 deletePresetName={deletePresetName}
                 deletePresetOpen={deletePresetOpen}
                 dialogContentProps={{
-                    onCloseAutoFocus: (event) => {
-                        event.preventDefault();
-                    },
+                    finalFocus: false,
                 }}
                 extraSection={
                     isGpt5Target ? (
@@ -1164,6 +1213,10 @@ export const ChatArea = ({
                             </span>
                             <Select
                                 onValueChange={(value) => {
+                                    if (value === null) {
+                                        return;
+                                    }
+
                                     setReasoningEffortForTarget(value);
                                 }}
                                 value={
@@ -1176,7 +1229,9 @@ export const ChatArea = ({
                                     className="w-full"
                                     size="sm"
                                 >
-                                    <SelectValue placeholder="Default" />
+                                    <SelectValue placeholder="Default">
+                                        {selectedReasoningEffortLabel}
+                                    </SelectValue>
                                 </SelectTrigger>
                                 <SelectContent>
                                     <SelectItem
@@ -1201,7 +1256,7 @@ export const ChatArea = ({
                 favoriteModels={sortedFavoriteModels}
                 groupedModels={groupedModels}
                 isSaveDisabled={presetName.trim() === ""}
-                modelTarget={modelTarget}
+                modelTarget={effectiveModelTarget}
                 modelsError={modelsError}
                 modelsLoading={modelsLoading}
                 onCommandReset={() => {
@@ -1232,7 +1287,7 @@ export const ChatArea = ({
                 presets={sortedPresets}
                 resetButtonAriaLabel="Reset model to default"
                 resetTooltipLabel="Reset to default"
-                tabs={MODEL_TARGET_TABS}
+                tabs={modelTargetTabs}
             />
         </Dialog>
     ) : undefined;
@@ -1244,6 +1299,7 @@ export const ChatArea = ({
                 composerActionsAccessory={modelActionsAccessory}
                 composerValue={draft}
                 contentWidthMode="standard"
+                focusMessageId={focusMessageId}
                 hideMessageFooterUntilHover={HIDE_MESSAGE_ACTIONS_UNTIL_HOVER}
                 isLoading={isLoading}
                 loadingActivity={loadingActivity}
@@ -1258,28 +1314,14 @@ export const ChatArea = ({
                 }}
                 onSendMessage={handleSendMessage}
                 overlayComposer
-                renderMessageBelowContent={(message: ChatMessage) => {
-                    const isOpen = openActivityMessageIds.has(message.id);
-                    const activityLog = messageActivityLog.get(message.id);
-                    const shouldRender =
-                        isOpen &&
-                        currentChat !== undefined &&
-                        (activityLog !== undefined ||
-                            messageActivityLogLoading.has(message.id));
-
-                    return shouldRender ? (
-                        <LoadingIndicator
-                            activityItems={currentChat.loadingActivity}
-                            activityLog={activityLog ?? []}
-                            forceOpenReasoning
-                            isVisible
-                            messages={[]}
-                            showEmptyState={false}
-                            showHeader={false}
-                            variant="ai-elements"
-                        />
-                    ) : undefined;
-                }}
+                renderMessageBelowContent={(message: ChatMessage) => (
+                    <MessageSourcePanels
+                        canViewSources={canViewSources}
+                        canViewTools={canViewTools}
+                        message={message}
+                        state={sourcePanelState}
+                    />
+                )}
                 renderMessageFooter={(message: ChatMessage) => {
                     const internalMessage = messageById.get(message.id);
                     const isErrorMessage =
@@ -1299,66 +1341,11 @@ export const ChatArea = ({
                         internalMessage?.role === "assistant" &&
                         !isErrorMessage;
 
-                    const showActivity = openActivityMessageIds.has(message.id);
-
-                    const handleToggleActivity = (): void => {
-                        setOpenActivityMessageIdsByChat((current) => {
-                            const next = new Map(current);
-                            const currentSet = next.get(chatActivityKey);
-                            const updated = new Set(currentSet);
-                            if (updated.has(message.id)) {
-                                updated.delete(message.id);
-                            } else {
-                                updated.add(message.id);
-                                const hasActivity = messageActivityLog.has(
-                                    message.id,
-                                );
-                                const isLoading = messageActivityLogLoading.has(
-                                    message.id,
-                                );
-                                if (!hasActivity && !isLoading) {
-                                    void loadMessageActivityLog(message.id);
-                                }
-                            }
-                            next.set(chatActivityKey, updated);
-                            return next;
-                        });
-                    };
-
-                    const feedbackControls = isAssistantMessage ? (
+                    const feedbackControls = isAssistantMessage && allowFeedback ? (
                         <MessageFeedback
                             isEligible={isAssistantMessage}
                             messageId={message.id}
                         />
-                    ) : undefined;
-
-                    const activityButton = isAssistantMessage ? (
-                        <Tooltip>
-                            <TooltipTrigger asChild>
-                                <Button
-                                    aria-label="Toggle assistant activity"
-                                    className={
-                                        showActivity
-                                            ? "bg-primary/10 text-primary hover:bg-primary/15 hover:text-primary rounded-full transition"
-                                            : "text-muted-foreground rounded-full transition"
-                                    }
-                                    onClick={handleToggleActivity}
-                                    size="icon-sm"
-                                    type="button"
-                                    variant="ghost"
-                                >
-                                    <Activity
-                                        aria-hidden="true"
-                                        className="size-4"
-                                    />
-                                </Button>
-                            </TooltipTrigger>
-                            <TooltipContent>
-                                {showActivity
-                                    ? "Hide activity"
-                                    : "Show activity"}
-                            </TooltipContent>
-                        </Tooltip>
                     ) : undefined;
 
                     const editMessage =
@@ -1370,24 +1357,26 @@ export const ChatArea = ({
 
                     const editButton = editMessage ? (
                         <Tooltip>
-                            <TooltipTrigger asChild>
-                                <Button
-                                    aria-label="Edit"
-                                    className="text-muted-foreground rounded-full transition"
-                                    disabled={messageActionsDisabled}
-                                    onClick={() => {
-                                        handleEditMessage(editMessage);
-                                    }}
-                                    size="icon-sm"
-                                    type="button"
-                                    variant="ghost"
-                                >
-                                    <Pencil className="size-3" />
-                                    <span className="sr-only">
-                                        Edit message
-                                    </span>
-                                </Button>
-                            </TooltipTrigger>
+                            <TooltipTrigger
+                                render={
+                                    <Button
+                                        aria-label="Edit"
+                                        className="text-muted-foreground rounded-full transition"
+                                        disabled={messageActionsDisabled}
+                                        onClick={() => {
+                                            handleEditMessage(editMessage);
+                                        }}
+                                        size="icon-sm"
+                                        type="button"
+                                        variant="ghost"
+                                    >
+                                        <Pencil className="size-3" />
+                                        <span className="sr-only">
+                                            Edit message
+                                        </span>
+                                    </Button>
+                                }
+                            />
                             <TooltipContent>Edit</TooltipContent>
                         </Tooltip>
                     ) : undefined;
@@ -1397,31 +1386,47 @@ export const ChatArea = ({
                             ? internalMessage
                             : undefined;
 
-                    const regenerateButton = regenerateMessage ? (
-                        <Tooltip>
-                            <TooltipTrigger asChild>
-                                <Button
-                                    aria-label="Regenerate response"
-                                    className="text-muted-foreground rounded-full transition"
-                                    disabled={messageActionsDisabled}
-                                    onClick={() => {
-                                        handleRegenerateMessage(
-                                            regenerateMessage,
-                                        );
-                                    }}
-                                    size="icon-sm"
-                                    type="button"
-                                    variant="ghost"
-                                >
-                                    <RefreshCw className="size-3" />
-                                    <span className="sr-only">
-                                        Regenerate response
-                                    </span>
-                                </Button>
-                            </TooltipTrigger>
-                            <TooltipContent>Regenerate</TooltipContent>
-                        </Tooltip>
-                    ) : undefined;
+                    const sourceButtons =
+                        internalMessage?.role === "assistant" && !isErrorMessage
+                            ? (
+                                  <MessageSourceButtons
+                                      canViewSources={canViewSources}
+                                      canViewTools={canViewTools}
+                                      disabled={messageActionsDisabled}
+                                      message={internalMessage}
+                                      state={sourcePanelState}
+                                  />
+                              )
+                            : undefined;
+
+                    const regenerateButton =
+                        regenerateMessage && canRegenerate ? (
+                            <Tooltip>
+                                <TooltipTrigger
+                                    render={
+                                        <Button
+                                            aria-label="Regenerate response"
+                                            className="text-muted-foreground rounded-full transition"
+                                            disabled={messageActionsDisabled}
+                                            onClick={() => {
+                                                handleRegenerateMessage(
+                                                    regenerateMessage,
+                                                );
+                                            }}
+                                            size="icon-sm"
+                                            type="button"
+                                            variant="ghost"
+                                        >
+                                            <RefreshCw className="size-3" />
+                                            <span className="sr-only">
+                                                Regenerate response
+                                            </span>
+                                        </Button>
+                                    }
+                                />
+                                <TooltipContent>Regenerate</TooltipContent>
+                            </Tooltip>
+                        ) : undefined;
 
                     const copyMessage =
                         internalMessage !== undefined && !isErrorMessage
@@ -1430,47 +1435,27 @@ export const ChatArea = ({
 
                     const copyButton = copyMessage ? (
                         <Tooltip>
-                            <TooltipTrigger asChild>
-                                <Button
-                                    aria-label="Copy message"
-                                    className="text-muted-foreground rounded-full transition"
-                                    disabled={messageActionsDisabled}
-                                    onClick={() => {
-                                        void copyMessageToClipboard(
-                                            copyMessage.content,
-                                        );
-                                    }}
-                                    size="icon-sm"
-                                    type="button"
-                                    variant="ghost"
-                                >
-                                    <Copy className="size-4" />
-                                    <span className="sr-only">Copy</span>
-                                </Button>
-                            </TooltipTrigger>
+                            <TooltipTrigger
+                                render={
+                                    <Button
+                                        aria-label="Copy message"
+                                        className="text-muted-foreground rounded-full transition"
+                                        disabled={messageActionsDisabled}
+                                        onClick={() => {
+                                            void copyMessageToClipboard(
+                                                copyMessage.content,
+                                            );
+                                        }}
+                                        size="icon-sm"
+                                        type="button"
+                                        variant="ghost"
+                                    >
+                                        <Copy className="size-4" />
+                                        <span className="sr-only">Copy</span>
+                                    </Button>
+                                }
+                            />
                             <TooltipContent>Copy</TooltipContent>
-                        </Tooltip>
-                    ) : undefined;
-
-                    const traceButton = regenerateMessage ? (
-                        <Tooltip>
-                            <TooltipTrigger asChild>
-                                <Button
-                                    aria-label="Trace"
-                                    className="text-muted-foreground rounded-full transition"
-                                    disabled={messageActionsDisabled}
-                                    onClick={() => {
-                                        openTracePanel(regenerateMessage.id);
-                                    }}
-                                    size="icon-sm"
-                                    type="button"
-                                    variant="ghost"
-                                >
-                                    <ListTree className="size-4" />
-                                    <span className="sr-only">Trace</span>
-                                </Button>
-                            </TooltipTrigger>
-                            <TooltipContent>Show trace</TooltipContent>
                         </Tooltip>
                     ) : undefined;
 
@@ -1479,20 +1464,80 @@ export const ChatArea = ({
                         feedbackControls !== undefined ||
                         editButton !== undefined ||
                         regenerateButton !== undefined ||
-                        traceButton !== undefined ||
+                        sourceButtons !== undefined ||
                         copyButton !== undefined ||
                         branchSwitcher !== undefined ? (
                             <div className="flex flex-wrap items-center gap-1">
                                 {copyButton}
                                 {isUserMessage ? editButton : feedbackControls}
                                 {!isUserMessage && regenerateButton}
-                                {!isUserMessage && activityButton}
-                                {!isUserMessage && traceButton}
+                                {!isUserMessage && sourceButtons}
                                 {branchSwitcher}
                             </div>
                         ) : undefined;
 
                     return footer;
+                }}
+                renderMessageFooterAside={(
+                    message: ChatMessage,
+                ): JSX.Element | string | undefined => {
+                    const internalMessage = messageById.get(message.id);
+                    const isErrorMessage =
+                        internalMessage !== undefined &&
+                        (internalMessage.isError === true ||
+                            internalMessage.id.startsWith("error-"));
+                    const timingFooter = renderGenerationTimeFooter(
+                        internalMessage,
+                        canViewDurationTooltip,
+                    );
+                    const timestampFooter = renderMessageTimestampFooter(internalMessage);
+                    const responseCostFooter = renderResponseCostFooter(
+                        internalMessage,
+                        canViewResponseCost,
+                    );
+                    const guardrailsFooter =
+                        canViewGuardrailsFailures &&
+                        internalMessage?.role === "assistant" &&
+                        (internalMessage.guardrailsFailures?.length ?? 0) > 0 ? (
+                            <GuardrailsFooter message={internalMessage} />
+                        ) : undefined;
+                    const responseLinkButton =
+                        internalMessage?.role === "assistant" && !isErrorMessage
+                            ? renderResponseLinkButton(internalMessage.id)
+                            : undefined;
+                    const investigationButton =
+                        internalMessage?.role === "assistant" && !isErrorMessage
+                            ? renderInvestigationButton(internalMessage.id)
+                            : undefined;
+                    const traceButton =
+                        internalMessage?.role === "assistant" &&
+                        !isErrorMessage &&
+                        canViewTrace
+                            ? renderTraceButton(internalMessage.id)
+                            : undefined;
+
+                    if (
+                        timestampFooter === undefined &&
+                        timingFooter === undefined &&
+                        responseCostFooter === undefined &&
+                        guardrailsFooter === undefined &&
+                        responseLinkButton === undefined &&
+                        investigationButton === undefined &&
+                        traceButton === undefined
+                    ) {
+                        return undefined;
+                    }
+                    return (
+                        <div className="flex items-center gap-1">
+                            {timestampFooter}
+                            {timingFooter}
+                            {responseCostFooter}
+                            {guardrailsFooter}
+                            {responseLinkButton}
+                            {investigationButton}
+                            {traceButton}
+                        </div>
+                    );
                 }}
                 useNativeScrollbar
             />
@@ -1543,7 +1588,8 @@ export const ChatArea = ({
                     </DialogFooter>
                 </DialogContent>
             </Dialog>
-            <Sheet
+            <ChatTurnTraceSheet
+                messageId={traceMessageId}
                 onOpenChange={(open) => {
                     setTracePanelOpen(open);
                     if (!open) {
@@ -1551,35 +1597,8 @@ export const ChatArea = ({
                     }
                 }}
                 open={tracePanelOpen}
-            >
-                <SheetContent
-                    className="flex !w-[min(100vw,860px)] !max-w-[min(100vw,860px)] flex-col gap-4 p-0"
-                    onOpenAutoFocus={(event) => {
-                        event.preventDefault();
-                    }}
-                >
-                    <SheetHeader className="border-b px-4 py-4">
-                        <div className="flex items-start justify-between gap-4">
-                            <div className="space-y-1">
-                                <SheetTitle>Chat Turn Trace</SheetTitle>
-                                <SheetDescription>
-                                    {hasTraceMessageId
-                                        ? `Message ${traceMessageId}`
-                                        : "Trace detail"}
-                                </SheetDescription>
-                            </div>
-                        </div>
-                    </SheetHeader>
-                    <div className="min-h-0 flex-1 overflow-hidden">
-                        <TraceTurnDebugView
-                            detail={traceDetail}
-                            error={traceError}
-                            loading={traceLoading}
-                            summaryOnly
-                        />
-                    </div>
-                </SheetContent>
-            </Sheet>
+                source="chat_trace"
+            />
         </>
     );
 };

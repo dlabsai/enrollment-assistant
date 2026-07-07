@@ -1,0 +1,25 @@
+{
+  "dataset_name": "demo_university_rag_retrieval_v2",
+  "dataset_version": 2,
+  "case_count": 7,
+  "status": "pending_rerun",
+  "reason": "Prompt, corpus, and eval content were realigned to the richer synthetic Demo University domain. Regenerate the RAG database and run the retrieval baseline before treating pass metrics as current.",
+  "config": {
+    "cases_path": "app/rag/evals/retrieval_cases.json",
+    "read_only": true,
+    "embedding_model": "text-embedding-3-large",
+    "embedding_dimensions": 2000,
+    "catalog_content_policy": "available_in_document_search",
+    "chunk_top_k": 50,
+    "title_top_k": 100
+  },
+  "cases": [
+    {"id": "demo_ai_bachelors_program", "expected_status": "pending_rerun"},
+    {"id": "demo_transfer_credit_internal_guidance", "expected_status": "pending_rerun"},
+    {"id": "demo_catalog_policy_source_of_truth", "expected_status": "pending_rerun"},
+    {"id": "demo_mba_catalog_courses", "expected_status": "pending_rerun"},
+    {"id": "demo_financial_aid_staff_process", "expected_status": "pending_rerun"},
+    {"id": "demo_counseling_timeline_and_field_experience", "expected_status": "pending_rerun"},
+    {"id": "demo_counseling_conflict_escalation", "expected_status": "pending_rerun"}
+  ]
+}

@@ -38,11 +38,14 @@ interface ChatProps {
     composerValue?: string;
     onComposerValueChange?: (value: string) => void;
     renderMessageFooter?: (message: ChatMessage) => ReactNode;
+    renderMessageFooterAside?: (message: ChatMessage) => ReactNode;
     renderMessageBelowContent?: (message: ChatMessage) => ReactNode;
     hideMessageFooterUntilHover?: boolean;
     composerAccessory?: ReactNode;
     composerActionsAccessory?: ReactNode;
     highlightQuery?: string;
+    highlightPhrase?: boolean;
+    focusMessageId?: string;
     autoScroll?: boolean;
     loadingMessages?: string[];
     loadingActivity?: LoadingActivityItem[];
@@ -68,11 +71,14 @@ export const Chat = ({
     onComposerValueChange,
     variant = "default",
     renderMessageFooter,
+    renderMessageFooterAside,
     renderMessageBelowContent,
     hideMessageFooterUntilHover = false,
     composerAccessory,
     composerActionsAccessory,
     highlightQuery,
+    highlightPhrase = false,
+    focusMessageId,
     autoScroll = true,
     loadingMessages,
     loadingActivity,
@@ -236,9 +242,11 @@ export const Chat = ({
                                 contentContainerClassName
                             }
                             emptyStateContent={emptyStateContent}
+                            focusMessageId={focusMessageId}
                             hideMessageFooterUntilHover={
                                 hideMessageFooterUntilHover
                             }
+                            highlightPhrase={highlightPhrase}
                             highlightQuery={highlightQuery}
                             isLoading={isLoading}
                             loadingActivity={loadingActivity}
@@ -258,6 +266,7 @@ export const Chat = ({
                                 renderMessageBelowContent
                             }
                             renderMessageFooter={renderMessageFooter}
+                            renderMessageFooterAside={renderMessageFooterAside}
                             useNativeScrollbar={useNativeScrollbar}
                             variant={variant}
                         />
@@ -318,9 +327,11 @@ export const Chat = ({
                                 contentContainerClassName
                             }
                             emptyStateContent={emptyStateContent}
+                            focusMessageId={focusMessageId}
                             hideMessageFooterUntilHover={
                                 hideMessageFooterUntilHover
                             }
+                            highlightPhrase={highlightPhrase}
                             highlightQuery={highlightQuery}
                             isLoading={isLoading}
                             loadingActivity={loadingActivity}
@@ -340,6 +351,7 @@ export const Chat = ({
                                 renderMessageBelowContent
                             }
                             renderMessageFooter={renderMessageFooter}
+                            renderMessageFooterAside={renderMessageFooterAside}
                             useNativeScrollbar={useNativeScrollbar}
                             variant={variant}
                         />

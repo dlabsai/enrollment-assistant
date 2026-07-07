@@ -1,5 +1,20 @@
 import type { TimeRangeValue } from "./time-range";
 
+const hourlyTickFormatter = new Intl.DateTimeFormat(undefined, {
+    hour: "numeric",
+});
+
+const dailyTickFormatter = new Intl.DateTimeFormat(undefined, {
+    month: "short",
+    day: "numeric",
+});
+
+const hourlyTooltipFormatter = new Intl.DateTimeFormat(undefined, {
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+});
+
 export const isHourlyTimeRange = (timeRange: TimeRangeValue): boolean =>
     timeRange === "24h";
 
@@ -8,13 +23,9 @@ export const formatTimeSeriesTick = (
     timeRange: TimeRangeValue,
 ): string => {
     const date = new Date(value);
-    if (isHourlyTimeRange(timeRange)) {
-        return date.toLocaleTimeString("en-US", { hour: "numeric" });
-    }
-    return date.toLocaleDateString("en-US", {
-        month: "short",
-        day: "numeric",
-    });
+    return isHourlyTimeRange(timeRange)
+        ? hourlyTickFormatter.format(date)
+        : dailyTickFormatter.format(date);
 };
 
 export const formatTimeSeriesTooltipLabel = (
@@ -22,15 +33,7 @@ export const formatTimeSeriesTooltipLabel = (
     timeRange: TimeRangeValue,
 ): string => {
     const date = new Date(value);
-    if (isHourlyTimeRange(timeRange)) {
-        return date.toLocaleString("en-US", {
-            month: "short",
-            day: "numeric",
-            hour: "numeric",
-        });
-    }
-    return date.toLocaleDateString("en-US", {
-        month: "short",
-        day: "numeric",
-    });
+    return isHourlyTimeRange(timeRange)
+        ? hourlyTooltipFormatter.format(date)
+        : dailyTickFormatter.format(date);
 };

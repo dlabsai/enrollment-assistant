@@ -25,32 +25,53 @@ import {
     useInstructionsStoreSubscribe,
 } from "../contexts/instructions-store-context";
 import { useTestChat } from "../hooks/use-test-chat";
-import { getSectionIdForScope } from "../lib/sections";
+import {
+    getSectionIdForScope,
+    INTERNAL_PROMPT_PLATFORM,
+} from "../lib/sections";
 import type { PromptSetVersionListItem } from "../types";
 
 const EMPTY_VERSIONS: PromptSetVersionListItem[] = [];
+const INTERNAL_ASSISTANT_SECTION_ID = getSectionIdForScope(
+    "assistant",
+    INTERNAL_PROMPT_PLATFORM,
+);
 
 const VersionSelector = (): JSX.Element => {
-    const activePlatform = useInstructionsStore(
-        (state) => state.activePlatform,
-    );
-    const sectionId = getSectionIdForScope("assistant", activePlatform);
     const versions = useInstructionsStore(
-        (state) => state.versionsBySection[sectionId] ?? EMPTY_VERSIONS,
+        (state) =>
+            state.versionsBySection[INTERNAL_ASSISTANT_SECTION_ID] ??
+            EMPTY_VERSIONS,
     );
     const testChatVersionId = useInstructionsStore(
         (state) => state.testChatVersionId,
     );
 
+    const selectedVersion = versions.find(
+        (version) => version.id === testChatVersionId,
+    );
+    const selectedVersionLabel =
+        selectedVersion === undefined
+            ? undefined
+            : `v${selectedVersion.version_number} – ${selectedVersion.name}`;
+
     const { setTestChatVersion } = useInstructionsActions();
 
     return (
         <Select
-            onValueChange={setTestChatVersion}
+            onValueChange={(versionId) => {
+                if (versionId === null) {
+                    return;
+                }
+
+                setTestChatVersion(versionId);
+            }}
             value={testChatVersionId}
         >
             <SelectTrigger className="w-full">
-                <SelectValue placeholder="Choose Version..." />
+                <SelectValue placeholder="Choose Version...">
+                    {selectedVersionLabel}
+                </SelectValue>
             </SelectTrigger>
             <SelectContent>
                 {versions.length === 0 ? (
@@ -79,32 +100,6 @@ const VersionSelector = (): JSX.Element => {
     );
 };
 
-const PlatformSelector = (): JSX.Element => {
-    const activePlatform = useInstructionsStore(
-        (state) => state.activePlatform,
-    );
-    const { setActivePlatform } = useInstructionsActions();
-
-    return (
-        <Select
-            onValueChange={(value) => {
-                if (value === "internal" || value === "public") {
-                    setActivePlatform(value);
-                }
-            }}
-            value={activePlatform}
-        >
-            <SelectTrigger className="w-[150px]">
-                <SelectValue placeholder="Platform" />
-            </SelectTrigger>
-            <SelectContent>
-                <SelectItem value="internal">Internal</SelectItem>
-                <SelectItem value="public">Public</SelectItem>
-            </SelectContent>
-        </Select>
-    );
-};
-
 interface TestChatControlsProps {
     onNewChat?: () => void;
     showNewChat: boolean;
@@ -115,7 +110,6 @@ export const TestChatControls = ({
     showNewChat,
 }: TestChatControlsProps): JSX.Element => (
     <div className="flex items-center gap-3">
-        <PlatformSelector />
         <div className="min-w-[200px] flex-1">
             <VersionSelector />
         </div>
@@ -133,12 +127,10 @@ export const TestChatControls = ({
 );
 
 export const TestChatInfo = (): JSX.Element | undefined => {
-    const activePlatform = useInstructionsStore(
-        (state) => state.activePlatform,
-    );
-    const sectionId = getSectionIdForScope("assistant", activePlatform);
     const versions = useInstructionsStore(
-        (state) => state.versionsBySection[sectionId] ?? EMPTY_VERSIONS,
+        (state) =>
+            state.versionsBySection[INTERNAL_ASSISTANT_SECTION_ID] ??
+            EMPTY_VERSIONS,
     );
     const testChatVersionId = useInstructionsStore(
         (state) => state.testChatVersionId,
@@ -174,12 +166,10 @@ export const TestChat = ({
     onNewChatReady,
     onMessagesChange,
 }: TestChatProps): JSX.Element => {
-    const activePlatform = useInstructionsStore(
-        (state) => state.activePlatform,
-    );
-    const sectionId = getSectionIdForScope("assistant", activePlatform);
     const versions = useInstructionsStore(
-        (state) => state.versionsBySection[sectionId] ?? EMPTY_VERSIONS,
+        (state) =>
+            state.versionsBySection[INTERNAL_ASSISTANT_SECTION_ID] ??
+            EMPTY_VERSIONS,
     );
     const testChatVersionId = useInstructionsStore(
         (state) => state.testChatVersionId,

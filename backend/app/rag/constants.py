@@ -1,0 +1,2 @@
+EMBEDDING_MODEL = "text-embedding-3-large"
+EMBEDDING_VECTOR_DIMENSIONS = 2000

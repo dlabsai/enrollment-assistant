@@ -30,10 +30,13 @@ interface MessagesProps {
     contentContainerClassName?: string;
     bottomPaddingPx?: number;
     renderMessageFooter?: (message: ChatMessage) => ReactNode;
+    renderMessageFooterAside?: (message: ChatMessage) => ReactNode;
     renderMessageBelowContent?: (message: ChatMessage) => ReactNode;
     hideMessageFooterUntilHover?: boolean;
     variant?: "default" | "public-widget";
     highlightQuery?: string;
+    highlightPhrase?: boolean;
+    focusMessageId?: string;
     autoScroll?: boolean;
     loadingMessages?: string[];
     loadingActivity?: LoadingActivityItem[];
@@ -55,10 +58,13 @@ export const Messages = ({
     contentContainerClassName,
     bottomPaddingPx = 0,
     renderMessageFooter,
+    renderMessageFooterAside,
     renderMessageBelowContent,
     hideMessageFooterUntilHover = false,
     variant = "default",
     highlightQuery = "",
+    highlightPhrase = false,
+    focusMessageId,
     autoScroll = true,
     loadingMessages,
     loadingActivity,
@@ -85,6 +91,7 @@ export const Messages = ({
     const [isNearBottom, setIsNearBottom] = useState(true);
     const isNearBottomRef = useRef(true);
     const [viewportNodeVersion, setViewportNodeVersion] = useState(0);
+    const [flashMessageId, setFlashMessageId] = useState<string | undefined>();
     const shouldScrollOnChatOpenRef = useRef(true);
     // Scrollability and measurements
     const [isScrollable, setIsScrollable] = useState(false);
@@ -194,6 +201,44 @@ export const Messages = ({
         computeNearBottom,
     ]);
 
+    useEffect((): (() => void) | undefined => {
+        if (focusMessageId === undefined || messages.length === 0) {
+            return undefined;
+        }
+
+        let timeout: ReturnType<typeof setTimeout> | null = null;
+        const frame = requestAnimationFrame(() => {
+            const viewport = viewportRef.current;
+            const element = messageRefsRef.current[focusMessageId];
+            if (!viewport || !element) {
+                return;
+            }
+
+            const containerRect = viewport.getBoundingClientRect();
+            const elementRect = element.getBoundingClientRect();
+            const scrollOffset =
+                elementRect.top - containerRect.top + viewport.scrollTop - 24;
+
+            viewport.scrollTo({
+                top: scrollOffset,
+                behavior: "smooth",
+            });
+            setFlashMessageId(focusMessageId);
+            timeout = setTimeout(() => {
+                setFlashMessageId((current) =>
+                    current === focusMessageId ? undefined : current,
+                );
+            }, 3000);
+        });
+
+        return () => {
+            cancelAnimationFrame(frame);
+            if (timeout !== null) {
+                clearTimeout(timeout);
+            }
+        };
+    }, [focusMessageId, messages.length, viewportNodeVersion]);
+
     // Track "near bottom" via scroll metrics
     useEffect((): undefined | (() => void) => {
         const viewport = viewportRef.current;
@@ -206,9 +251,13 @@ export const Messages = ({
         };
 
         viewport.addEventListener("scroll", onScroll, { passive: true });
-        computeNearBottom();
+
+        const frame = requestAnimationFrame(() => {
+            computeNearBottom();
+        });
 
         return () => {
+            cancelAnimationFrame(frame);
             viewport.removeEventListener("scroll", onScroll);
         };
     }, [computeNearBottom, viewportNodeVersion]);
@@ -232,9 +281,13 @@ export const Messages = ({
         const contentRO = new ResizeObserver(computeScrollable);
         viewportRO.observe(viewport);
         contentRO.observe(content);
-        computeScrollable();
+
+        const frame = requestAnimationFrame(() => {
+            computeScrollable();
+        });
 
         return () => {
+            cancelAnimationFrame(frame);
             viewportRO.disconnect();
             contentRO.disconnect();
         };
@@ -368,6 +421,11 @@ export const Messages = ({
                         (emptyStateContent ?? <WelcomeMessage />)}
                     {messages.map((message) => (
                         <div
+                            className={cn(
+                                "rounded-xl transition-[background-color,box-shadow] duration-700",
+                                flashMessageId === message.id &&
+                                    "bg-yellow-100/70 shadow-[0_0_0_2px_rgba(250,204,21,0.65)] dark:bg-yellow-950/40",
+                            )}
                             key={message.id}
                             ref={(element) => {
                                 setMessageRef(message.id, element);
@@ -384,9 +442,15 @@ export const Messages = ({
                                         ? renderMessageFooter(message)
                                         : undefined
                                 }
+                                footerAside={
+                                    renderMessageFooterAside
+                                        ? renderMessageFooterAside(message)
+                                        : undefined
+                                }
                                 hideFooterUntilHover={
                                     hideMessageFooterUntilHover
                                 }
+                                highlightPhrase={highlightPhrase}
                                 highlightQuery={highlightQuery}
                                 isPlayingTTS={playingMessageId === message.id}
                                 message={message}

@@ -19,19 +19,24 @@ import {
     TooltipProvider,
     TooltipTrigger,
 } from "@va/shared/components/ui/tooltip";
+import { cn } from "@va/shared/lib/utils";
 import {
     ChevronLeft,
     ChevronRight,
     ExternalLink,
     Filter,
+    Maximize2,
+    Minimize2,
     RefreshCw,
 } from "lucide-react";
 import { type JSX, useCallback, useEffect, useMemo, useState } from "react";
 
+import { getDefaultDataTablePageSize } from "../../components/data-table-constants";
 import { PageHeader, PageHeaderGroup } from "../../components/page-header";
 import { PageSection, PageShell } from "../../components/page-shell";
 import { InlineError } from "../../components/page-state";
 import { TimeRangeFilter } from "../../components/time-range-filter";
+import { formatLocaleNumber } from "../../lib/number-format";
 import {
     type CustomTimeRange,
     getTimeRangeQueryParams,
@@ -50,12 +55,15 @@ import { TraceDetailPanel } from "./trace-detail-panel";
 import { TraceTable } from "./trace-table";
 
 const platformOptions = [
-    { label: "Both", value: "both" },
+    { label: "All platforms", value: "both" },
     { label: "Internal", value: "internal" },
     { label: "Public", value: "public" },
 ] as const;
 
-const traceFilterStorageKey = "internal-traces-filters";
+const SHOW_PLATFORM_FILTER = false;
+
+const runtimeTraceFilterStorageKey = "internal-traces-filters";
+const evalTraceFilterStorageKey = "internal-eval-traces-filters";
 
 type PlatformFilter = (typeof platformOptions)[number]["value"];
 
@@ -129,11 +137,13 @@ const parseStoredTraceFilters = (
     }
 };
 
-const getStoredTraceFilters = (): StoredTraceFilters | undefined => {
+const getStoredTraceFilters = (
+    storageKey: string,
+): StoredTraceFilters | undefined => {
     if (typeof window === "undefined") {
         return undefined;
     }
-    const stored = window.localStorage.getItem(traceFilterStorageKey);
+    const stored = window.localStorage.getItem(storageKey);
     if (stored === null || stored === "") {
         return undefined;
     }
@@ -142,8 +152,23 @@ const getStoredTraceFilters = (): StoredTraceFilters | undefined => {
 
 const formatTraceId = (traceId: string): string => traceId;
 
-export const TracesPage = (): JSX.Element => {
-    const aiOnlyStorageKey = "internal-traces-ai-only";
+type TraceSource = "runtime" | "evals";
+
+interface TracesPageProps {
+    source?: TraceSource;
+}
+
+export const TracesPage = ({
+    source = "runtime",
+}: TracesPageProps): JSX.Element => {
+    const isEvalTraces = source === "evals";
+    const routePath = isEvalTraces ? "/eval-traces" : "/traces";
+    const aiOnlyStorageKey = isEvalTraces
+        ? "internal-eval-traces-ai-only"
+        : "internal-traces-ai-only";
+    const traceFilterStorageKey = isEvalTraces
+        ? evalTraceFilterStorageKey
+        : runtimeTraceFilterStorageKey;
     const [aiOnly, setAiOnly] = useState(() => {
         if (typeof window === "undefined") {
             return true;
@@ -151,11 +176,17 @@ export const TracesPage = (): JSX.Element => {
         const stored = window.localStorage.getItem(aiOnlyStorageKey);
         return stored === null ? true : stored === "true";
     });
-    const storedFilters = useMemo(() => getStoredTraceFilters(), []);
+    const storedFilters = useMemo(
+        () => getStoredTraceFilters(traceFilterStorageKey),
+        [traceFilterStorageKey],
+    );
     const [pageIndex, setPageIndex] = useState(0);
-    const [pageSize, setPageSize] = useState(20);
+    const [pageSize, setPageSize] = useState(getDefaultDataTablePageSize);
     const [selectedPlatform, setSelectedPlatform] = useState<PlatformFilter>(
         () => {
+            if (!SHOW_PLATFORM_FILTER) {
+                return "both";
+            }
             const storedPlatform = storedFilters?.platform;
             if (storedPlatform !== undefined) {
                 return storedPlatform;
@@ -174,7 +205,8 @@ export const TracesPage = (): JSX.Element => {
         parseStoredCustomRange(storedFilters?.customRange),
     );
     const [referenceDate, setReferenceDate] = useState(() => new Date());
-    const search = useSearch({ from: "/traces" });
+    const [detailExpanded, setDetailExpanded] = useState(false);
+    const search = useSearch({ strict: false });
     const navigate = useNavigate();
 
     useEffect(() => {
@@ -203,7 +235,7 @@ export const TracesPage = (): JSX.Element => {
             traceFilterStorageKey,
             JSON.stringify(payload),
         );
-    }, [customRange, selectedPlatform, timeRange]);
+    }, [customRange, selectedPlatform, timeRange, traceFilterStorageKey]);
 
     const platformFilter = selectedPlatform as TracePlatformFilter;
     const timeRangeParams = useMemo(
@@ -218,6 +250,7 @@ export const TracesPage = (): JSX.Element => {
         pageSize,
         timeRangeParams.start,
         timeRangeParams.end,
+        source,
     );
 
     const activeTraceId = search.trace;
@@ -234,7 +267,7 @@ export const TracesPage = (): JSX.Element => {
         loading: detailLoading,
         error: detailError,
         refresh: refreshDetail,
-    } = useTraceDetail(activeTraceId);
+    } = useTraceDetail(activeTraceId, source);
 
     const clearTraceSelection = useCallback((): void => {
         void navigate({
@@ -244,9 +277,9 @@ export const TracesPage = (): JSX.Element => {
                 trace: undefined,
                 span: undefined,
             }),
-            to: "/traces",
+            to: routePath,
         });
-    }, [navigate]);
+    }, [navigate, routePath]);
 
     const handleSpanChange = useCallback(
         (spanId: string | undefined): void => {
@@ -260,10 +293,10 @@ export const TracesPage = (): JSX.Element => {
                     span: spanId,
                     trace: activeTraceId,
                 }),
-                to: "/traces",
+                to: routePath,
             });
         },
-        [activeTraceId, navigate],
+        [activeTraceId, navigate, routePath],
     );
 
     const handleSpanSync = useCallback(
@@ -278,10 +311,10 @@ export const TracesPage = (): JSX.Element => {
                     span: spanId,
                     trace: activeTraceId,
                 }),
-                to: "/traces",
+                to: routePath,
             });
         },
-        [activeTraceId, navigate],
+        [activeTraceId, navigate, routePath],
     );
 
     const detailTitle =
@@ -304,7 +337,9 @@ export const TracesPage = (): JSX.Element => {
                 </Badge>
                 <span>{formatTimestamp(selectedTrace.started_at)}</span>
                 <span>{formatDurationMs(selectedTrace.duration_ms)}</span>
-                <span>{selectedTrace.span_count} spans</span>
+                <span>
+                    {formatLocaleNumber(selectedTrace.span_count)} spans
+                </span>
             </span>
         );
 
@@ -324,41 +359,43 @@ export const TracesPage = (): JSX.Element => {
             search.span !== undefined && search.span !== ""
                 ? `?span=${encodeURIComponent(search.span)}`
                 : "";
-        const url = `${base}#/traces/${activeTraceId}${spanParam}`;
+        const url = `${base}#${routePath}/${activeTraceId}${spanParam}`;
         window.open(url, "_blank", "noopener,noreferrer");
-    }, [activeTraceId, search.span]);
+    }, [activeTraceId, routePath, search.span]);
 
     return (
         <PageShell
             className="overflow-hidden"
             variant="dashboard"
         >
-            <PageHeader title="Traces">
-                <PageHeaderGroup label="Platform">
-                    <ToggleGroup
-                        onValueChange={(value) => {
-                            const next = isPlatformFilter(value)
-                                ? value
-                                : "both";
-                            setSelectedPlatform(next);
-                            setPageIndex(0);
-                            clearTraceSelection();
-                        }}
-                        size="sm"
-                        type="single"
-                        value={selectedPlatform}
-                        variant="outline"
-                    >
-                        {platformOptions.map((option) => (
-                            <ToggleGroupItem
-                                key={option.value}
-                                value={option.value}
-                            >
-                                {option.label}
-                            </ToggleGroupItem>
-                        ))}
-                    </ToggleGroup>
-                </PageHeaderGroup>
+            <PageHeader title={isEvalTraces ? "Eval Traces" : "Traces"}>
+                {SHOW_PLATFORM_FILTER && (
+                    <PageHeaderGroup>
+                        <ToggleGroup
+                            aria-label="Platform"
+                            onValueChange={(value) => {
+                                const [nextValue] = value;
+                                const next = isPlatformFilter(nextValue)
+                                    ? nextValue
+                                    : "both";
+                                setSelectedPlatform(next);
+                                setPageIndex(0);
+                                clearTraceSelection();
+                            }}
+                            value={[selectedPlatform]}
+                            variant="outline"
+                        >
+                            {platformOptions.map((option) => (
+                                <ToggleGroupItem
+                                    key={option.value}
+                                    value={option.value}
+                                >
+                                    {option.label}
+                                </ToggleGroupItem>
+                            ))}
+                        </ToggleGroup>
+                    </PageHeaderGroup>
+                )}
                 <PageHeaderGroup>
                     <TimeRangeFilter
                         customRange={customRange}
@@ -377,7 +414,7 @@ export const TracesPage = (): JSX.Element => {
                         value={timeRange}
                     />
                 </PageHeaderGroup>
-                <PageHeaderGroup className="rounded-md border px-2 py-1">
+                <PageHeaderGroup>
                     <Switch
                         checked={aiOnly}
                         onCheckedChange={(checked) => {
@@ -386,9 +423,7 @@ export const TracesPage = (): JSX.Element => {
                             clearTraceSelection();
                         }}
                     />
-                    <span className="text-muted-foreground text-xs">
-                        AI only
-                    </span>
+                    <span className="text-muted-foreground">AI only</span>
                 </PageHeaderGroup>
                 <Button
                     onClick={() => {
@@ -400,18 +435,16 @@ export const TracesPage = (): JSX.Element => {
                         setPageIndex(0);
                         clearTraceSelection();
                     }}
-                    size="sm"
                     variant="outline"
                 >
-                    <Filter className="mr-2 size-4" />
+                    <Filter data-icon="inline-start" />
                     Clear
                 </Button>
                 <Button
                     onClick={() => void refresh()}
-                    size="sm"
                     variant="outline"
                 >
-                    <RefreshCw className="mr-2 size-4" />
+                    <RefreshCw data-icon="inline-start" />
                     Refresh
                 </Button>
             </PageHeader>
@@ -437,12 +470,14 @@ export const TracesPage = (): JSX.Element => {
                                 trace: trace.trace_id,
                                 span: undefined,
                             }),
-                            to: "/traces",
+                            to: routePath,
                         });
                     }}
                     pageCount={Math.max(1, Math.ceil(total / pageSize))}
                     pagination={{ pageIndex, pageSize }}
+                    rowCount={total}
                     selectedTraceId={activeTraceId}
+                    showPlatformColumn={SHOW_PLATFORM_FILTER}
                     traces={traces}
                 />
             </PageSection>
@@ -456,10 +491,13 @@ export const TracesPage = (): JSX.Element => {
                 open={sheetOpen}
             >
                 <SheetContent
-                    className="flex !w-[min(100vw,860px)] !max-w-[min(100vw,860px)] flex-col gap-4 p-0"
-                    onOpenAutoFocus={(event) => {
-                        event.preventDefault();
-                    }}
+                    className={cn(
+                        "flex flex-col gap-4 p-0",
+                        detailExpanded
+                            ? "!w-screen !max-w-none"
+                            : "!w-[min(100vw,860px)] !max-w-[min(100vw,860px)]",
+                    )}
+                    initialFocus={false}
                 >
                     <SheetHeader className="border-b px-4 py-4">
                         <div className="flex items-start justify-between gap-4">
@@ -467,102 +505,144 @@ export const TracesPage = (): JSX.Element => {
                             <TooltipProvider>
                                 <div className="mr-8 flex items-center gap-2">
                                     <Tooltip>
-                                        <TooltipTrigger asChild>
-                                            <Button
-                                                aria-label="Refresh trace"
-                                                onClick={() =>
-                                                    void refreshDetail()
-                                                }
-                                                size="icon-sm"
-                                                variant="outline"
-                                            >
-                                                <RefreshCw className="size-4" />
-                                            </Button>
-                                        </TooltipTrigger>
+                                        <TooltipTrigger
+                                            render={
+                                                <Button
+                                                    aria-label="Refresh trace"
+                                                    onClick={() =>
+                                                        void refreshDetail()
+                                                    }
+                                                    size="icon-sm"
+                                                    variant="outline"
+                                                >
+                                                    <RefreshCw />
+                                                </Button>
+                                            }
+                                        />
                                         <TooltipContent>
                                             Refresh Trace
                                         </TooltipContent>
                                     </Tooltip>
                                     <Tooltip>
-                                        <TooltipTrigger asChild>
-                                            <Button
-                                                aria-label="Open trace in new tab"
-                                                disabled={
-                                                    activeTraceId ===
-                                                        undefined ||
-                                                    activeTraceId === ""
-                                                }
-                                                onClick={openTraceInNewTab}
-                                                size="icon-sm"
-                                                variant="outline"
-                                            >
-                                                <ExternalLink className="size-4" />
-                                            </Button>
-                                        </TooltipTrigger>
+                                        <TooltipTrigger
+                                            render={
+                                                <Button
+                                                    aria-label={
+                                                        detailExpanded
+                                                            ? "Collapse trace sheet"
+                                                            : "Expand trace sheet"
+                                                    }
+                                                    onClick={() => {
+                                                        setDetailExpanded(
+                                                            (expanded) =>
+                                                                !expanded,
+                                                        );
+                                                    }}
+                                                    size="icon-sm"
+                                                    variant="outline"
+                                                >
+                                                    {detailExpanded ? (
+                                                        <Minimize2 />
+                                                    ) : (
+                                                        <Maximize2 />
+                                                    )}
+                                                </Button>
+                                            }
+                                        />
+                                        <TooltipContent>
+                                            {detailExpanded
+                                                ? "Collapse sheet"
+                                                : "Expand to full viewport"}
+                                        </TooltipContent>
+                                    </Tooltip>
+                                    <Tooltip>
+                                        <TooltipTrigger
+                                            render={
+                                                <Button
+                                                    aria-label="Open trace in new tab"
+                                                    disabled={
+                                                        activeTraceId ===
+                                                            undefined ||
+                                                        activeTraceId === ""
+                                                    }
+                                                    onClick={openTraceInNewTab}
+                                                    size="icon-sm"
+                                                    variant="outline"
+                                                >
+                                                    <ExternalLink />
+                                                </Button>
+                                            }
+                                        />
                                         <TooltipContent>
                                             Open in new tab
                                         </TooltipContent>
                                     </Tooltip>
                                     <Tooltip>
-                                        <TooltipTrigger asChild>
-                                            <Button
-                                                aria-label="Previous trace"
-                                                disabled={!canGoPrev}
-                                                onClick={() => {
-                                                    if (!canGoPrev) {
-                                                        return;
-                                                    }
-                                                    const previous =
-                                                        traces[
-                                                            selectedIndex - 1
-                                                        ];
-                                                    void navigate({
-                                                        search: (prev) => ({
-                                                            ...prev,
-                                                            trace: previous.trace_id,
-                                                            span: undefined,
-                                                        }),
-                                                        to: "/traces",
-                                                    });
-                                                }}
-                                                size="icon-sm"
-                                                variant="outline"
-                                            >
-                                                <ChevronLeft className="size-4" />
-                                            </Button>
-                                        </TooltipTrigger>
+                                        <TooltipTrigger
+                                            render={
+                                                <Button
+                                                    aria-label="Previous trace"
+                                                    disabled={!canGoPrev}
+                                                    onClick={() => {
+                                                        if (!canGoPrev) {
+                                                            return;
+                                                        }
+                                                        const previous =
+                                                            traces[
+                                                                selectedIndex -
+                                                                    1
+                                                            ];
+                                                        void navigate({
+                                                            search: (prev) => ({
+                                                                ...prev,
+                                                                trace: previous.trace_id,
+                                                                span: undefined,
+                                                            }),
+                                                            to: routePath,
+                                                        });
+                                                    }}
+                                                    size="icon-sm"
+                                                    variant="outline"
+                                                >
+                                                    <ChevronLeft />
+                                                </Button>
+                                            }
+                                        />
                                         <TooltipContent>
                                             Previous Trace
                                         </TooltipContent>
                                     </Tooltip>
                                     <Tooltip>
-                                        <TooltipTrigger asChild>
-                                            <Button
-                                                aria-label="Next trace"
-                                                disabled={!canGoNext}
-                                                onClick={() => {
-                                                    if (!canGoNext) {
-                                                        return;
-                                                    }
-                                                    const next =
-                                                        traces[
-                                                            selectedIndex + 1
-                                                        ];
-                                                    void navigate({
-                                                        search: (prev) => ({
-                                                            ...prev,
-                                                            trace: next.trace_id,
-                                                            span: undefined,
-                                                        }),
-                                                        to: "/traces",
-                                                    });
-                                                }}
-                                                size="icon-sm"
-                                                variant="outline"
-                                            >
-                                                <ChevronRight className="size-4" />
-                                            </Button>
-                                        </TooltipTrigger>
+                                        <TooltipTrigger
+                                            render={
+                                                <Button
+                                                    aria-label="Next trace"
+                                                    disabled={!canGoNext}
+                                                    onClick={() => {
+                                                        if (!canGoNext) {
+                                                            return;
+                                                        }
+                                                        const next =
+                                                            traces[
+                                                                selectedIndex +
+                                                                    1
+                                                            ];
+                                                        void navigate({
+                                                            search: (prev) => ({
+                                                                ...prev,
+                                                                trace: next.trace_id,
+                                                                span: undefined,
+                                                            }),
+                                                            to: routePath,
+                                                        });
+                                                    }}
+                                                    size="icon-sm"
+                                                    variant="outline"
+                                                >
+                                                    <ChevronRight />
+                                                </Button>
+                                            }
+                                        />
                                         <TooltipContent>
                                             Next Trace
                                         </TooltipContent>

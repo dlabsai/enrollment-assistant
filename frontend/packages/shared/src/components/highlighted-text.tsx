@@ -10,6 +10,7 @@ interface HighlightedTextProps {
     query: string;
     className?: string;
     highlightClassName?: string;
+    phrase?: boolean;
 }
 
 export const HighlightedText = ({
@@ -17,12 +18,13 @@ export const HighlightedText = ({
     query,
     className,
     highlightClassName,
+    phrase = false,
 }: HighlightedTextProps): JSX.Element => {
     if (query.trim() === "") {
         return <span className={className}>{text}</span>;
     }
 
-    const parts = splitHighlightText(text, query);
+    const parts = splitHighlightText(text, query, phrase);
 
     return (
         <span className={className}>

@@ -2,9 +2,8 @@ import { apiGet, apiPost } from "@va/shared/lib/api-client";
 
 import type { UserProfile } from "../types";
 
-interface AuthResponse {
-    access_token: string;
-    token_type: string;
+interface AuthSuccessResponse {
+    success: boolean;
 }
 
 interface LoginPayload {
@@ -18,21 +17,42 @@ interface RegisterPayload extends LoginPayload {
     registration_token: string;
 }
 
-export const loginUser = async (payload: LoginPayload): Promise<AuthResponse> =>
-    apiPost<AuthResponse>("/auth/login", payload, { credentials: "include" });
+interface TeamsSsoPayload {
+    token: string;
+}
 
-export const registerUser = async (
-    payload: RegisterPayload,
-): Promise<AuthResponse> =>
-    apiPost<AuthResponse>("/auth/register", payload, {
+export const loginUser = async (
+    payload: LoginPayload,
+): Promise<AuthSuccessResponse> =>
+    apiPost<AuthSuccessResponse>("/auth/login", payload, {
         credentials: "include",
     });
 
-export const fetchCurrentUser = async (token: string): Promise<UserProfile> =>
-    apiGet<UserProfile>("/auth/me", { token });
+export const registerUser = async (
+    payload: RegisterPayload,
+): Promise<AuthSuccessResponse> =>
+    apiPost<AuthSuccessResponse>("/auth/register", payload, {
+        credentials: "include",
+    });
 
-export const refreshSession = async (): Promise<AuthResponse> =>
-    apiPost<AuthResponse>("/auth/refresh", {}, { credentials: "include" });
+export const fetchCurrentUser = async (): Promise<UserProfile> =>
+    apiGet<UserProfile>("/auth/me", {
+        credentials: "include",
+    });
+
+export const refreshSession = async (): Promise<AuthSuccessResponse> =>
+    apiPost<AuthSuccessResponse>(
+        "/auth/refresh",
+        {},
+        { credentials: "include" },
+    );
+
+export const loginWithTeamsSso = async (
+    payload: TeamsSsoPayload,
+): Promise<AuthSuccessResponse> =>
+    apiPost<AuthSuccessResponse>("/auth/teams-sso", payload, {
+        credentials: "include",
+    });
 
 export const logoutUser = async (): Promise<{ success: boolean }> =>
     apiPost<{ success: boolean }>(

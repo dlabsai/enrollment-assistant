@@ -7,15 +7,36 @@ import {
 import { useSidebar } from "@va/shared/components/ui/sidebar";
 import { UNIVERSITY_NAME } from "@va/shared/config";
 import { useIsMobile } from "@va/shared/hooks/use-is-mobile";
-import { Menu, PanelLeft, SquarePen } from "lucide-react";
+import { setDocumentTitle } from "@va/shared/lib/document-title";
+import { ExternalLink, Menu, PanelLeft, SquarePen } from "lucide-react";
 import { type JSX, useEffect, useRef, useState } from "react";
 
 import { useChatActions, useChatStore } from "../contexts/chat-store-context";
 import { ChatStoreProvider } from "../contexts/chat-store-provider";
+import type { ChatCollectionKind } from "../lib/api";
+import { openConversationInNewTab } from "../lib/response-link";
 import { ChatArea } from "./chat-area";
 import { ChatList } from "./chat-list";
 
-const MobileChatSheet = (): JSX.Element => {
+interface ChatPageProps {
+    collectionKind?: ChatCollectionKind;
+    routePath?: "/chat" | "/investigate";
+    titleLabel?: string;
+}
+
+interface ChatPageContentProps {
+    collectionKind?: ChatCollectionKind;
+    routePath?: "/chat" | "/investigate";
+    titleLabel?: string;
+}
+
+const MobileChatSheet = ({
+    collectionKind = "chat",
+    titleLabel = "chats",
+}: {
+    collectionKind?: ChatCollectionKind;
+    titleLabel?: string;
+}): JSX.Element => {
     const [open, setOpen] = useState(false);
 
     return (
@@ -23,21 +44,24 @@ const MobileChatSheet = (): JSX.Element => {
             onOpenChange={setOpen}
             open={open}
         >
-            <SheetTrigger asChild>
-                <button
-                    className="text-foreground hover:bg-accent hover:text-accent-foreground flex size-9 items-center justify-center rounded-full transition-colors"
-                    type="button"
-                >
-                    <Menu className="size-4" />
-                    <span className="sr-only">Open chats</span>
-                </button>
-            </SheetTrigger>
+            <SheetTrigger
+                render={
+                    <button
+                        className="text-foreground hover:bg-accent hover:text-accent-foreground flex size-9 items-center justify-center rounded-full transition-colors"
+                        type="button"
+                    >
+                        <Menu className="size-4" />
+                        <span className="sr-only">Open {titleLabel}</span>
+                    </button>
+                }
+            />
             <SheetContent
                 className="w-64! max-w-none! overflow-x-hidden p-0"
                 side="left"
             >
                 <ChatList
                     className="h-full w-full border-r-0"
+                    collectionKind={collectionKind}
                     onRequestClose={() => {
                         setOpen(false);
                     }}
@@ -47,17 +71,23 @@ const MobileChatSheet = (): JSX.Element => {
     );
 };
 
-const ChatPageContent = (): JSX.Element => {
+const ChatPageContent = ({
+    collectionKind = "chat",
+    routePath = "/chat",
+    titleLabel = "Chat",
+}: ChatPageContentProps): JSX.Element => {
     const chatsLoaded = useChatStore((state) => state.chatsLoaded);
     const currentChatId = useChatStore((state) => state.currentChatId);
-    const currentChatTitle = useChatStore((state) =>
+    const currentChat = useChatStore((state) =>
         state.currentChatId === undefined
             ? undefined
-            : state.chats.get(state.currentChatId)?.title,
+            : state.chats.get(state.currentChatId),
     );
+    const currentChatTitle = currentChat?.title;
 
-    const search = useSearch({ from: "/chat" });
-    const navigate = useNavigate({ from: "/chat" });
+    const search = useSearch({ from: routePath });
+    const navigate = useNavigate({ from: routePath });
+    const focusMessageId = "message" in search ? search.message : undefined;
 
     const { loadChats, selectChat, clearCurrentChat } = useChatActions();
     const { toggleSidebar } = useSidebar();
@@ -70,16 +100,17 @@ const ChatPageContent = (): JSX.Element => {
     }, [chatsLoaded, loadChats]);
 
     useEffect(() => {
-        const baseTitle = `${UNIVERSITY_NAME} Enrollment Agent`;
+        const baseTitle = `${UNIVERSITY_NAME} Enrollment Assistant`;
         const chatTitle = currentChatTitle ?? "Untitled chat";
-        document.title =
+        setDocumentTitle(
             currentChatId === undefined
-                ? `Chat · ${baseTitle}`
-                : `${chatTitle} · Chat · ${baseTitle}`;
-    }, [currentChatId, currentChatTitle]);
+                ? `${titleLabel} · ${baseTitle}`
+                : `${chatTitle} · ${titleLabel} · ${baseTitle}`,
+        );
+    }, [currentChatId, currentChatTitle, titleLabel]);
 
     const syncFromUrlRef = useRef(false);
-    const lastSearchRef = useRef(search.chat);
+    const lastSearchRef = useRef<string | undefined>(undefined);
 
     useEffect(() => {
         if (lastSearchRef.current === search.chat) {
@@ -105,25 +136,45 @@ const ChatPageContent = (): JSX.Element => {
             return;
         }
         void navigate({
-            search: () => ({
-                chat: currentChatId,
-                platform: undefined,
-                userId: undefined,
-                userEmail: undefined,
-            }),
-            to: "/chat",
+            search: () =>
+                routePath === "/investigate"
+                    ? { chat: currentChatId, message: undefined }
+                    : {
+                          chat: currentChatId,
+                          platform: undefined,
+                          userId: undefined,
+                          userEmail: undefined,
+                      },
+            to: routePath,
         });
-    }, [currentChatId, navigate, search.chat]);
+    }, [currentChatId, navigate, routePath, search.chat]);
 
-    const canSendMessages = true;
+    const canCreateChat = collectionKind === "chat";
+    const canSendMessages = collectionKind === "chat" || currentChatId !== undefined;
+    const itemLabel = collectionKind === "investigation" ? "investigation" : "chat";
 
     const handleNewChat = (): void => {
         clearCurrentChat();
     };
 
+    const openSourceChat = (): void => {
+        const sourceConversationId = currentChat?.investigationSourceConversationId;
+        const sourceMessageId = currentChat?.investigationSourceMessageId;
+        if (sourceConversationId === undefined) {
+            return;
+        }
+        openConversationInNewTab({
+            conversationId: sourceConversationId,
+            messageId: sourceMessageId,
+        });
+    };
+
     return (
         <div className="flex h-full min-h-0 min-w-0 flex-1 overflow-hidden">
-            <ChatList className="hidden md:flex" />
+            <ChatList
+                className="hidden md:flex"
+                collectionKind={collectionKind}
+            />
 
             <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
                 <div className="flex items-center justify-between gap-2 px-3 py-2 md:hidden">
@@ -136,30 +187,87 @@ const ChatPageContent = (): JSX.Element => {
                             <PanelLeft className="size-4" />
                             <span className="sr-only">Open sidebar</span>
                         </button>
-                        {isMobile && <MobileChatSheet />}
+                        {isMobile && (
+                            <MobileChatSheet
+                                collectionKind={collectionKind}
+                                titleLabel={titleLabel.toLowerCase()}
+                            />
+                        )}
                     </div>
                     <div className="flex items-center gap-1">
-                        <button
-                            className="text-foreground hover:bg-accent hover:text-accent-foreground flex size-9 items-center justify-center rounded-full transition-colors"
-                            onClick={handleNewChat}
-                            type="button"
-                        >
-                            <SquarePen className="size-4" />
-                            <span className="sr-only">New chat</span>
-                        </button>
+                        {collectionKind === "investigation" &&
+                            currentChat?.investigationSourceConversationId !== undefined && (
+                                <button
+                                    className="text-foreground hover:bg-accent hover:text-accent-foreground flex size-9 items-center justify-center rounded-full transition-colors"
+                                    onClick={openSourceChat}
+                                    type="button"
+                                >
+                                    <ExternalLink className="size-4" />
+                                    <span className="sr-only">Open investigated chat</span>
+                                </button>
+                            )}
+                        {canCreateChat && (
+                            <button
+                                className="text-foreground hover:bg-accent hover:text-accent-foreground flex size-9 items-center justify-center rounded-full transition-colors"
+                                onClick={handleNewChat}
+                                type="button"
+                            >
+                                <SquarePen className="size-4" />
+                                <span className="sr-only">New {itemLabel}</span>
+                            </button>
+                        )}
                     </div>
                 </div>
 
+                {collectionKind === "investigation" &&
+                    currentChat?.investigationSourceConversationId !== undefined && (
+                        <div className="hidden shrink-0 justify-end border-b px-4 py-2 md:flex">
+                            <button
+                                className="text-muted-foreground hover:text-foreground inline-flex items-center gap-2 rounded-md px-2 py-1 text-sm transition-colors"
+                                onClick={openSourceChat}
+                                type="button"
+                            >
+                                <ExternalLink className="size-4" />
+                                Open investigated chat
+                            </button>
+                        </div>
+                    )}
+
                 <div className="min-h-0 flex-1">
-                    <ChatArea canSendMessages={canSendMessages} />
+                    <ChatArea
+                        allowFeedback={collectionKind === "chat"}
+                        allowInvestigations={collectionKind === "chat"}
+                        canSendMessages={canSendMessages}
+                        focusMessageId={focusMessageId}
+                        modelSelectionMode={collectionKind}
+                        responseLinkTarget={
+                            collectionKind === "investigation" ? "investigation" : "chat"
+                        }
+                    />
                 </div>
             </div>
         </div>
     );
 };
 
-export const ChatPage = (): JSX.Element => (
-    <ChatStoreProvider>
-        <ChatPageContent />
+export const ChatPage = ({
+    collectionKind = "chat",
+    routePath = "/chat",
+    titleLabel = "Chat",
+}: ChatPageProps): JSX.Element => (
+    <ChatStoreProvider collectionKind={collectionKind}>
+        <ChatPageContent
+            collectionKind={collectionKind}
+            routePath={routePath}
+            titleLabel={titleLabel}
+        />
     </ChatStoreProvider>
+);
+
+export const InvestigatePage = (): JSX.Element => (
+    <ChatPage
+        collectionKind="investigation"
+        routePath="/investigate"
+        titleLabel="Investigate"
+    />
 );

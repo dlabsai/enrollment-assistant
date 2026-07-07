@@ -1,40 +1,49 @@
+import { formatTableTimestamp } from "../../lib/date-format.ts";
+import { formatLocaleNumber } from "../../lib/number-format.ts";
 import type { EvalReportDetail, EvalReportSummary } from "../types";
 
-export const formatTimestamp = (value: string): string =>
-    new Date(value).toLocaleString("en-US", {
-        month: "short",
-        day: "numeric",
-        hour: "2-digit",
-        minute: "2-digit",
-    });
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+    typeof value === "object" && value !== null && !Array.isArray(value);
+
+export const formatTimestamp = formatTableTimestamp;
 
 export const formatOptionalNumber = (
     value: number | null | undefined,
-): string => (value === null || value === undefined ? "-" : value.toString());
-
-export const formatBytes = (bytes: number): string => {
-    if (bytes < 1024) {
-        return `${bytes} B`;
-    }
-    const kb = bytes / 1024;
-    if (kb < 1024) {
-        return `${kb.toFixed(1)} KB`;
-    }
-    const mb = kb / 1024;
-    return `${mb.toFixed(1)} MB`;
-};
+): string =>
+    value === null || value === undefined
+        ? "-"
+        : formatLocaleNumber(value, { maximumFractionDigits: 4 });
 
 export const formatModelValue = (value: string | undefined): string =>
     value === undefined || value === "" ? "-" : value;
 
+export const formatEvalAudience = (
+    value: EvalReportSummary["isInternal"],
+): string => {
+    if (value === true) {
+        return "Internal VA";
+    }
+    if (value === false) {
+        return "Public VA";
+    }
+    return "Mixed/unknown";
+};
+
 export const formatReportMeta = (
     report: EvalReportSummary | EvalReportDetail,
-): string =>
-    `Generated ${formatTimestamp(report.generatedAt)} · Repeats ${formatOptionalNumber(
-        report.repeats,
-    )} · Concurrency ${formatOptionalNumber(
-        report.concurrency,
-    )} · ${formatBytes(report.sizeBytes)}`;
+): string => {
+    const parts = [
+        `Generated ${formatTimestamp(report.generatedAt)}`,
+        `Repeats ${formatOptionalNumber(report.repeats)}`,
+        `Concurrency ${formatOptionalNumber(report.concurrency)}`,
+        `${formatLocaleNumber(report.caseCount)} cases`,
+        `${formatLocaleNumber(report.runCount)} runs`,
+    ];
+    if (report.isInternal !== null) {
+        parts.push(formatEvalAudience(report.isInternal));
+    }
+    return parts.join(" · ");
+};
 
 interface EvalCaseSummary {
     caseName: string;
@@ -47,6 +56,29 @@ interface EvalCaseSummary {
     assertions: string;
 }
 
+interface EvalScoreSummary {
+    caseName: string;
+    scoreName: string;
+    min: number | undefined;
+    median: number | undefined;
+    max: number | undefined;
+}
+
+interface EvalOverallAssertionAverage {
+    name: string;
+    average: number;
+}
+
+interface EvalOverallScoreAverage {
+    name: string;
+    average: number;
+}
+
+interface EvalOverallAverages {
+    assertions: EvalOverallAssertionAverage[];
+    scores: EvalOverallScoreAverage[];
+}
+
 interface EvalCompareRow {
     caseName: string;
     left?: EvalCaseSummary;
@@ -56,14 +88,15 @@ interface EvalCompareRow {
 interface EvalModelConfig {
     role: string;
     model: string;
+    temperature: number | undefined;
+    maxTokens: number | undefined;
 }
 
-type EvalModelRoleKey = "chatbot" | "guardrails" | "search";
-
-interface EvalReportSummaryMetrics {
-    passRateAverage: number | undefined;
-    durationMedianAverage: number | undefined;
+interface EvalModelConfigSource {
+    modelConfigs: Record<string, unknown>;
 }
+
+type EvalModelRoleKey = "chatbot" | "guardrails";
 
 interface EvalModelCompareRow {
     role: string;
@@ -71,101 +104,129 @@ interface EvalModelCompareRow {
     right?: EvalModelConfig;
 }
 
-const parsePercentValue = (value: string): number | undefined => {
-    const cleaned = value.replaceAll("%", "").trim();
-    if (cleaned === "" || cleaned === "-") {
-        return undefined;
+export const numberFromUnknown = (value: unknown): number | undefined =>
+    typeof value === "number" && Number.isFinite(value) ? value : undefined;
+
+const formatPercent = (value: number | undefined): string => {
+    if (value === undefined) {
+        return "-";
     }
-    const parsed = Number.parseFloat(cleaned);
-    if (Number.isNaN(parsed)) {
-        return undefined;
+    const pct = value * 100;
+    if (Number.isInteger(pct)) {
+        return `${formatLocaleNumber(pct)}%`;
     }
-    return parsed / 100;
+    return `${formatLocaleNumber(pct, {
+        minimumFractionDigits: 1,
+        maximumFractionDigits: 1,
+    })}%`;
 };
 
-const parseDurationValue = (
-    value: string,
-): {
-    min: number | undefined;
-    median: number | undefined;
-    max: number | undefined;
-} => {
-    const parts = value
-        .split("/")
-        .map((part) => part.trim())
-        .filter((part) => part !== "");
-    if (parts.length < 3) {
-        return {
-            min: undefined,
-            median: undefined,
-            max: undefined,
-        };
+const formatAssertionSummary = (assertionPassRates: unknown): string => {
+    if (!isRecord(assertionPassRates)) {
+        return "";
     }
-    const [minValue, medianValue, maxValue] = parts.map((part) => {
-        const cleaned = part.replace(/s$/iu, "").trim();
-        const parsed = Number.parseFloat(cleaned);
-        return Number.isNaN(parsed) ? undefined : parsed;
+    return Object.entries(assertionPassRates)
+        .map(([name, value]) => {
+            const rate = numberFromUnknown(value);
+            const status = rate === 1 ? "✓" : rate === 0 ? "✗" : "~";
+            return `${status} ${name}: ${formatPercent(rate)}`;
+        })
+        .join(", ");
+};
+
+export const parseSummaryTable = (
+    report: EvalReportDetail,
+): EvalCaseSummary[] =>
+    report.cases.map((caseResult) => ({
+        caseName: caseResult.name,
+        runs: numberFromUnknown(caseResult.stats.runs),
+        passRate: numberFromUnknown(caseResult.stats.pass_rate),
+        runtimeErrorRate: numberFromUnknown(
+            caseResult.stats.runtime_error_rate,
+        ),
+        durationMin: numberFromUnknown(caseResult.stats.duration_min),
+        durationMedian: numberFromUnknown(caseResult.stats.duration_median),
+        durationMax: numberFromUnknown(caseResult.stats.duration_max),
+        assertions: formatAssertionSummary(
+            caseResult.stats.assertion_pass_rates,
+        ),
+    }));
+
+export const buildScoreSummaryRows = (
+    report: EvalReportDetail,
+): EvalScoreSummary[] =>
+    report.cases.flatMap((caseResult) => {
+        const scoreMeans = caseResult.stats.score_means;
+        if (!isRecord(scoreMeans)) {
+            return [];
+        }
+        return Object.keys(scoreMeans).map((scoreName) => ({
+            caseName: caseResult.name,
+            scoreName,
+            min: numberFromUnknown(
+                isRecord(caseResult.stats.score_mins)
+                    ? caseResult.stats.score_mins[scoreName]
+                    : undefined,
+            ),
+            median: numberFromUnknown(
+                isRecord(caseResult.stats.score_medians)
+                    ? caseResult.stats.score_medians[scoreName]
+                    : undefined,
+            ),
+            max: numberFromUnknown(
+                isRecord(caseResult.stats.score_maxs)
+                    ? caseResult.stats.score_maxs[scoreName]
+                    : undefined,
+            ),
+        }));
     });
-    return {
-        min: minValue,
-        median: medianValue,
-        max: maxValue,
-    };
-};
 
-export const parseSummaryTable = (content: string): EvalCaseSummary[] => {
-    const summaryMatch =
-        /## Summary\s*(?<summary>[\s\S]*?)(?=\n## |\n### |$)/u.exec(content);
-    const summaryText = summaryMatch?.groups?.summary;
-    if (summaryText === undefined) {
-        return [];
-    }
-    const lines = summaryText
-        .split("\n")
-        .map((line) => line.trim())
-        .filter((line) => line !== "");
-    const rows: EvalCaseSummary[] = [];
+export const buildOverallAverages = (
+    report: EvalReportDetail,
+): EvalOverallAverages => {
+    const assertionRates = new Map<string, number[]>();
+    const scoreMeans = new Map<string, number[]>();
 
-    for (const line of lines) {
-        if (line.startsWith("|")) {
-            const columns = line
-                .split("|")
-                .map((part) => part.trim())
-                .filter(
-                    (part, index, array) =>
-                        part !== "" &&
-                        index !== 0 &&
-                        index !== array.length - 1,
-                );
-            if (columns.length >= 5) {
-                const [
-                    caseName,
-                    runsValue,
-                    passRateValue,
-                    runtimeErrorValue,
-                    durationValue,
-                ] = columns;
-                const assertionsValue = columns.length > 5 ? columns[5] : "";
-                const isSeparator = caseName.replaceAll("-", "") === "";
-                if (caseName !== "Case" && !isSeparator) {
-                    const runsParsed = Number.parseInt(runsValue, 10);
-                    const duration = parseDurationValue(durationValue);
-                    rows.push({
-                        caseName,
-                        runs: Number.isNaN(runsParsed) ? undefined : runsParsed,
-                        passRate: parsePercentValue(passRateValue),
-                        runtimeErrorRate: parsePercentValue(runtimeErrorValue),
-                        durationMin: duration.min,
-                        durationMedian: duration.median,
-                        durationMax: duration.max,
-                        assertions: assertionsValue,
-                    });
+    for (const caseResult of report.cases) {
+        if (isRecord(caseResult.stats.assertion_pass_rates)) {
+            for (const [name, value] of Object.entries(
+                caseResult.stats.assertion_pass_rates,
+            )) {
+                const rate = numberFromUnknown(value);
+                if (rate !== undefined) {
+                    assertionRates.set(name, [
+                        ...(assertionRates.get(name) ?? []),
+                        rate,
+                    ]);
+                }
+            }
+        }
+        if (isRecord(caseResult.stats.score_means)) {
+            for (const [name, value] of Object.entries(
+                caseResult.stats.score_means,
+            )) {
+                const mean = numberFromUnknown(value);
+                if (mean !== undefined) {
+                    scoreMeans.set(name, [...(scoreMeans.get(name) ?? []), mean]);
                 }
             }
         }
     }
 
-    return rows;
+    return {
+        assertions: [...assertionRates.entries()].map(([name, values]) => ({
+            name,
+            average:
+                values.reduce((total, value) => total + value, 0) /
+                values.length,
+        })),
+        scores: [...scoreMeans.entries()].map(([name, values]) => ({
+            name,
+            average:
+                values.reduce((total, value) => total + value, 0) /
+                values.length,
+        })),
+    };
 };
 
 const resolveModelRoleKey = (role: string): EvalModelRoleKey | undefined => {
@@ -176,84 +237,36 @@ const resolveModelRoleKey = (role: string): EvalModelRoleKey | undefined => {
     if (normalized.includes("guardrail")) {
         return "guardrails";
     }
-    if (normalized.includes("search")) {
-        return "search";
-    }
     return undefined;
 };
 
 export const parseModelConfigurations = (
-    content: string,
-): EvalModelConfig[] => {
-    const modelMatch =
-        /## Model Configurations\s*(?<models>[\s\S]*?)(?=\n## |\n### |$)/u.exec(
-            content,
-        );
-    const modelText = modelMatch?.groups?.models;
-    if (modelText === undefined) {
-        return [];
-    }
-    const lines = modelText
-        .split("\n")
-        .map((line) => line.trim())
-        .filter((line) => line !== "");
-    const rows: EvalModelConfig[] = [];
-    for (const line of lines) {
-        if (line.startsWith("|")) {
-            const columns = line
-                .split("|")
-                .map((part) => part.trim())
-                .filter(
-                    (part, index, array) =>
-                        part !== "" &&
-                        index !== 0 &&
-                        index !== array.length - 1,
-                );
-            if (columns.length >= 2) {
-                const [roleValue, modelValue] = columns;
-                const isSeparator = roleValue.replaceAll("-", "") === "";
-                if (roleValue !== "Role" && !isSeparator) {
-                    rows.push({
-                        role: roleValue,
-                        model: modelValue.replaceAll("`", "").trim(),
-                    });
-                }
+    report: EvalModelConfigSource,
+): EvalModelConfig[] =>
+    Object.entries(report.modelConfigs)
+        .map(([role, rawConfig]) => {
+            if (!isRecord(rawConfig)) {
+                return {
+                    role,
+                    model: String(rawConfig),
+                    temperature: undefined,
+                    maxTokens: undefined,
+                } satisfies EvalModelConfig;
             }
-        }
-    }
-    return rows;
-};
-
-export const buildReportSummaryMetrics = (
-    content: string,
-): EvalReportSummaryMetrics => {
-    const summaries = parseSummaryTable(content);
-    const passRates = summaries
-        .map((summary) => summary.passRate)
-        .filter((value): value is number => value !== undefined);
-    const durationMedians = summaries
-        .map((summary) => summary.durationMedian)
-        .filter((value): value is number => value !== undefined);
-    const passRateAverage =
-        passRates.length > 0
-            ? passRates.reduce((total, value) => total + value, 0) /
-              passRates.length
-            : undefined;
-    const durationMedianAverage =
-        durationMedians.length > 0
-            ? durationMedians.reduce((total, value) => total + value, 0) /
-              durationMedians.length
-            : undefined;
-    return {
-        passRateAverage,
-        durationMedianAverage,
-    };
-};
+            const modelValue = rawConfig.model;
+            return {
+                role,
+                model: typeof modelValue === "string" ? modelValue : "",
+                temperature: numberFromUnknown(rawConfig.temperature),
+                maxTokens: numberFromUnknown(rawConfig.max_tokens),
+            } satisfies EvalModelConfig;
+        })
+        .toSorted((left, right) => left.role.localeCompare(right.role));
 
 export const buildModelRoleMap = (
-    content: string,
+    report: EvalModelConfigSource,
 ): Partial<Record<EvalModelRoleKey, string>> => {
-    const modelConfigs = parseModelConfigurations(content);
+    const modelConfigs = parseModelConfigurations(report);
     const roles: Partial<Record<EvalModelRoleKey, string>> = {};
     for (const config of modelConfigs) {
         const roleKey = resolveModelRoleKey(config.role);
@@ -306,23 +319,17 @@ export const buildModelCompareRows = (
         }));
 };
 
-export const formatPercentValue = (value: number | undefined): string => {
-    if (value === undefined) {
-        return "-";
-    }
-    const pct = value * 100;
-    if (Number.isInteger(pct)) {
-        return `${pct}%`;
-    }
-    return `${pct.toFixed(1)}%`;
-};
+export const formatPercentValue = (value: number | undefined): string =>
+    formatPercent(value);
 
 export const formatDeltaPercent = (value: number | undefined): string => {
     if (value === undefined) {
         return "-";
     }
     const pct = value * 100;
-    const formatted = Number.isInteger(pct) ? pct.toString() : pct.toFixed(1);
+    const formatted = formatLocaleNumber(pct, {
+        maximumFractionDigits: Number.isInteger(pct) ? 0 : 1,
+    });
     const sign = pct > 0 ? "+" : "";
     return `${sign}${formatted}%`;
 };
@@ -331,7 +338,10 @@ export const formatDurationValue = (value: number | undefined): string => {
     if (value === undefined) {
         return "-";
     }
-    return `${value.toFixed(2)}s`;
+    return `${formatLocaleNumber(value, {
+        minimumFractionDigits: 2,
+        maximumFractionDigits: 2,
+    })}s`;
 };
 
 export const formatDeltaDuration = (value: number | undefined): string => {
@@ -339,7 +349,10 @@ export const formatDeltaDuration = (value: number | undefined): string => {
         return "-";
     }
     const sign = value > 0 ? "+" : "";
-    return `${sign}${value.toFixed(2)}s`;
+    return `${sign}${formatLocaleNumber(value, {
+        minimumFractionDigits: 2,
+        maximumFractionDigits: 2,
+    })}s`;
 };
 
 export const getDeltaClassName = (

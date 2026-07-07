@@ -168,7 +168,9 @@ export const SpanSection = memo(
         return (
             <section
                 className={`space-y-4 rounded-lg border px-4 py-4 ${
-                    isSelected ? "border-primary/40 bg-primary/5" : "bg-card"
+                    isSelected
+                        ? "border-primary bg-primary/15 ring-primary/30 shadow-sm ring-1"
+                        : "bg-card"
                 }`}
                 data-span-anchor={anchorId}
             >
@@ -228,6 +230,13 @@ export const SpanSection = memo(
                         </div>
                     ),
                     "space-y-2",
+                )}
+                {renderBlockSection(
+                    "System instructions",
+                    model.systemInstructions !== undefined &&
+                        model.systemInstructions.trim() !== "" ? (
+                        <ContentValue value={model.systemInstructions} />
+                    ) : undefined,
                 )}
                 {renderBlockSection(
                     "Prompt",

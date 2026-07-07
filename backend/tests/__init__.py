@@ -1,3 +1,3 @@
-from app.utils import configure_logfire
+from app.utils import configure_observability
 
-configure_logfire()
+configure_observability()

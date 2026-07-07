@@ -4,7 +4,7 @@ import { logger } from "@va/shared/lib/logger";
 import type { ChatMessage } from "@va/shared/types";
 import { nanoid } from "nanoid";
 
-const CHAT_ENDPOINT = "/messages/public";
+const CHAT_ENDPOINT = "/chat/public/message";
 
 interface ChatResponse {
     conversation_id: string;
@@ -12,6 +12,8 @@ interface ChatResponse {
     assistant_message_id: string;
     assistant_message: string;
     parent_message_id?: string;
+    guardrails_blocked?: boolean;
+    guardrails_blocked_message?: string | null;
 }
 
 interface SendChatCallbacks {
@@ -69,7 +71,12 @@ export const sendChatMessage = async ({
         const assistantMessage: ChatMessage = {
             id: data.assistant_message_id || `assistant-${nanoid(7)}`,
             role: "assistant",
-            content: data.assistant_message,
+            content:
+                data.guardrails_blocked === true &&
+                typeof data.guardrails_blocked_message === "string" &&
+                data.guardrails_blocked_message !== ""
+                    ? data.guardrails_blocked_message
+                    : data.assistant_message,
             timestamp: Date.now(),
         };
 

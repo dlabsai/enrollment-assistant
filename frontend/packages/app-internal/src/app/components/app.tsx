@@ -5,55 +5,92 @@ import {
 } from "@va/shared/components/ui/sidebar";
 import { Toaster } from "@va/shared/components/ui/sonner";
 import { UNIVERSITY_NAME } from "@va/shared/config";
+import { setDocumentTitle } from "@va/shared/lib/document-title";
 import { logger } from "@va/shared/lib/logger";
-import { type JSX, useEffect, useMemo, useState } from "react";
+import { type JSX, useCallback, useEffect, useMemo, useState } from "react";
 import { ErrorBoundary, type FallbackProps } from "react-error-boundary";
+import { toast } from "sonner";
 
 import { AuthPage } from "../../auth/components/auth-page";
 import { useAuth } from "../../auth/contexts/auth-context";
 import { AuthProvider } from "../../auth/contexts/auth-provider";
-import { PageError, PageLoading } from "../../components/page-state";
+import type { UserProfile } from "../../auth/types";
+import { LoadingState, PageError } from "../../components/page-state";
 import { ThemeProvider } from "../../lib/theme-provider";
-import { AppSidebar, type AppView } from "./app-sidebar";
-
-const appViewLookup: Record<AppView, true> = {
-    chat: true,
-    chats: true,
-    usage: true,
-    traces: true,
-    analytics: true,
-    "public-analytics": true,
-    evals: true,
-    instructions: true,
-    settings: true,
-};
+import { type AppView, isAppView } from "../feature-flags";
+import { canAccessView, getDefaultAccessibleView } from "../view-access";
+import { AppSidebar } from "./app-sidebar";
 
 const appViewTitle: Record<AppView, string> = {
     chat: "Chat",
     chats: "Chats",
+    messages: "Messages",
+    feedback: "Feedback",
+    investigate: "Investigate",
+    investigations: "Investigations",
     usage: "Usage",
     traces: "Traces",
     analytics: "Chat Analytics",
     "public-analytics": "Public Analytics",
-    evals: "Evals",
+    evals: "Eval Runner",
+    "eval-cases": "Eval Cases",
+    "eval-reports": "Eval Reports",
+    "eval-traces": "Eval Traces",
     instructions: "Instructions",
+    rag: "KB Builder",
+    "rag-jobs": "KB Builder Jobs",
+    "rag-viewer": "KB Viewer",
+    "rag-exclusions": "KB Controls",
+    rbac: "Access Controls",
     settings: "Settings",
 };
 
-const isAppView = (value: string): value is AppView =>
-    Object.hasOwn(appViewLookup, value);
-
-const resolveView = (pathname: string, isAdmin: boolean): AppView => {
+const getRequestedView = (pathname: string): AppView | undefined => {
     const normalized = pathname.replace(/^\/+/u, "");
-    const resolved = normalized === "" ? "chat" : normalized;
-    if (resolved.startsWith("traces/")) {
+    if (normalized === "") {
+        return undefined;
+    }
+    if (normalized.startsWith("chats/")) {
+        return "chats";
+    }
+    if (normalized.startsWith("investigations/")) {
+        return "investigations";
+    }
+    if (normalized.startsWith("traces/")) {
         return "traces";
     }
-    if (!isAppView(resolved)) {
-        return "chat";
+    if (normalized.startsWith("eval-traces/")) {
+        return "eval-traces";
     }
-    if (!isAdmin && resolved !== "chat") {
-        return "chat";
+    return isAppView(normalized) ? normalized : undefined;
+};
+
+const resolveView = (
+    pathname: string,
+    user: UserProfile | undefined,
+): AppView => {
+    const defaultView = getDefaultAccessibleView(user);
+    const normalized = pathname.replace(/^\/+/u, "");
+    const resolved = normalized === "" ? defaultView : normalized;
+    if (resolved.startsWith("chats/")) {
+        return canAccessView("chats", user) ? "chats" : defaultView;
+    }
+    if (resolved.startsWith("investigations/")) {
+        return canAccessView("investigations", user)
+            ? "investigations"
+            : defaultView;
+    }
+    if (resolved.startsWith("traces/")) {
+        return canAccessView("traces", user) ? "traces" : defaultView;
+    }
+    if (resolved.startsWith("eval-traces/")) {
+        return canAccessView("eval-traces", user) ? "eval-traces" : defaultView;
+    }
+    if (!isAppView(resolved)) {
+        return defaultView;
+    }
+    if (!canAccessView(resolved, user)) {
+        return defaultView;
     }
     return resolved;
 };
@@ -78,30 +115,39 @@ const AppContent = (): JSX.Element => {
     const [sidebarOpen, setSidebarOpen] = useState(
         () => window.localStorage.getItem("internal-sidebar-open") === "true",
     );
-    const isAdmin = user?.role === "admin" || user?.role === "dev";
     const navigate = useNavigate();
     const { pathname } = useLocation();
 
     const activeView = useMemo(
-        () => resolveView(pathname, isAdmin),
-        [isAdmin, pathname],
+        () => resolveView(pathname, user),
+        [pathname, user],
+    );
+    const requestedView = useMemo(() => getRequestedView(pathname), [pathname]);
+    const redirectView = useMemo(
+        () =>
+            user !== undefined &&
+            requestedView !== undefined &&
+            !canAccessView(requestedView, user)
+                ? getDefaultAccessibleView(user)
+                : void 0,
+        [requestedView, user],
     );
 
     useEffect(() => {
-        const baseTitle = `${UNIVERSITY_NAME} Enrollment Agent`;
+        const baseTitle = `${UNIVERSITY_NAME} Enrollment Assistant`;
         if (!user) {
-            document.title = baseTitle;
+            setDocumentTitle(baseTitle);
             return;
         }
         const viewTitle = appViewTitle[activeView];
-        document.title = `${viewTitle} · ${baseTitle}`;
+        setDocumentTitle(`${viewTitle} · ${baseTitle}`);
     }, [activeView, user]);
 
     useEffect(() => {
         if (!user) {
             return;
         }
-        if (!isAdmin && activeView !== "chat") {
+        if (redirectView !== undefined) {
             void navigate({
                 replace: true,
                 search: {
@@ -110,13 +156,28 @@ const AppContent = (): JSX.Element => {
                     userId: undefined,
                     userEmail: undefined,
                 },
-                to: "/chat",
+                to: `/${redirectView}`,
             });
         }
-    }, [activeView, isAdmin, navigate, user]);
+    }, [navigate, redirectView, user]);
+
+    const handleLogout = useCallback(async (): Promise<void> => {
+        try {
+            await logout();
+        } catch (error) {
+            logger.error("Failed to log out", error);
+            const message =
+                error instanceof Error && error.message !== ""
+                    ? error.message
+                    : "Failed to log out. Please try again.";
+            toast.error(message);
+        }
+    }, [logout]);
 
     const content = authLoading ? (
-        <PageLoading className="h-screen" />
+        <LoadingState className="h-screen" />
+    ) : user && redirectView !== undefined ? (
+        <LoadingState className="h-screen" />
     ) : user ? (
         <SidebarProvider
             className="h-svh min-h-0 overflow-hidden"
@@ -131,8 +192,7 @@ const AppContent = (): JSX.Element => {
         >
             <AppSidebar
                 activeView={activeView}
-                isAdmin={isAdmin}
-                onLogout={logout}
+                onLogout={handleLogout}
                 onViewChange={(view) => {
                     void navigate({ to: `/${view}` });
                 }}

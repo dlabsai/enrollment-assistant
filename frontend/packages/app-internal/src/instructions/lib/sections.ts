@@ -1,6 +1,8 @@
-import type { ChatbotVersionScope, PromptFile } from "../types";
+import type { PromptFile, PromptSetScope } from "../types";
 
 export type PromptPlatform = "internal" | "public";
+
+export const INTERNAL_PROMPT_PLATFORM: PromptPlatform = "internal";
 
 export interface AdminSection {
     id: string;
@@ -9,15 +11,16 @@ export interface AdminSection {
     templates: string[];
 }
 
-const ASSISTANT_TEMPLATES = [
-    "search_agent",
-    "chatbot_agent",
-    "guardrails_agent",
-] as const;
+const ASSISTANT_TEMPLATES = ["chatbot_agent", "guardrails_agent"] as const;
 
 const ASSISTANT_TEMPLATE_SET = new Set<string>(ASSISTANT_TEMPLATES);
 
 const HELPERS = [
+    {
+        key: "investigation",
+        label: "Investigation",
+        template: "investigation_agent",
+    },
     { key: "summary", label: "Summary", template: "summary_agent" },
     { key: "title", label: "Title", template: "title_agent" },
     {
@@ -25,64 +28,54 @@ const HELPERS = [
         label: "Title Transcript",
         template: "title_agent_transcript",
     },
-    {
-        key: "rfi-extraction",
-        label: "RFI Extraction",
-        template: "rfi_extraction_agent",
-    },
+    { key: "grounding", label: "Grounding", template: "grounding_agent" },
 ] as const;
 
-const SECTION_SCOPE_MAP: Record<string, ChatbotVersionScope> = {
+const SECTION_SCOPE_MAP: Record<string, PromptSetScope> = {
     assistant: "assistant",
+    investigation: "investigation",
     summary: "summary",
     title: "title",
     "title-transcript": "title_transcript",
-    "rfi-extraction": "rfi_extraction",
+    grounding: "grounding",
 };
 
-const SCOPE_SECTION_KEY_MAP: Record<ChatbotVersionScope, string> = {
+const SCOPE_SECTION_KEY_MAP: Record<PromptSetScope, string> = {
     assistant: "assistant",
+    investigation: "investigation",
     summary: "summary",
     title: "title",
     title_transcript: "title-transcript",
-    rfi_extraction: "rfi-extraction",
+    grounding: "grounding",
 };
 
-const HELPER_TEMPLATE_BY_SCOPE: Record<
-    ChatbotVersionScope,
-    string | undefined
-> = {
+const HELPER_TEMPLATE_BY_SCOPE: Record<PromptSetScope, string | undefined> = {
     assistant: undefined,
+    investigation: "investigation_agent",
     summary: "summary_agent",
     title: "title_agent",
     title_transcript: "title_agent_transcript",
-    rfi_extraction: "rfi_extraction_agent",
+    grounding: "grounding_agent",
 };
 
 const TEMPLATE_LABELS: Record<string, string> = {
-    search_agent: "Search",
     chatbot_agent: "Chatbot",
     guardrails_agent: "Guardrails",
+    investigation_agent: "Investigation",
     summary_agent: "Summary",
-    rfi_extraction_agent: "RFI Extraction",
+    grounding_agent: "Grounding",
     title_agent: "Title",
     title_agent_transcript: "Title Transcript",
 };
 
 const DEFAULT_TEMPLATE_PRIORITY = [
-    "search_agent_internal.j2",
     "chatbot_agent_internal.j2",
     "guardrails_agent_internal.j2",
-    "search_agent.j2",
-    "chatbot_agent.j2",
-    "guardrails_agent.j2",
+    "investigation_agent_internal.j2",
     "summary_agent_internal.j2",
-    "summary_agent.j2",
     "title_agent_internal.j2",
-    "title_agent.j2",
     "title_agent_transcript_internal.j2",
-    "title_agent_transcript.j2",
-    "rfi_extraction_agent.j2",
+    "grounding_agent_internal.j2",
 ];
 
 const getFilenameForBase = (base: string, platform: PromptPlatform): string =>
@@ -106,7 +99,7 @@ const createSectionId = (key: string, platform: PromptPlatform): string =>
 
 export const getScopeForSectionId = (
     sectionId?: string,
-): ChatbotVersionScope | undefined => {
+): PromptSetScope | undefined => {
     if (sectionId === undefined || sectionId === "") {
         return undefined;
     }
@@ -115,7 +108,7 @@ export const getScopeForSectionId = (
 };
 
 export const getSectionIdForScope = (
-    scope: ChatbotVersionScope,
+    scope: PromptSetScope,
     platform: PromptPlatform,
 ): string => createSectionId(SCOPE_SECTION_KEY_MAP[scope], platform);
 
@@ -135,7 +128,7 @@ export const getPlatformForSectionId = (
 };
 
 export const getTemplateFilenamesForScope = (
-    scope: ChatbotVersionScope,
+    scope: PromptSetScope,
     platform: PromptPlatform,
 ): string[] => {
     if (scope === "assistant") {
@@ -188,10 +181,8 @@ export const buildSections = (diskTemplates: PromptFile[]): AdminSection[] => {
         }
     };
 
-    addAssistantSection("internal");
-    addAssistantSection("public");
-    addHelperSections("internal");
-    addHelperSections("public");
+    addAssistantSection(INTERNAL_PROMPT_PLATFORM);
+    addHelperSections(INTERNAL_PROMPT_PLATFORM);
 
     return sections;
 };

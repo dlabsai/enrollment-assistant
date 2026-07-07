@@ -1,0 +1,212 @@
+[
+    {
+        "id": "1001",
+        "title": "Academic Calendar",
+        "url": "https://demo-university.example.edu/academic-calendar/",
+        "markdown_content": "# Academic Calendar\n\nDemo University uses different academic calendars by program and format. Students should confirm the start date connected to their program before planning work schedules, financial aid, or transcript deadlines.\n\n## Upcoming starts\n\n- Online undergraduate and graduate programs: January 12, 2026\n- Campus undergraduate semester: January 20, 2026\n- Selected hybrid health and counseling programs: January 26, 2026\n- Late spring online term: March 9, 2026\n\n## Planning reminders\n\nTranscript review, financial-aid documents, and benefit approvals should be started before the intended term. A student may need a later start if required documents are still outstanding.\n",
+        "created": "2026-01-15T00:00:00Z",
+        "updated": "2026-01-15T00:00:00Z",
+        "excerpt": "Demo University uses different academic calendars by program and format. Students should confirm the start date connected to their program before planning work schedules, financial aid, or transcript deadlines.",
+        "breadcrumbs": [
+            {
+                "title": "Home",
+                "url": "https://demo-university.example.edu"
+            }
+        ]
+    },
+    {
+        "id": "1002",
+        "title": "Academic Programs",
+        "url": "https://demo-university.example.edu/academic-programs/",
+        "markdown_content": "# Academic Programs\n\nDemo University offers focused academic programs with practical coursework, defined outcomes, and advising support. Program pages describe the student-facing overview; the catalog remains the official source for curriculum requirements.\n\n## Programs\n\n- [Accounting, BS](/programs/accounting-bs/)\n- [Artificial Intelligence, BS](/programs/artificial-intelligence-bs/)\n- [Artificial Intelligence, MS](/programs/artificial-intelligence-ms/)\n- [Business Administration, BS](/programs/business-administration-bs/)\n- [Business Administration, MBA](/programs/mba/)\n- [Clinical Mental Health Counseling, MS](/programs/clinical-mental-health-counseling-ms/)\n- [Cybersecurity, BS](/programs/cybersecurity-bs/)\n- [Cybersecurity, MS](/programs/cybersecurity-ms/)\n- [Data Analytics Graduate Certificate](/programs/data-analytics-graduate-certificate/)\n- [Digital Marketing, BS](/programs/digital-marketing-bs/)\n- [Digital Marketing, MS](/programs/digital-marketing-ms/)\n- [Graphic Design, BFA](/programs/graphic-design-bfa/)\n- [Human Services, BS](/programs/human-services-bs/)\n- [Public Health, BS](/programs/public-health-bs/)\n- [Public Health, MPH](/programs/public-health-mph/)\n- [Software Engineering, BS](/programs/software-engineering-bs/)\n- [Software Engineering, MS](/programs/software-engineering-ms/)\n- [Teaching English Language Learners Graduate Certificate](/programs/teaching-english-language-learners-graduate-certificate/)\n\n## Choosing a program\n\nA strong program conversation starts with goals, prior credit, learning format, and timeline. Related programs may share courses but lead to different academic expectations.\n",
+        "created": "2026-01-15T00:00:00Z",
+        "updated": "2026-01-15T00:00:00Z",
+        "excerpt": "Demo University offers focused academic programs with practical coursework, defined outcomes, and advising support. Program pages describe the student-facing overview; the catalog remains the official source for curriculum requirements.",
+        "breadcrumbs": [
+            {
+                "title": "Home",
+                "url": "https://demo-university.example.edu"
+            }
+        ]
+    },
+    {
+        "id": "1003",
+        "title": "Academics",
+        "url": "https://demo-university.example.edu/academics/",
+        "markdown_content": "# Academics\n\nDemo University programs emphasize applied learning, clear communication, and responsible decision-making. Students should expect weekly engagement, written assignments, projects, discussions, and assessments tied to program outcomes.\n\n## Academic levels\n\n- Associate and bachelor's degrees\n- Graduate certificates\n- Master's degrees\n\n## Learning expectations\n\nOnline courses are flexible but not self-paced. Students complete work within weekly modules and should plan consistent study time. Campus and hybrid courses add scheduled meetings, labs, studios, or fieldwork when required by the program.\n\n## Academic support\n\nStudents can work with academic advising, tutoring, library services, accessibility services, and technology support. Admissions can explain the handoff, but enrolled students work with the student-support team assigned to their program.\n",
+        "created": "2026-01-15T00:00:00Z",
+        "updated": "2026-01-15T00:00:00Z",
+        "excerpt": "Demo University programs emphasize applied learning, clear communication, and responsible decision-making. Students should expect weekly engagement, written assignments, projects, discussions, and assessments tied to program outcomes.",
+        "breadcrumbs": [
+            {
+                "title": "Home",
+                "url": "https://demo-university.example.edu"
+            }
+        ]
+    },
+    {
+        "id": "1004",
+        "title": "Accessibility and Technology",
+        "url": "https://demo-university.example.edu/accessibility-and-technology/",
+        "markdown_content": "# Accessibility and Technology\n\nStudents need dependable technology access and a clear path for accommodation requests.\n\n## Technology expectations\n\nMost courses require regular access to a laptop or desktop computer, reliable internet, word-processing tools, and the university learning platform. A phone alone is usually not enough for sustained coursework.\n\n## Accessibility services\n\nStudents who need academic accommodations should contact Accessibility Services. Admissions can explain how to request a connection, but accommodation decisions are handled by the accessibility team after appropriate documentation and review.\n\n## Help desk\n\nStudents who cannot log in, access a course, or use university systems should contact the Help Desk rather than an Admissions Advisor.\n",
+        "created": "2026-01-15T00:00:00Z",
+        "updated": "2026-01-15T00:00:00Z",
+        "excerpt": "Students need dependable technology access and a clear path for accommodation requests.",
+        "breadcrumbs": [
+            {
+                "title": "Home",
+                "url": "https://demo-university.example.edu"
+            }
+        ]
+    },
+    {
+        "id": "1005",
+        "title": "Accreditation and Consumer Information",
+        "url": "https://demo-university.example.edu/accreditation-and-consumer-information/",
+        "markdown_content": "# Accreditation and Consumer Information\n\nDemo University maintains institutional accreditation and publishes consumer information for students and the public. This demo page represents the kind of disclosure page a private university would maintain.\n\n## Where to verify details\n\nStudents should review this page for current accreditation, state authorization, complaint-resolution, and consumer-information notices. Program-specific approvals or licensure disclosures may be listed separately when they apply.\n\n## Admissions guidance\n\nAdmissions Advisors may point students to this page, but they should not improvise accreditation, approval, or licensure claims beyond the published information.\n",
+        "created": "2026-01-15T00:00:00Z",
+        "updated": "2026-01-15T00:00:00Z",
+        "excerpt": "Demo University maintains institutional accreditation and publishes consumer information for students and the public. This demo page represents the kind of disclosure page a private university would maintain.",
+        "breadcrumbs": [
+            {
+                "title": "Home",
+                "url": "https://demo-university.example.edu"
+            }
+        ]
+    },
+    {
+        "id": "1006",
+        "title": "Admissions",
+        "url": "https://demo-university.example.edu/admissions/",
+        "markdown_content": "# Admissions\n\nAdmissions at Demo University is consultative. The goal is to help prospective students understand whether a program, learning format, and start date fit their academic background and responsibilities outside school.\n\n## How the process works\n\n1. Share your program interest and preferred format.\n2. Submit an application when you are ready to be reviewed.\n3. Send official transcripts from each college or university previously attended.\n4. Review transfer-credit, prerequisite, and admission-file questions with an Admissions Advisor.\n5. Confirm financial planning and student-support next steps before registration.\n\n## What Admissions can help with\n\n- Comparing online, campus, and hybrid options\n- Understanding transfer-credit review\n- Identifying documents needed for an admission file\n- Connecting military-affiliated students with benefits support\n- Explaining who handles financial aid, billing, accessibility, and technology questions\n\n## Application link\n\nStudents who are ready to apply should use https://apply.demo-university.example.edu/.\n\n## Transcript reminder\n\nOfficial transcripts should be sent to transcripts@demo-university.example.edu. Unofficial transcripts can help with early advising, but official transcripts are required before final transfer-credit decisions are made.\n",
+        "created": "2026-01-15T00:00:00Z",
+        "updated": "2026-01-15T00:00:00Z",
+        "excerpt": "Admissions at Demo University is consultative. The goal is to help prospective students understand whether a program, learning format, and start date fit their academic background and responsibilities outside school.",
+        "breadcrumbs": [
+            {
+                "title": "Home",
+                "url": "https://demo-university.example.edu"
+            }
+        ]
+    },
+    {
+        "id": "1007",
+        "title": "Career Development",
+        "url": "https://demo-university.example.edu/career-development/",
+        "markdown_content": "# Career Development\n\nCareer development at Demo University focuses on preparation, reflection, and practical communication. The university supports career planning but does not guarantee employment.\n\n## Services students may use\n\n- Resume and cover-letter feedback\n- Interview preparation\n- Career exploration resources\n- Networking and employer-information events\n- Guidance on using labor-market research tools\n\n## Important boundary\n\nCareer staff can help students prepare and explore options. They do not promise job placement, salaries, promotions, or licensing outcomes.\n",
+        "created": "2026-01-15T00:00:00Z",
+        "updated": "2026-01-15T00:00:00Z",
+        "excerpt": "Career development at Demo University focuses on preparation, reflection, and practical communication. The university supports career planning but does not guarantee employment.",
+        "breadcrumbs": [
+            {
+                "title": "Home",
+                "url": "https://demo-university.example.edu"
+            }
+        ]
+    },
+    {
+        "id": "1008",
+        "title": "Contact",
+        "url": "https://demo-university.example.edu/contact/",
+        "markdown_content": "# Contact\n\nStudents can contact Demo University Admissions through the website contact form, scheduled advising appointments, or the main Admissions line listed in the student portal.\n\n## Before contacting us\n\nIt helps to know the student's program interest, preferred learning format, prior college experience, and target start date. Those details let Admissions route the question quickly.\n",
+        "created": "2026-01-15T00:00:00Z",
+        "updated": "2026-01-15T00:00:00Z",
+        "excerpt": "Students can contact Demo University Admissions through the website contact form, scheduled advising appointments, or the main Admissions line listed in the student portal.",
+        "breadcrumbs": [
+            {
+                "title": "Home",
+                "url": "https://demo-university.example.edu"
+            }
+        ]
+    },
+    {
+        "id": "1009",
+        "title": "Financial Aid",
+        "url": "https://demo-university.example.edu/financial-aid/",
+        "markdown_content": "# Financial Aid\n\nFinancial planning is part of enrollment planning. Demo University staff can explain process, timing, and offices involved, but eligibility and award decisions are made only after the required review is complete.\n\n## Common funding topics\n\n- FAFSA and federal-aid steps\n- Employer tuition assistance\n- Military and veteran education benefits\n- Payment arrangements for balances not covered by aid\n- Documentation requests and verification timelines\n\n## What staff can explain\n\nAdmissions Advisors can help students understand the order of steps and connect them with Financial Aid or Student Accounts. Exact aid eligibility, award amounts, billing balances, and refund timing must be confirmed by the office that owns that review.\n\n## Planning note\n\nStudents should not wait until the first week of class to ask funding questions. Financial documents, benefit approvals, and payment arrangements can take time.\n",
+        "created": "2026-01-15T00:00:00Z",
+        "updated": "2026-01-15T00:00:00Z",
+        "excerpt": "Financial planning is part of enrollment planning. Demo University staff can explain process, timing, and offices involved, but eligibility and award decisions are made only after the required review is complete.",
+        "breadcrumbs": [
+            {
+                "title": "Home",
+                "url": "https://demo-university.example.edu"
+            }
+        ]
+    },
+    {
+        "id": "1010",
+        "title": "Home",
+        "url": "https://demo-university.example.edu/",
+        "markdown_content": "# Home\n\nDemo University is a private university built for students who need clear academic pathways and practical support. Students come to us directly from high school, after military service, while working full time, after earning transfer credit elsewhere, or when returning to school after a long pause.\n\n## What we do well\n\n- Undergraduate and graduate programs in business, technology, health and human services, education, public service, and design\n- Online, campus, and selected hybrid learning formats\n- Transfer-credit review before enrollment decisions are finalized\n- Advising that helps students compare programs, formats, and start dates\n- Student support that continues after the first class begins\n\n## A practical university experience\n\nOur programs are designed around writing, applied projects, data-informed decision-making, ethical practice, and communication. Students should expect faculty interaction, weekly coursework, and structured deadlines rather than self-paced independent study.\n\n## Start with the right question\n\nThe best first step is to identify the student's goal, prior college experience, preferred learning format, and timeline. From there, an Admissions Advisor can help compare realistic options.\n",
+        "created": "2026-01-15T00:00:00Z",
+        "updated": "2026-01-15T00:00:00Z",
+        "excerpt": "Demo University is a private university built for students who need clear academic pathways and practical support. Students come to us directly from high school, after military service, while working full time, after earning transfer credit elsewhere, or when returning to school after a long pause.",
+        "breadcrumbs": [
+            {
+                "title": "Home",
+                "url": "https://demo-university.example.edu"
+            }
+        ]
+    },
+    {
+        "id": "1011",
+        "title": "Learning Formats",
+        "url": "https://demo-university.example.edu/learning-formats/",
+        "markdown_content": "# Learning Formats\n\nDemo University offers online, campus, and selected hybrid formats. Format availability varies by program.\n\n## Online\n\nOnline courses use weekly modules with deadlines, discussion, instructor feedback, and applied assignments. They are designed for students who need location flexibility but can commit regular time each week.\n\n## Campus\n\nCampus programs include scheduled class meetings and access to campus services. Some programs may include studios, labs, community projects, or other in-person learning activities.\n\n## Hybrid\n\nHybrid programs combine online coursework with scheduled in-person sessions or fieldwork. Students should review travel and scheduling expectations before choosing a hybrid option.\n\n## Format questions\n\nIf a student is deciding between formats, Admissions should ask about work schedule, commuting distance, technology access, and preferred interaction style.\n",
+        "created": "2026-01-15T00:00:00Z",
+        "updated": "2026-01-15T00:00:00Z",
+        "excerpt": "Demo University offers online, campus, and selected hybrid formats. Format availability varies by program.",
+        "breadcrumbs": [
+            {
+                "title": "Home",
+                "url": "https://demo-university.example.edu"
+            }
+        ]
+    },
+    {
+        "id": "1012",
+        "title": "Military and Veteran Students",
+        "url": "https://demo-university.example.edu/military-and-veteran-students/",
+        "markdown_content": "# Military and Veteran Students\n\nDemo University supports military-affiliated students, veterans, spouses, and dependents as they compare programs and benefits processes.\n\n## Helpful records\n\n- Joint Services Transcript or other military education records when available\n- Prior college transcripts\n- Benefit documents or sponsor authorization when applicable\n- Program interest and expected start date\n\n## Planning support\n\nMilitary-affiliated students should speak with Admissions early so transcript review, benefit routing, and schedule planning happen in the right order. Benefit eligibility and payment timing must be confirmed through the appropriate benefits office or agency.\n",
+        "created": "2026-01-15T00:00:00Z",
+        "updated": "2026-01-15T00:00:00Z",
+        "excerpt": "Demo University supports military-affiliated students, veterans, spouses, and dependents as they compare programs and benefits processes.",
+        "breadcrumbs": [
+            {
+                "title": "Home",
+                "url": "https://demo-university.example.edu"
+            }
+        ]
+    },
+    {
+        "id": "1013",
+        "title": "Student Life",
+        "url": "https://demo-university.example.edu/student-life/",
+        "markdown_content": "# Student Life\n\nStudent life at Demo University includes both campus and online communities. Students can participate in academic workshops, student organizations, wellness programming, and career-development events.\n\n## Student support\n\n- Academic advising\n- Tutoring and library research help\n- Wellness and counseling referrals\n- Accessibility services\n- Technology support\n- Career development\n\n## Online connection\n\nOnline students can attend virtual events, join interest groups, and work with support teams through scheduled appointments and the student portal.\n",
+        "created": "2026-01-15T00:00:00Z",
+        "updated": "2026-01-15T00:00:00Z",
+        "excerpt": "Student life at Demo University includes both campus and online communities. Students can participate in academic workshops, student organizations, wellness programming, and career-development events.",
+        "breadcrumbs": [
+            {
+                "title": "Home",
+                "url": "https://demo-university.example.edu"
+            }
+        ]
+    },
+    {
+        "id": "1014",
+        "title": "Transfer Students",
+        "url": "https://demo-university.example.edu/transfer-students/",
+        "markdown_content": "# Transfer Students\n\nMany Demo University students bring prior college credit. Transfer review helps determine how completed coursework may apply to a selected program.\n\n## What to send\n\n- Official transcripts from every college or university previously attended\n- Unofficial transcripts or grade reports for early advising, when official records are not ready yet\n- Military or workplace-learning records when relevant to the student's background\n- Course descriptions or syllabi only when the records team asks for more detail\n\n## What to expect\n\nTransfer-credit decisions depend on the selected program, course level, grades, accreditation of the sending institution, and whether the prior coursework fits current requirements. A preliminary conversation can help estimate possibilities, but the official evaluation is what determines applied credit.\n\n## Timing\n\nStudents should request transcripts early. Incomplete or inconsistent records can delay registration, financial-aid packaging, or degree planning.\n",
+        "created": "2026-01-15T00:00:00Z",
+        "updated": "2026-01-15T00:00:00Z",
+        "excerpt": "Many Demo University students bring prior college credit. Transfer review helps determine how completed coursework may apply to a selected program.",
+        "breadcrumbs": [
+            {
+                "title": "Home",
+                "url": "https://demo-university.example.edu"
+            }
+        ]
+    }
+]

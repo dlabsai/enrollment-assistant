@@ -21,6 +21,7 @@ import {
     formatTimeSeriesTooltipLabel,
     isHourlyTimeRange,
 } from "../../lib/time-series";
+import { formatUsageCost } from "../lib/formatters";
 import type { UsageDaily } from "../types";
 
 interface EmbeddingCostChartProps {
@@ -34,15 +35,6 @@ const chartConfig = {
         color: "var(--chart-5)",
     },
 } satisfies ChartConfig;
-
-const formatCost = (cost: number): string => {
-    if (cost > 0 && cost < 0.0001) {
-        return "<$0.0001";
-    }
-    return cost < 0.01 && cost > 0
-        ? `$${cost.toFixed(4)}`
-        : `$${cost.toFixed(2)}`;
-};
 
 export const EmbeddingCostChart = ({
     data,
@@ -99,7 +91,7 @@ export const EmbeddingCostChart = ({
                         />
                         <YAxis
                             axisLine={false}
-                            tickFormatter={(value: number) => formatCost(value)}
+                            tickFormatter={(value: number) => formatUsageCost(value)}
                             tickLine={false}
                             width={64}
                         />
@@ -108,13 +100,16 @@ export const EmbeddingCostChart = ({
                                 <ChartTooltipContent
                                     formatter={(value) =>
                                         typeof value === "number"
-                                            ? formatCost(value)
+                                            ? formatUsageCost(value)
                                             : value
                                     }
                                     indicator="line"
-                                    labelFormatter={(value: string) =>
+                                    labelFormatter={(value) =>
                                         formatTimeSeriesTooltipLabel(
-                                            value,
+                                            typeof value === "string" ||
+                                                typeof value === "number"
+                                                ? String(value)
+                                                : "",
                                             timeRange,
                                         )
                                     }

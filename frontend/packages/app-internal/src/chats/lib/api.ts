@@ -14,6 +14,7 @@ export const fetchChatUsers = async (
         search?: string;
         platform?: "internal" | "public";
         limit?: number;
+        kind?: "chat" | "investigation";
     },
 ): Promise<ChatUserOption[]> => {
     const query = new URLSearchParams();
@@ -22,6 +23,9 @@ export const fetchChatUsers = async (
     }
     if (params.platform !== undefined) {
         query.set("platform", params.platform);
+    }
+    if (params.kind !== undefined) {
+        query.set("kind", params.kind);
     }
     if (params.limit !== undefined) {
         query.set("limit", String(params.limit));
@@ -59,27 +63,39 @@ export const fetchChatListPage = async (
     api: AuthenticatedApi,
     params: {
         search?: string;
+        phraseSearch?: boolean;
         platform?: "internal" | "public";
         userEmail?: string;
+        userGroup?: "staff" | "devs";
         limit: number;
         offset: number;
         sortBy?: string;
         descending?: boolean;
         timeRange: TimeRangeValue;
         customRange: CustomTimeRange;
+        kind?: "chat" | "investigation";
     },
 ): Promise<ChatListPage> => {
     const query = new URLSearchParams();
     if (params.platform !== undefined) {
         query.set("platform", params.platform);
     }
+    if (params.kind !== undefined) {
+        query.set("kind", params.kind);
+    }
     query.set("limit", String(params.limit));
     query.set("offset", String(params.offset));
     if (params.search !== undefined && params.search.trim() !== "") {
         query.set("search", params.search.trim());
+        if (params.phraseSearch === true) {
+            query.set("phrase_search", "true");
+        }
     }
     if (params.userEmail !== undefined && params.userEmail.trim() !== "") {
         query.set("user_email", params.userEmail.trim());
+    }
+    if (params.userGroup !== undefined) {
+        query.set("user_group", params.userGroup);
     }
     if (params.sortBy !== undefined && params.sortBy !== "") {
         query.set("sort_by", params.sortBy);

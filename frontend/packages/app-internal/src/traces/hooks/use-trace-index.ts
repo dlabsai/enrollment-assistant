@@ -19,6 +19,7 @@ export const useTraceIndex = (
     pageSize: number,
     start: string | undefined,
     end: string | undefined,
+    source: "runtime" | "evals" = "runtime",
 ): UseTraceIndexResult => {
     const api = useAuthenticatedApi();
     const [traces, setTraces] = useState<TraceSummary[]>([]);
@@ -37,6 +38,7 @@ export const useTraceIndex = (
                 platform,
                 start,
                 end,
+                source,
             });
             // await new Promise((resolve) => {
             //     setTimeout(resolve, 5000);
@@ -52,7 +54,7 @@ export const useTraceIndex = (
         } finally {
             setLoading(false);
         }
-    }, [api, end, aiOnly, pageIndex, pageSize, platform, start]);
+    }, [api, end, aiOnly, pageIndex, pageSize, platform, source, start]);
 
     useEffect(() => {
         void refresh();

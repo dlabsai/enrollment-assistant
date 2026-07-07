@@ -1,7 +1,7 @@
 import hashlib
 import secrets
 from datetime import datetime, timedelta
-from uuid import UUID
+from typing import TYPE_CHECKING
 
 from fastapi import HTTPException, status
 from sqlalchemy import select, update
@@ -10,6 +10,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 from app.models import RefreshToken
 from app.utils import current_time_utc
+
+if TYPE_CHECKING:
+    from uuid import UUID
 
 
 def _hash_refresh_token(token: str) -> str:

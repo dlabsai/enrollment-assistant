@@ -1,139 +1,138 @@
-import logging
+from __future__ import annotations
+
+from datetime import datetime  # noqa: TC003
 from typing import Any
-from uuid import UUID
+from uuid import UUID  # noqa: TC003
 
-from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
-from sqlalchemy import select
+from fastapi import APIRouter, HTTPException, status
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+from sqlalchemy import desc, select
 
-from app.api.deps import SessionDep, get_request_user, require_user_roles
-from app.models import ConversationSync, UserRole
-from app.programs import PROGRAMS
-from app.sync.main import sync_conversation
+from app.api.deps import SessionDep
+from app.models import Conversation, PublicChatContact
+from app.utils import current_time_utc
 
-logger = logging.getLogger(__name__)
-
-router = APIRouter(prefix="/consent", tags=["consent"])
+router = APIRouter(prefix="/consent", tags=["public-chat-contact"])
 
 
-class ConsentData(BaseModel):
-    first_name: str
-    last_name: str
-    email: str
-    phone: str
-    zip: str
-    user_id: str
-    conversation_id: str | None = None
-    widget_closed: bool | None = None
+class PublicChatContactIn(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    first_name: str = Field(min_length=1)
+    last_name: str = Field(min_length=1)
+    email: str = Field(min_length=3)
+    phone: str = Field(min_length=1)
+    zip_code: str = Field(alias="zip", min_length=1)
+    visitor_id: str = Field(min_length=1)
+    conversation_id: UUID | None = None
     environment: str | None = None
-    program: str | None = None
-    online: bool | None = None
+
+    @field_validator("first_name", "last_name", "email", "phone", "zip_code", "visitor_id")
+    @classmethod
+    def _strip_required(cls, value: str) -> str:
+        stripped = value.strip()
+        if stripped == "":
+            raise ValueError("Value cannot be empty")
+        return stripped
+
+    @field_validator("email")
+    @classmethod
+    def _normalize_email(cls, value: str) -> str:
+        return value.strip().lower()
+
+    @field_validator("environment")
+    @classmethod
+    def _strip_optional(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        stripped = value.strip()
+        return stripped or None
 
 
-class ConsentResponse(BaseModel):
-    success: bool
-    message: str
+class PublicChatContactOut(BaseModel):
+    id: UUID
+    conversation_id: UUID | None
+    consented_at: datetime
 
 
-def _parse_uuid(value: str | None) -> UUID | None:
-    """Parse a string to UUID, returning None if invalid or empty."""
-    if not value:
-        return None
-    try:
-        return UUID(value)
-    except (ValueError, TypeError):
-        logger.warning(f"Invalid UUID format for conversation_id: {value}")
-        return None
+async def _get_public_conversation(session: SessionDep, conversation_id: UUID) -> Conversation:
+    conversation = await session.get(Conversation, conversation_id)
+    if conversation is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail="Conversation not found"
+        )
+    if not conversation.is_public:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail="Conversation is not public"
+        )
+    return conversation
 
 
-@router.post(
-    "",
-    response_model=ConsentResponse,
-    dependencies=[Depends(require_user_roles(get_request_user, UserRole.PUBLIC))],
-)
-async def submit_consent(data: ConsentData, db: SessionDep) -> Any:
-    """Submit user consent data and create or update a ConversationSync record.
-
-    This endpoint is called when a user gives consent to have their
-    conversation data collected and processed. If a record already exists
-    for the same conversation_id, it will be updated instead of creating a duplicate.
-    """
-    try:
-        logger.info(f"Received consent from user {data.user_id}")
-
-        # Validate program if provided
-        if data.program and data.program not in PROGRAMS:
-            logger.warning(
-                f"Invalid program value received: '{data.program}' for user {data.user_id}. "
-                f"Valid programs: {PROGRAMS}"
+async def _find_contact_for_update(
+    session: SessionDep, data: PublicChatContactIn
+) -> PublicChatContact | None:
+    if data.conversation_id is not None:
+        contact = await session.scalar(
+            select(PublicChatContact).where(
+                PublicChatContact.conversation_id == data.conversation_id
             )
+        )
+        if contact is not None:
+            return contact
 
-        # Parse conversation_id to UUID
-        conversation_uuid = _parse_uuid(data.conversation_id)
+        # A visitor can submit the form before their first chat turn creates a conversation.
+        # Link that pending row to the newly-created public conversation on the next submission.
+        return await session.scalar(
+            select(PublicChatContact)
+            .where(PublicChatContact.visitor_id == data.visitor_id)
+            .where(PublicChatContact.conversation_id.is_(None))
+            .order_by(desc(PublicChatContact.created_at))
+            .limit(1)
+        )
 
-        # Check if a sync record already exists for this conversation
-        sync_record = None
-        if conversation_uuid:
-            result = await db.execute(
-                select(ConversationSync).where(
-                    ConversationSync.conversation_id == conversation_uuid
-                )
-            )
-            sync_record = result.scalar_one_or_none()
+    return await session.scalar(
+        select(PublicChatContact)
+        .where(PublicChatContact.visitor_id == data.visitor_id)
+        .where(PublicChatContact.conversation_id.is_(None))
+        .order_by(desc(PublicChatContact.created_at))
+        .limit(1)
+    )
 
-        if sync_record:
-            # Update existing record with latest consent data
-            logger.info(
-                f"Updating existing ConversationSync {sync_record.id} for conversation "
-                f"{conversation_uuid}"
-            )
-            sync_record.first_name = data.first_name
-            sync_record.last_name = data.last_name
-            sync_record.email = data.email
-            sync_record.phone = data.phone
-            sync_record.zip = data.zip
-            sync_record.user_id = data.user_id
-            if data.environment:
-                sync_record.environment = data.environment
-        else:
-            # Create new ConversationSync record
-            sync_record = ConversationSync(
-                first_name=data.first_name,
-                last_name=data.last_name,
-                email=data.email,
-                phone=data.phone,
-                zip=data.zip,
-                user_id=data.user_id,
-                conversation_id=conversation_uuid,
-                last_message_id="",  # Will be updated when first sync occurs
-                transcript=None,
-                summary=None,
-                environment=data.environment,
-            )
-            db.add(sync_record)
 
-        await db.commit()
-        await db.refresh(sync_record)
+@router.post("", response_model=PublicChatContactOut)
+async def submit_public_chat_contact(data: PublicChatContactIn, session: SessionDep) -> Any:
+    if data.conversation_id is not None:
+        await _get_public_conversation(session, data.conversation_id)
 
-        logger.info(f"Created ConversationSync record {sync_record.id} for user {data.user_id}")
+    contact = await _find_contact_for_update(session, data)
+    consented_at = current_time_utc()
 
-        # Trigger sync if widget was closed
-        if data.widget_closed is True:
-            logger.info(f"Widget closed for user {data.user_id}, triggering conversation sync")
-            try:
-                sync_result = await sync_conversation(
-                    sync_record, db, debug=False, force_immediate=True
-                )
-                if sync_result:
-                    logger.info(f"Successfully synced conversation for user {data.user_id}")
-                else:
-                    logger.warning(f"Sync returned False for user {data.user_id}, will retry later")
-            except Exception:
-                logger.exception(f"Error during immediate sync for user {data.user_id}")
-                # Continue - periodic sync will retry later
+    if contact is None:
+        contact = PublicChatContact(
+            first_name=data.first_name,
+            last_name=data.last_name,
+            email=data.email,
+            phone=data.phone,
+            zip_code=data.zip_code,
+            visitor_id=data.visitor_id,
+            conversation_id=data.conversation_id,
+            consented_at=consented_at,
+            environment=data.environment,
+        )
+        session.add(contact)
+    else:
+        contact.first_name = data.first_name
+        contact.last_name = data.last_name
+        contact.email = data.email
+        contact.phone = data.phone
+        contact.zip_code = data.zip_code
+        contact.visitor_id = data.visitor_id
+        contact.conversation_id = data.conversation_id
+        contact.environment = data.environment
 
-        return ConsentResponse(success=True, message="Consent data received and saved successfully")
-    except Exception as exc:
-        logger.exception("Error saving consent data")
-        await db.rollback()
-        raise HTTPException(status_code=500, detail="Failed to save consent data") from exc
+    await session.commit()
+    await session.refresh(contact)
+
+    return PublicChatContactOut(
+        id=contact.id, conversation_id=contact.conversation_id, consented_at=contact.consented_at
+    )

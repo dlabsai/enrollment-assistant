@@ -14,25 +14,13 @@ import {
 } from "@va/shared/components/ui/card";
 import type { JSX } from "react";
 
+import { formatLocaleNumber } from "../../lib/number-format";
+import { formatUsageCost, formatUsageDuration } from "../lib/formatters";
 import type { UsageSummary } from "../types";
 
 interface UsageSummaryCardsProps {
     summary: UsageSummary;
 }
-
-const formatCost = (cost: number): string => {
-    if (cost > 0 && cost < 0.0001) {
-        return "<$0.0001";
-    }
-    return cost < 0.01 && cost > 0
-        ? `$${cost.toFixed(4)}`
-        : `$${cost.toFixed(2)}`;
-};
-
-const formatDuration = (seconds: number): string =>
-    seconds < 1 ? `${Math.round(seconds * 1000)}ms` : `${seconds.toFixed(2)}s`;
-
-const formatNumber = (num: number): string => num.toLocaleString();
 
 const cardGridClassName =
     "*:data-[slot=card]:from-primary/5 *:data-[slot=card]:to-card dark:*:data-[slot=card]:bg-card grid grid-cols-1 gap-4 *:data-[slot=card]:bg-gradient-to-t *:data-[slot=card]:shadow-xs @lg/main:grid-cols-3";
@@ -45,7 +33,7 @@ export const LlmSummaryCards = ({
             <CardHeader>
                 <CardDescription>LLM requests</CardDescription>
                 <CardTitle className="text-2xl font-semibold tabular-nums @[250px]/card:text-3xl">
-                    {formatNumber(summary.totalRequests)}
+                    {formatLocaleNumber(summary.totalRequests)}
                 </CardTitle>
                 <CardAction>
                     <IconMessage className="text-muted-foreground size-5" />
@@ -53,7 +41,7 @@ export const LlmSummaryCards = ({
             </CardHeader>
             <CardFooter className="flex-col items-start gap-1.5 text-sm">
                 <div className="line-clamp-1 flex gap-2 font-medium">
-                    {formatNumber(summary.totalTokens)} tokens used
+                    {formatLocaleNumber(summary.totalTokens)} tokens used
                 </div>
                 <div className="text-muted-foreground">
                     Input + output tokens
@@ -65,7 +53,7 @@ export const LlmSummaryCards = ({
             <CardHeader>
                 <CardDescription>LLM cost</CardDescription>
                 <CardTitle className="text-2xl font-semibold tabular-nums @[250px]/card:text-3xl">
-                    {formatCost(summary.totalCost)}
+                    {formatUsageCost(summary.totalCost)}
                 </CardTitle>
                 <CardAction>
                     <IconCoin className="text-muted-foreground size-5" />
@@ -85,7 +73,7 @@ export const LlmSummaryCards = ({
             <CardHeader>
                 <CardDescription>LLM response time</CardDescription>
                 <CardTitle className="text-2xl font-semibold tabular-nums @[250px]/card:text-3xl">
-                    {formatDuration(summary.avgDuration)}
+                    {formatUsageDuration(summary.avgDuration)}
                 </CardTitle>
                 <CardAction>
                     <IconClock className="text-muted-foreground size-5" />
@@ -109,7 +97,7 @@ export const EmbeddingSummaryCards = ({
             <CardHeader>
                 <CardDescription>Embedding requests</CardDescription>
                 <CardTitle className="text-2xl font-semibold tabular-nums @[250px]/card:text-3xl">
-                    {formatNumber(summary.totalEmbeddingRequests)}
+                    {formatLocaleNumber(summary.totalEmbeddingRequests)}
                 </CardTitle>
                 <CardAction>
                     <IconSearch className="text-muted-foreground size-5" />
@@ -117,7 +105,7 @@ export const EmbeddingSummaryCards = ({
             </CardHeader>
             <CardFooter className="flex-col items-start gap-1.5 text-sm">
                 <div className="line-clamp-1 flex gap-2 font-medium">
-                    {formatNumber(summary.totalEmbeddingTokens)} tokens used
+                    {formatLocaleNumber(summary.totalEmbeddingTokens)} tokens used
                 </div>
                 <div className="text-muted-foreground">Input tokens</div>
             </CardFooter>
@@ -127,7 +115,7 @@ export const EmbeddingSummaryCards = ({
             <CardHeader>
                 <CardDescription>Embedding cost</CardDescription>
                 <CardTitle className="text-2xl font-semibold tabular-nums @[250px]/card:text-3xl">
-                    {formatCost(summary.totalEmbeddingCost)}
+                    {formatUsageCost(summary.totalEmbeddingCost)}
                 </CardTitle>
                 <CardAction>
                     <IconCoin className="text-muted-foreground size-5" />
@@ -147,7 +135,7 @@ export const EmbeddingSummaryCards = ({
             <CardHeader>
                 <CardDescription>Embedding response time</CardDescription>
                 <CardTitle className="text-2xl font-semibold tabular-nums @[250px]/card:text-3xl">
-                    {formatDuration(summary.totalEmbeddingAvgDuration)}
+                    {formatUsageDuration(summary.totalEmbeddingAvgDuration)}
                 </CardTitle>
                 <CardAction>
                     <IconClock className="text-muted-foreground size-5" />

@@ -22,9 +22,7 @@ export default defineConfig(({ command, mode }) => {
     const shouldAnalyze =
         env.VITE_BUNDLE_ANALYZE === "1" || env.VITE_BUNDLE_ANALYZE === "true";
 
-    const base =
-        env.VITE_PUBLIC_WIDGET_BASE_PATH ||
-        "/wp-content/themes/example.com/chat-widget/";
+    const base = env.VITE_PUBLIC_WIDGET_BASE_PATH || "/chat-widget/";
 
     const nodeEnv = command === "build" ? "production" : "development";
     const sharedRoot = path.resolve(__dirname, "../shared/src");

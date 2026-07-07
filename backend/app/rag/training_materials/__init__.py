@@ -1,0 +1,1 @@
+"""Training-materials RAG source."""

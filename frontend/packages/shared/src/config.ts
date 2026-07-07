@@ -1,4 +1,10 @@
-export const API_URL = String(import.meta.env.VITE_API_URL ?? "");
+const rawApiUrl: unknown = import.meta.env.VITE_API_URL;
+
+if (typeof rawApiUrl !== "string" || rawApiUrl === "") {
+    throw new Error("VITE_API_URL must be set");
+}
+
+export const API_URL = rawApiUrl;
 export const ENVIRONMENT = String(import.meta.env.VITE_ENVIRONMENT ?? "");
 
 export const UNIVERSITY_NAME = String(
@@ -6,7 +12,7 @@ export const UNIVERSITY_NAME = String(
 );
 
 const UNIVERSITY_WEBSITE_URL = String(
-    import.meta.env.VITE_UNIVERSITY_WEBSITE_URL ?? "https://example.com",
+    import.meta.env.VITE_UNIVERSITY_WEBSITE_URL ?? "https://example.edu",
 );
 
 export const ADMISSIONS_PHONE = String(

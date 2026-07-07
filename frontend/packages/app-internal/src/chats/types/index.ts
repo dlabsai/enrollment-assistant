@@ -19,8 +19,11 @@ export interface ChatListPage {
     total: number;
 }
 
+export type ChatUserOwnerGroup = "staff" | "devs";
+
 export interface ChatUserOption {
     name?: string;
     email: string;
     platform: "internal" | "public";
+    ownerGroup?: ChatUserOwnerGroup;
 }

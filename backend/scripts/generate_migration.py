@@ -40,7 +40,7 @@ def main() -> None:
         result = subprocess.run(  # noqa: S603
             ["uv", "run", "alembic", "revision", "--autogenerate", "-m", message],  # noqa: S607
             check=False,
-            cwd="~/projects/virtual-assistant-private/backend",
+            cwd="/workspaces/demo-va/backend",
             capture_output=True,
             text=True,
         )

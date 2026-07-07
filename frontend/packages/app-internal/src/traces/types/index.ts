@@ -18,6 +18,32 @@ export interface TraceSummaryPage {
 
 export type TracePlatformFilter = "both" | "internal" | "public";
 
+export type TraceOverviewItemType =
+    | "agent"
+    | "llm"
+    | "tool"
+    | "retrieval"
+    | "embedding"
+    | "url_guardrails"
+    | "conversation_turn"
+    | "evaluation"
+    | "evaluation_case"
+    | "evaluation_result"
+    | "other";
+
+export interface TraceOverviewItem {
+    id: string;
+    span_id: string;
+    parent_span_id: string | null;
+    type: TraceOverviewItemType;
+    title: string;
+    subtitle: string | null;
+    start_time: string | null;
+    duration_ms: number | null;
+    status_code: string | null;
+    data: Record<string, unknown>;
+}
+
 export interface TraceSpan {
     span_id: string;
     parent_span_id: string | null;
@@ -43,4 +69,5 @@ export interface TraceDetail {
     is_public: boolean | null;
     conversation_id: string | null;
     spans: TraceSpan[];
+    overview: TraceOverviewItem[];
 }

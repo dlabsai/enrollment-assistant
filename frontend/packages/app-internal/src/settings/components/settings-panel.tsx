@@ -16,7 +16,7 @@ import { toast } from "sonner";
 
 import { useAuthenticatedApi } from "../../auth/hooks/use-authenticated-api";
 import { PageSection } from "../../components/page-shell";
-import { PageLoading } from "../../components/page-state";
+import { LoadingState } from "../../components/page-state";
 import { fetchSettings, resetSettings, updateSettings } from "../lib/api";
 import type { AppSettingsResponse, AppSettingsUpdate } from "../types";
 
@@ -127,7 +127,6 @@ export const SettingsPanel = (): JSX.Element => {
                 const formValue = formValues[field.key] ?? "";
                 const overrideValue = settings.overrides[field.key] ?? "";
                 if (formValue !== overrideValue) {
-                    // eslint-disable-next-line unicorn/no-null -- API requires null to clear values
                     updates[field.key] = formValue === "" ? null : formValue;
                 }
             }
@@ -166,7 +165,7 @@ export const SettingsPanel = (): JSX.Element => {
     };
 
     if (isLoading) {
-        return <PageLoading />;
+        return <LoadingState />;
     }
 
     return (
@@ -233,7 +232,7 @@ export const SettingsPanel = (): JSX.Element => {
                             >
                                 {isSaving ? (
                                     <>
-                                        <Spinner className="mr-2" />
+                                        <Spinner data-icon="inline-start" />
                                         Saving...
                                     </>
                                 ) : (

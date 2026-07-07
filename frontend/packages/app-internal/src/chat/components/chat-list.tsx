@@ -35,7 +35,7 @@ import { toast } from "sonner";
 
 import { useAuthenticatedApi } from "../../auth/hooks/use-authenticated-api";
 import { useChatActions, useChatStore } from "../contexts/chat-store-context";
-import { searchChats } from "../lib/api";
+import { type ChatCollectionKind, searchChats } from "../lib/api";
 import { createSelectSortedChats } from "../lib/store";
 import type { ChatSearchResult } from "../types";
 import { ChatItem } from "./chat-item";
@@ -80,13 +80,13 @@ const formatRelativeTimestamp = (value: string, now = new Date()): string => {
     }
 
     if (date.getFullYear() === now.getFullYear()) {
-        return date.toLocaleDateString("en-GB", {
+        return date.toLocaleDateString(undefined, {
             day: "numeric",
             month: "long",
         });
     }
 
-    return date.toLocaleDateString("en-US", {
+    return date.toLocaleDateString(undefined, {
         month: "2-digit",
         day: "2-digit",
         year: "numeric",
@@ -95,11 +95,13 @@ const formatRelativeTimestamp = (value: string, now = new Date()): string => {
 
 interface ChatListProps {
     className?: string;
+    collectionKind?: ChatCollectionKind;
     onRequestClose?: () => void;
 }
 
 export const ChatList = ({
     className,
+    collectionKind = "chat",
     onRequestClose,
 }: ChatListProps): JSX.Element => {
     const chats = useChatStore(selectSortedChats);
@@ -137,6 +139,23 @@ export const ChatList = ({
     const [searchError, setSearchError] = useState<string | undefined>();
     const [visibleCount, setVisibleCount] = useState(INITIAL_VISIBLE_COUNT);
     const searchQueryRef = useRef(searchQuery);
+    const isInvestigationList = collectionKind === "investigation";
+    const itemLabel = isInvestigationList ? "investigation" : "chat";
+    const itemLabelPlural = isInvestigationList ? "investigations" : "chats";
+
+    const clearSearchResults = useCallback((): void => {
+        setSearchResults([]);
+        setSearchError(undefined);
+        setSearchLoading(false);
+        setSearchLoadingMore(false);
+        setSearchHasMore(false);
+    }, []);
+
+    const resetSearchState = useCallback((): void => {
+        setSearchInput("");
+        setSearchQuery("");
+        clearSearchResults();
+    }, [clearSearchResults]);
 
     const visibleChats = chats.slice(0, visibleCount);
 
@@ -158,6 +177,9 @@ export const ChatList = ({
     };
 
     const loadMoreSearchResults = async (): Promise<void> => {
+        if (isInvestigationList) {
+            return;
+        }
         if (searchLoading || searchLoadingMore || !searchHasMore) {
             return;
         }
@@ -185,7 +207,7 @@ export const ChatList = ({
         } catch {
             if (searchQueryRef.current === activeQuery) {
                 setSearchHasMore(false);
-                toast.error("Failed to load more chats");
+                toast.error(`Failed to load more ${itemLabelPlural}`);
             }
         } finally {
             if (searchQueryRef.current === activeQuery) {
@@ -243,9 +265,9 @@ export const ChatList = ({
 
         try {
             await deleteChat(pendingDeleteId);
-            toast.success("Chat deleted");
+            toast.success(`${isInvestigationList ? "Investigation" : "Chat"} deleted`);
         } catch {
-            setErrorMessage("Failed to delete chat");
+            setErrorMessage(`Failed to delete ${itemLabel}`);
             setErrorDialogOpen(true);
         }
     };
@@ -267,7 +289,7 @@ export const ChatList = ({
             toast.success("Title updated");
             setRenameDialogOpen(false);
         } catch {
-            setErrorMessage("Failed to rename chat");
+            setErrorMessage(`Failed to rename ${itemLabel}`);
             setErrorDialogOpen(true);
         }
     };
@@ -293,25 +315,6 @@ export const ChatList = ({
 
     useEffect(() => {
         if (!searchDialogOpen) {
-            return;
-        }
-        setSearchInput("");
-        setSearchQuery("");
-        setSearchResults([]);
-        setSearchError(undefined);
-        setSearchLoading(false);
-        setSearchLoadingMore(false);
-        setSearchHasMore(false);
-    }, [searchDialogOpen]);
-
-    useEffect(() => {
-        setVisibleCount((current) =>
-            Math.min(chats.length, Math.max(current, INITIAL_VISIBLE_COUNT)),
-        );
-    }, [chats.length]);
-
-    useEffect(() => {
-        if (!searchDialogOpen) {
             return (): void => undefined;
         }
 
@@ -333,23 +336,51 @@ export const ChatList = ({
             return (): void => undefined;
         }
         if (searchQuery === "") {
-            setSearchResults([]);
-            setSearchError(undefined);
-            setSearchLoading(false);
-            setSearchLoadingMore(false);
-            setSearchHasMore(false);
-            return (): void => undefined;
+            const timeout = setTimeout(() => {
+                clearSearchResults();
+            }, 0);
+
+            return (): void => {
+                clearTimeout(timeout);
+            };
         }
 
         let isMounted = true;
         const activeQuery = searchQuery;
-        setSearchLoading(true);
-        setSearchLoadingMore(false);
-        setSearchHasMore(false);
-        setSearchError(undefined);
 
         const loadResults = async (): Promise<void> => {
+            setSearchLoading(true);
+            setSearchLoadingMore(false);
+            setSearchHasMore(false);
+            setSearchError(undefined);
+
             try {
+                if (isInvestigationList) {
+                    const normalizedQuery = activeQuery.toLowerCase();
+                    const results = chats
+                        .filter((chat) => {
+                            const title = chat.title ?? "";
+                            const preview = chat.lastMessagePreview ?? "";
+                            return `${title} ${preview}`
+                                .toLowerCase()
+                                .includes(normalizedQuery);
+                        })
+                        .map((chat) => ({
+                            id: chat.id,
+                            title: chat.title,
+                            snippet: chat.lastMessagePreview ?? chat.title ?? "",
+                            updatedAt: new Date(chat.updatedAt).toISOString(),
+                        }));
+
+                    if (!isMounted || searchQueryRef.current !== activeQuery) {
+                        return;
+                    }
+
+                    setSearchResults(results);
+                    setSearchHasMore(false);
+                    return;
+                }
+
                 const results = await searchChats(api, {
                     search: activeQuery,
                     offset: 0,
@@ -372,7 +403,7 @@ export const ChatList = ({
                 setSearchError(
                     error instanceof Error
                         ? error.message
-                        : "Failed to search chats",
+                        : `Failed to search ${itemLabelPlural}`,
                 );
             } finally {
                 if (isMounted && searchQueryRef.current === activeQuery) {
@@ -386,7 +417,7 @@ export const ChatList = ({
         return (): void => {
             isMounted = false;
         };
-    }, [api, searchDialogOpen, searchQuery]);
+    }, [api, chats, clearSearchResults, isInvestigationList, itemLabelPlural, searchDialogOpen, searchQuery]);
 
     const highlightQuery = searchQuery.trim();
 
@@ -398,25 +429,28 @@ export const ChatList = ({
             )}
         >
             <div className="flex shrink-0 flex-col gap-2 p-2">
-                <Button
-                    className="justify-start gap-2"
-                    onClick={handleNewChat}
-                    size="sm"
-                    variant="ghost"
-                >
-                    <SquarePen className="size-4" />
-                    New chat
-                </Button>
+                {!isInvestigationList && (
+                    <Button
+                        className="justify-start gap-2"
+                        onClick={handleNewChat}
+                        size="sm"
+                        variant="ghost"
+                    >
+                        <SquarePen className="size-4" />
+                        New {itemLabel}
+                    </Button>
+                )}
                 <Button
                     className="justify-start gap-2"
                     onClick={() => {
+                        resetSearchState();
                         setSearchDialogOpen(true);
                     }}
                     size="sm"
                     variant="ghost"
                 >
                     <Search className="size-4" />
-                    Search chats
+                    Search {itemLabelPlural}
                 </Button>
             </div>
 
@@ -447,7 +481,7 @@ export const ChatList = ({
                     chatsError === undefined &&
                     chats.length === 0 && (
                         <div className="text-muted-foreground px-4 py-3 text-center text-sm">
-                            No chats yet
+                            No {itemLabelPlural} yet
                         </div>
                     )}
 
@@ -472,22 +506,14 @@ export const ChatList = ({
                 onOpenChange={(open) => {
                     setSearchDialogOpen(open);
                     if (!open) {
-                        setSearchInput("");
-                        setSearchQuery("");
-                        setSearchResults([]);
-                        setSearchError(undefined);
-                        setSearchLoading(false);
-                        setSearchLoadingMore(false);
-                        setSearchHasMore(false);
+                        resetSearchState();
                     }
                 }}
                 open={searchDialogOpen}
             >
                 <DialogContent
                     className="overflow-hidden p-0 sm:max-w-[560px]"
-                    onOpenAutoFocus={(event) => {
-                        event.preventDefault();
-                    }}
+                    initialFocus={false}
                     showCloseButton={false}
                 >
                     <Command
@@ -496,8 +522,14 @@ export const ChatList = ({
                     >
                         <CommandInput
                             autoFocus
-                            onValueChange={setSearchInput}
-                            placeholder="Search chats..."
+                            onValueChange={(value) => {
+                                setSearchInput(value);
+                                if (value.trim() === "") {
+                                    setSearchQuery("");
+                                    clearSearchResults();
+                                }
+                            }}
+                            placeholder={`Search ${itemLabelPlural}...`}
                             value={searchInput}
                         />
                         <CommandList
@@ -519,7 +551,7 @@ export const ChatList = ({
                                 searchError === undefined &&
                                 highlightQuery === "" && (
                                     <div className="text-muted-foreground absolute inset-0 flex items-center justify-center px-4 py-3 text-center text-sm">
-                                        Type to search chats
+                                        Type to search {itemLabelPlural}
                                     </div>
                                 )}
                             {!searchLoading &&
@@ -527,7 +559,7 @@ export const ChatList = ({
                                 highlightQuery !== "" &&
                                 searchResults.length === 0 && (
                                     <CommandEmpty className="text-muted-foreground absolute inset-0 flex items-center justify-center px-4 py-3 text-center text-sm">
-                                        No chats found
+                                        No {itemLabelPlural} found
                                     </CommandEmpty>
                                 )}
                             {!searchLoading &&
@@ -552,6 +584,7 @@ export const ChatList = ({
                                                         setSearchDialogOpen(
                                                             false,
                                                         );
+                                                        resetSearchState();
                                                     }}
                                                     value={result.id}
                                                 >
@@ -564,7 +597,7 @@ export const ChatList = ({
                                                                 }
                                                                 text={
                                                                     result.title ??
-                                                                    "New chat"
+                                                                    `New ${itemLabel}`
                                                                 }
                                                             />
                                                         </div>
@@ -612,7 +645,7 @@ export const ChatList = ({
             >
                 <DialogContent>
                     <DialogHeader>
-                        <DialogTitle>Rename chat</DialogTitle>
+                        <DialogTitle>Rename {itemLabel}</DialogTitle>
                     </DialogHeader>
                     <div className="grid gap-2">
                         <label
@@ -664,11 +697,11 @@ export const ChatList = ({
             <ConfirmDialog
                 cancelLabel="Cancel"
                 confirmLabel="Delete"
-                description="Are you sure you want to delete this chat? This action cannot be undone."
+                description={`Are you sure you want to delete this ${itemLabel}? This action cannot be undone.`}
                 onConfirm={handleDelete}
                 onOpenChange={setDeleteDialogOpen}
                 open={deleteDialogOpen}
-                title="Delete chat"
+                title={`Delete ${itemLabel}`}
             />
 
             <ErrorDialog

@@ -108,6 +108,8 @@ export const ModelSelectionDialogContent = <TTarget extends string>({
 }: ModelSelectionDialogContentProps<TTarget>): JSX.Element => {
     const { className, ...restDialogContentProps } = dialogContentProps ?? {};
     const canDeletePreset = presetSelectValue !== defaultPresetValue;
+    const selectedPresetLabel =
+        presetSelectValue === defaultPresetValue ? "Custom" : presetSelectValue;
     const isTabValue = (value: string): value is TTarget =>
         tabs.some((tab) => tab.value === value);
 
@@ -130,7 +132,7 @@ export const ModelSelectionDialogContent = <TTarget extends string>({
 
         return (
             <Tooltip>
-                <TooltipTrigger asChild>{button}</TooltipTrigger>
+                <TooltipTrigger render={button} />
                 <TooltipContent side="top">{resetTooltipLabel}</TooltipContent>
             </Tooltip>
         );
@@ -148,7 +150,9 @@ export const ModelSelectionDialogContent = <TTarget extends string>({
                 }
                 key={fullValue}
                 onSelect={(selected) => {
-                    onSelectModel(selected);
+                    if (typeof selected === "string") {
+                        onSelectModel(selected);
+                    }
                 }}
                 value={fullValue}
             >
@@ -219,14 +223,22 @@ export const ModelSelectionDialogContent = <TTarget extends string>({
                     <div className="flex items-center gap-2">
                         <div className="flex-1">
                             <Select
-                                onValueChange={onPresetSelect}
+                                onValueChange={(value) => {
+                                    if (value === null) {
+                                        return;
+                                    }
+
+                                    onPresetSelect(value);
+                                }}
                                 value={presetSelectValue}
                             >
                                 <SelectTrigger
                                     className="w-full"
                                     size="sm"
                                 >
-                                    <SelectValue placeholder="Custom" />
+                                    <SelectValue placeholder="Custom">
+                                        {selectedPresetLabel}
+                                    </SelectValue>
                                 </SelectTrigger>
                                 <SelectContent>
                                     <SelectItem value={defaultPresetValue}>
@@ -244,25 +256,27 @@ export const ModelSelectionDialogContent = <TTarget extends string>({
                             </Select>
                         </div>
                         <Tooltip>
-                            <TooltipTrigger asChild>
-                                <Button
-                                    aria-label="Delete preset"
-                                    className="text-muted-foreground hover:text-foreground"
-                                    disabled={!canDeletePreset}
-                                    onClick={() => {
-                                        if (canDeletePreset) {
-                                            onRequestDeletePreset(
-                                                presetSelectValue,
-                                            );
-                                        }
-                                    }}
-                                    size="icon-sm"
-                                    type="button"
-                                    variant="ghost"
-                                >
-                                    <Trash2 className="size-3" />
-                                </Button>
-                            </TooltipTrigger>
+                            <TooltipTrigger
+                                render={
+                                    <Button
+                                        aria-label="Delete preset"
+                                        className="text-muted-foreground hover:text-foreground"
+                                        disabled={!canDeletePreset}
+                                        onClick={() => {
+                                            if (canDeletePreset) {
+                                                onRequestDeletePreset(
+                                                    presetSelectValue,
+                                                );
+                                            }
+                                        }}
+                                        size="icon-sm"
+                                        type="button"
+                                        variant="ghost"
+                                    >
+                                        <Trash2 className="size-3" />
+                                    </Button>
+                                }
+                            />
                             <TooltipContent side="top">
                                 Delete preset
                             </TooltipContent>
@@ -328,7 +342,7 @@ export const ModelSelectionDialogContent = <TTarget extends string>({
             </div>
             <Tabs
                 onValueChange={(value) => {
-                    if (isTabValue(value)) {
+                    if (typeof value === "string" && isTabValue(value)) {
                         onModelTargetChange(value);
                     }
                 }}

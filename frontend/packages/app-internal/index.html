@@ -11,9 +11,15 @@
             type="image/svg+xml"
             href="/assets/icons/graduation-cap.svg"
         />
-        <title>%VITE_UNIVERSITY_NAME% Enrollment Agent</title>
+        <title>%VITE_UNIVERSITY_NAME% Enrollment Assistant</title>
         <script type="module">
             if (import.meta.env.DEV) {
+                if (!document.title.startsWith("DEV · ")) {
+                    document.title = `DEV · ${document.title}`;
+                }
+                document.querySelector("link[rel='icon']")?.setAttribute("href", "/assets/icons/dev.svg");
+            }
+            if (import.meta.env.DEV && import.meta.env.VITE_REACT_GRAB === "true") {
                 import("react-grab");
             }
         </script>

@@ -1,4 +1,4 @@
-"""End-to-end integration tests for the chat engine.
+"""End-to-end integration tests for the chat runtime.
 
 These tests call real LLMs and communicate with a real database.
 They require proper environment variables to be set:
@@ -15,9 +15,10 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.chat.engine import MessageOut, handle_conversation_turn
+from app.chat.engine_utils import ModelSettings
 from app.core.config import settings
-from app.llm.runtime import ModelSettings
-from app.models import Conversation, Message, User
+from app.core.db import async_session_factory
+from app.models import AssistantMessageMetadata, Conversation, Message, User
 
 # Mark all tests in this module as slow, e2e, and llm tests
 # Mark all tests in this module as slow and llm tests
@@ -43,15 +44,16 @@ class TestE2EConversation:
     ):
         """Test a simple 'hi' message creates a new conversation with real LLM response."""
         user_message_id, assistant_message = await handle_conversation_turn(
+            project_name="test_project",
             conversation_id=None,
             parent_message_id=None,
             user_prompt="hi",
             is_regeneration=False,
             chatbot_model_settings=integration_model_settings,
             guardrail_model_settings=integration_model_settings,
-            search_model_settings=integration_model_settings,
             user_id=test_user.id,
             session=session,
+            tool_session_factory=async_session_factory,
         )
 
         # Verify response structure
@@ -64,8 +66,8 @@ class TestE2EConversation:
         # Verify conversation was created in DB
         conversation = await session.get(Conversation, assistant_message.conversation_id)
         assert conversation is not None
-        assert conversation.title is not None
-        assert conversation.title.strip() != ""
+        assert conversation.title == "hi"
+        assert conversation.project == "test_project"
         assert conversation.user_id == test_user.id
 
         # Verify user message was created
@@ -82,6 +84,16 @@ class TestE2EConversation:
         assert assistant_msg_db.content == assistant_message.content
         assert assistant_msg_db.parent_id == user_message_id
 
+        # Verify metadata was created
+        stmt = select(AssistantMessageMetadata).filter_by(message_id=assistant_message.id)
+        result = await session.execute(stmt)
+        metadata = result.scalar_one_or_none()
+        assert metadata is not None
+        assert metadata.conversation_turn == 1
+        assert metadata.system_prompt_rendered  # Should have rendered system prompt
+        assert assistant_message.metadata is not None
+        assert assistant_message.metadata.chatbot_time is not None
+
         # Print the response for manual inspection
         print(f"\n\nLLM Response to 'hi': {assistant_message.content}\n")
 
@@ -92,15 +104,16 @@ class TestE2EConversation:
         """Test continuing a conversation with a second message."""
         # First turn - start conversation
         _user_message_id_1, assistant_message_1 = await handle_conversation_turn(
+            project_name="test_project",
             conversation_id=None,
             parent_message_id=None,
             user_prompt="hi",
             is_regeneration=False,
             chatbot_model_settings=integration_model_settings,
             guardrail_model_settings=integration_model_settings,
-            search_model_settings=integration_model_settings,
             user_id=test_user.id,
             session=session,
+            tool_session_factory=async_session_factory,
         )
 
         conversation_id = assistant_message_1.conversation_id
@@ -108,15 +121,16 @@ class TestE2EConversation:
 
         # Second turn - continue conversation
         user_message_id_2, assistant_message_2 = await handle_conversation_turn(
+            project_name="test_project",
             conversation_id=conversation_id,
             parent_message_id=assistant_message_1.id,
             user_prompt="what programs do you offer?",
             is_regeneration=False,
             chatbot_model_settings=integration_model_settings,
             guardrail_model_settings=integration_model_settings,
-            search_model_settings=integration_model_settings,
             user_id=test_user.id,
             session=session,
+            tool_session_factory=async_session_factory,
         )
 
         # Verify second response
@@ -124,6 +138,13 @@ class TestE2EConversation:
         assert assistant_message_2.role == "assistant"
         assert assistant_message_2.content
         assert assistant_message_2.conversation_id == conversation_id
+
+        # Verify conversation turn incremented
+        stmt = select(AssistantMessageMetadata).filter_by(message_id=assistant_message_2.id)
+        result = await session.execute(stmt)
+        metadata = result.scalar_one_or_none()
+        assert metadata is not None
+        assert metadata.conversation_turn == 2
 
         # Verify message tree structure
         user_message_2 = await session.get(Message, user_message_id_2)
