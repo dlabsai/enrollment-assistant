@@ -171,16 +171,13 @@ export const InputBox = ({
                                     <div className="flex border border-transparent">
                                         <Button
                                             aria-label="Send message"
-                                            className="rounded-full"
+                                            className="size-[34px] rounded-full"
                                             disabled={isSendDisabled}
                                             onClick={handleSend}
                                             size="icon"
                                             type="button"
                                         >
-                                            <ArrowUp
-                                                aria-hidden="true"
-                                                className="size-4"
-                                            />
+                                            <ArrowUp aria-hidden="true" />
                                         </Button>
                                     </div>
                                 }

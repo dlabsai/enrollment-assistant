@@ -3,10 +3,12 @@ export interface ChatListRow {
     title?: string;
     summary?: string;
     lastMessagePreview?: string;
-    messageCount: number;
+    userMessageCount: number;
+    assistantMessageCount: number;
     createdAt: string;
     updatedAt: string;
     isPublic: boolean;
+    promptSource?: string;
     userName?: string;
     userEmail?: string;
     totalCost?: number;
@@ -19,7 +21,7 @@ export interface ChatListPage {
     total: number;
 }
 
-export type ChatUserOwnerGroup = "staff" | "devs";
+type ChatUserOwnerGroup = "staff" | "devs";
 
 export interface ChatUserOption {
     name?: string;

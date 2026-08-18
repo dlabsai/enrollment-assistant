@@ -130,6 +130,7 @@ def _configured_models() -> list[str]:
         settings.GUARDRAIL_MODEL,
         settings.EVALUATION_MODEL,
         settings.SUMMARIZER_MODEL,
+        settings.TITLE_MODEL,
     ]
     return _dedupe([*configured, *role_models])
 
@@ -188,7 +189,7 @@ async def _run_one(
     start = time.perf_counter()
     result = await agent.run(message, model_settings=model_settings)
     elapsed = time.perf_counter() - start
-    usage = result.usage()
+    usage = result.usage
     return TrialResult(
         model=model,
         index=index,

@@ -2,9 +2,11 @@
 
 # ruff: noqa: E501
 
+from __future__ import annotations
+
 from dataclasses import dataclass
 from functools import lru_cache
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, Field
 from pydantic_ai import Agent
@@ -16,8 +18,8 @@ from app.chat.agents import (
     render_guardrails_system_prompt,
 )
 from app.chat.config import TEMPLATES_DIR
-from app.chat.engine_utils import ModelSettings, run_agent
-from app.chat.template_utils import get_jinja_environment
+from app.chat.engine_utils import ModelSettings, prompt_context_trace_attributes, run_agent
+from app.chat.template_utils import get_jinja_environment, get_runtime_jinja_environment
 from app.core.config import settings
 from app.evals import (
     Case,
@@ -32,6 +34,9 @@ from app.evals import (
 from app.evals.case_payloads import validate_eval_case_payload
 from app.evals.runtime import EvalRunConfig, EvalSuite
 
+if TYPE_CHECKING:
+    from app.evals.instructions import EvalInstructionsSnapshot
+
 # ============================================================================
 # Models
 # ============================================================================
@@ -45,6 +50,7 @@ class GuardrailsInput:
     criteria: str
     test_case_id: str
     expected_valid: bool
+    verified: bool = False
 
 
 @dataclass
@@ -136,6 +142,8 @@ class GuardrailsJudge(Evaluator[GuardrailsInput, GuardrailsOutput, Any]):
                 temperature=settings.EVALUATION_MODEL_TEMPERATURE,
                 max_tokens=settings.EVALUATION_MODEL_MAX_TOKENS,
             ),
+            metadata={"is_internal": True},
+            agent_name="eval_judge",
             system_prompt=GUARDRAILS_JUDGE_SYSTEM_PROMPT,
         )
 
@@ -299,7 +307,11 @@ TEST_CASES = [
 # ============================================================================
 
 
-async def run_guardrails(inputs: GuardrailsInput, guardrail_model: str) -> GuardrailsOutput:
+async def run_guardrails(
+    inputs: GuardrailsInput,
+    guardrail_model: str,
+    instructions: EvalInstructionsSnapshot | None = None,
+) -> GuardrailsOutput:
     """Run the guardrails agent on a chatbot response."""
     model_settings = ModelSettings(
         model=guardrail_model,
@@ -307,15 +319,28 @@ async def run_guardrails(inputs: GuardrailsInput, guardrail_model: str) -> Guard
         max_tokens=settings.GUARDRAIL_MODEL_MAX_TOKENS,
     )
 
-    # Create internal guardrails agent
-    jinja_env = get_jinja_environment(TEMPLATES_DIR, is_internal=True)
-    guardrails_template = jinja_env.get_template("guardrails_agent_internal.j2")
+    if instructions is None:
+        jinja_env = get_jinja_environment(TEMPLATES_DIR, is_internal=True)
+    else:
+        jinja_env = await get_runtime_jinja_environment(
+            TEMPLATES_DIR, is_internal=True, template_overrides=instructions.template_overrides
+        )
+    guardrails_template = jinja_env.get_template("guardrails_agent.j2")
     agent = create_guardrails_agent(model_settings.model, template=guardrails_template)
     deps = GuardrailsDeps(response_to_check=inputs.chatbot_response)
     system_prompt = render_guardrails_system_prompt(guardrails_template, deps)
+    trace_metadata: dict[str, Any] = {"is_internal": True}
+    if instructions is not None:
+        trace_metadata.update(prompt_context_trace_attributes(instructions.prompt_context()))
 
     result, _ = await run_agent(
-        agent, "Check the chatbot message.", model_settings, deps=deps, system_prompt=system_prompt
+        agent,
+        "Check the chatbot message.",
+        model_settings,
+        deps=deps,
+        metadata=trace_metadata,
+        agent_name="guardrails",
+        system_prompt=system_prompt,
     )
 
     return GuardrailsOutput(
@@ -367,9 +392,15 @@ async def run_guardrails_evaluation(
         ),
     }
 
+    additional_settings = (
+        {"instructions": config.instructions.report_metadata()}
+        if config.instructions is not None
+        else None
+    )
+
     return await evaluate(
         dataset,
-        lambda inputs: run_guardrails(inputs, model_overrides["guardrail"]),
+        lambda inputs: run_guardrails(inputs, model_overrides["guardrail"], config.instructions),
         evaluators=[
             GuardrailsJudge(model=model_overrides["evaluation"]),
             ValidationAccuracyEvaluator(),
@@ -377,6 +408,7 @@ async def run_guardrails_evaluation(
         repeats=config.repeat,
         max_concurrency=config.max_concurrency,
         model_configs=model_configs,
+        additional_settings=additional_settings,
         progress_handler=config.progress_handler,
     )
 

@@ -15,13 +15,13 @@ import {
     ChartTooltipContent,
 } from "@/components/ui/chart";
 
+import { formatUsdCost } from "../../lib/number-format";
 import type { TimeRangeValue } from "../../lib/time-range";
 import {
     formatTimeSeriesTick,
     formatTimeSeriesTooltipLabel,
     isHourlyTimeRange,
 } from "../../lib/time-series";
-import { formatUsageCost } from "../lib/formatters";
 import type { UsageDaily } from "../types";
 
 interface EmbeddingCostChartProps {
@@ -91,7 +91,7 @@ export const EmbeddingCostChart = ({
                         />
                         <YAxis
                             axisLine={false}
-                            tickFormatter={(value: number) => formatUsageCost(value)}
+                            tickFormatter={(value: number) => formatUsdCost(value)}
                             tickLine={false}
                             width={64}
                         />
@@ -100,7 +100,7 @@ export const EmbeddingCostChart = ({
                                 <ChartTooltipContent
                                     formatter={(value) =>
                                         typeof value === "number"
-                                            ? formatUsageCost(value)
+                                            ? formatUsdCost(value)
                                             : value
                                     }
                                     indicator="line"

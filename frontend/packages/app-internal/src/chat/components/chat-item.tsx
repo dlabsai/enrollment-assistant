@@ -1,3 +1,4 @@
+import { Badge } from "@va/shared/components/ui/badge";
 import {
     DropdownMenu,
     DropdownMenuContent,
@@ -52,37 +53,41 @@ export const ChatItem = memo(
         const { resolvedTheme } = useTheme();
 
         const title = chat.title ?? "New Chat";
-        const [displayedTitle, setDisplayedTitle] = useState(title);
-        const typingTimeoutRef = useRef<number | undefined>(undefined);
+        const [displayedTitleState, setDisplayedTitleState] = useState(() => ({
+            title,
+            value: title,
+        }));
+        const displayedTitle =
+            displayedTitleState.title === title
+                ? displayedTitleState.value
+                : "";
         const previousTitleRef = useRef(title);
 
         useEffect(() => {
-            if (previousTitleRef.current === title) {
-                return (): void => undefined;
+            let typingTimeout: number | undefined;
+
+            if (previousTitleRef.current !== title) {
+                previousTitleRef.current = title;
+
+                let index = 0;
+                const step = (): void => {
+                    index += 1;
+                    setDisplayedTitleState({
+                        title,
+                        value: title.slice(0, index),
+                    });
+
+                    if (index < title.length) {
+                        typingTimeout = window.setTimeout(step, 50);
+                    }
+                };
+
+                typingTimeout = window.setTimeout(step, 50);
             }
 
-            previousTitleRef.current = title;
-
-            let index = 0;
-            const step = (): void => {
-                index += 1;
-                setDisplayedTitle(title.slice(0, index));
-
-                if (index < title.length) {
-                    typingTimeoutRef.current = window.setTimeout(step, 50);
-                }
-            };
-
-            const startTyping = (): void => {
-                setDisplayedTitle("");
-                typingTimeoutRef.current = window.setTimeout(step, 50);
-            };
-
-            typingTimeoutRef.current = window.setTimeout(startTyping, 0);
-
             return (): void => {
-                if (typingTimeoutRef.current !== undefined) {
-                    window.clearTimeout(typingTimeoutRef.current);
+                if (typingTimeout !== undefined) {
+                    window.clearTimeout(typingTimeout);
                 }
             };
         }, [title]);
@@ -119,6 +124,14 @@ export const ChatItem = memo(
                     <span className="min-w-0 flex-1 truncate text-sm">
                         {displayedTitle}
                     </span>
+                    {chat.promptSource === "draft" && (
+                        <Badge
+                            className="h-5 shrink-0 px-1"
+                            variant="secondary"
+                        >
+                            Draft
+                        </Badge>
+                    )}
                     {showUserInfo &&
                         chat.userName !== undefined &&
                         chat.userName !== "" && (

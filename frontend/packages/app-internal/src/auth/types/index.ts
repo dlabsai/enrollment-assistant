@@ -8,6 +8,7 @@ export type PermissionKey =
     | "access_rbac"
     | "access_usage"
     | "access_analytics"
+    | "access_adoption"
     | "access_public_analytics"
     | "access_evals"
     | "access_settings"
@@ -29,7 +30,7 @@ export type PermissionKey =
     | "chats_view_trace"
     | "chats_view_cost_column";
 
-export interface UserGroup {
+interface UserGroup {
     id: string;
     slug: "user" | "admin" | "dev";
     name: string;

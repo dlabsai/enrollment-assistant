@@ -1,21 +1,25 @@
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import json
-from datetime import UTC, datetime
+from datetime import datetime  # noqa: TC003
 from math import isfinite
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, NoReturn, cast
+from uuid import UUID  # noqa: TC003
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator
+    from collections.abc import AsyncIterator
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-from sqlalchemy import ColumnElement, case, func, select
+from sqlalchemy import ColumnElement, case, desc, func, select
 
 from app.api.deps import CurrentUser, SessionDep, require_permission
-from app.api.schemas import PageOut, PaginationParams
+from app.api.schemas import PageOut, TracePaginationParams
+from app.api.trace_costs import trace_total_cost
 from app.api.trace_projection import TraceOverviewItemOut, build_trace_overview
 from app.core.db import get_session
 from app.core.rbac import PermissionKey
@@ -33,6 +37,20 @@ from app.evals.case_management import (
     restore_disk_eval_case_overlay,
     update_eval_case_overlay,
 )
+from app.evals.instructions import (
+    EvalInstructionsError,
+    EvalInstructionsNotFoundError,
+    EvalInstructionsSource,
+    resolve_eval_instructions,
+)
+from app.evals.run_tracking import EvalRunSnapshot as EvalRunSnapshotModel
+from app.evals.run_tracking import (
+    get_current_eval_run,
+    get_eval_run,
+    list_eval_run_events,
+    listen_eval_run_notifications,
+    request_eval_run_cancellation,
+)
 from app.evals.runtime import EvalRunRequestConfig, EvalSuite, parse_test_cases_filter
 from app.evals.service import (
     EVAL_RUN_MANAGER,
@@ -40,7 +58,6 @@ from app.evals.service import (
     EvalRunNotFoundError,
     EvalRunPaths,
 )
-from app.evals.service import EvalRunSnapshot as EvalRunSnapshotModel
 from app.evals.storage import (
     EvalReportSortBy,
     EvalReportSummaryRecord,
@@ -49,7 +66,14 @@ from app.evals.storage import (
     list_eval_report_summaries,
 )
 from app.evals.storage import get_eval_report as get_stored_eval_report
-from app.models import EvalCaseResult, EvalCaseRunResult, EvalRunRecord, OtelSpan
+from app.models import (
+    EvalCaseResult,
+    EvalCaseRunResult,
+    EvalRunRecord,
+    OtelSpan,
+    PromptSetScope,
+    PromptSetVersion,
+)
 
 router = APIRouter(prefix="/evals", tags=["evals"])
 
@@ -118,6 +142,18 @@ class EvalTestCasesOut(BaseModel):
     cases: list[str]
 
 
+class EvalInstructionVersionOut(BaseModel):
+    id: UUID
+    version_number: int
+    name: str
+    is_deployed: bool
+
+
+class EvalDraftPromptTemplateIn(BaseModel):
+    filename: str
+    content: str
+
+
 class EvalCasePayloadIn(BaseModel):
     suite: str
     payload: dict[str, object]
@@ -130,6 +166,7 @@ class EvalCaseOut(BaseModel):
     active: bool
     payload: dict[str, object]
     payload_hash: str
+    verified: bool
     canonical_payload: dict[str, object] | None
     disk_hash: str | None
     overlay_base_disk_hash: str | None
@@ -156,6 +193,7 @@ class TraceSummaryOut(BaseModel):
     root_span_name: str | None
     model: str | None
     is_error: bool
+    failed_result_count: int
     is_public: bool | None
     conversation_id: str | None
     is_ai: bool
@@ -183,6 +221,7 @@ class TraceDetailOut(BaseModel):
     started_at: datetime | None
     duration_ms: float | None
     span_count: int
+    total_cost: float | None
     is_public: bool | None
     conversation_id: str | None
     spans: list[TraceSpanOut]
@@ -195,6 +234,10 @@ class EvalRunRequest(BaseModel):
     max_concurrency: int = 5
     test_cases: str | None = None
     pass_threshold: float = 0.9
+    instructions_source: EvalInstructionsSource = "live"
+    prompt_set_version_id: UUID | None = None
+    draft_base_prompt_set_version_id: UUID | None = None
+    draft_prompt_templates: list[EvalDraftPromptTemplateIn] | None = None
     chatbot_model: str | None = None
     guardrail_model: str | None = None
     evaluation_model: str | None = None
@@ -203,6 +246,51 @@ class EvalRunRequest(BaseModel):
 
 def _format_sse(event: str, payload: dict[str, object]) -> str:
     return f"event: {event}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+
+def _is_terminal_eval_event(event: str, payload: dict[str, object]) -> bool:
+    return event == "status" and payload.get("status") in {"complete", "error", "cancelled"}
+
+
+async def _next_eval_run_notification(notifications: AsyncIterator[str]) -> str:
+    return await anext(notifications)
+
+
+async def _stream_persisted_eval_run(
+    run_id: str, user_id: UUID, request: Request
+) -> AsyncIterator[str]:
+    last_sequence = 0
+    async with listen_eval_run_notifications() as notifications:
+        events = await list_eval_run_events(run_id, user_id)
+        if events is None:
+            return
+        for event in events:
+            last_sequence = event.sequence
+            yield _format_sse(event.event, event.payload)
+            if _is_terminal_eval_event(event.event, event.payload):
+                return
+
+        notification_task = asyncio.create_task(_next_eval_run_notification(notifications))
+        try:
+            while True:
+                notified_run_id = await notification_task
+                notification_task = asyncio.create_task(_next_eval_run_notification(notifications))
+                if await request.is_disconnected():
+                    return
+                if notified_run_id != run_id:
+                    continue
+                events = await list_eval_run_events(run_id, user_id, after_sequence=last_sequence)
+                if events is None:
+                    return
+                for event in events:
+                    last_sequence = event.sequence
+                    yield _format_sse(event.event, event.payload)
+                    if _is_terminal_eval_event(event.event, event.payload):
+                        return
+        finally:
+            notification_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, StopAsyncIteration):
+                await notification_task
 
 
 def _eval_run_snapshot_out(snapshot: EvalRunSnapshotModel) -> EvalRunSnapshotOut:
@@ -352,6 +440,7 @@ def _case_definition_out(case_definition: EvalCaseDefinition) -> EvalCaseOut:
         active=case_definition.active,
         payload=case_definition.payload,
         payload_hash=case_definition.payload_hash,
+        verified=case_definition.verified,
         canonical_payload=case_definition.canonical_payload,
         disk_hash=case_definition.disk_hash,
         overlay_base_disk_hash=case_definition.overlay_base_disk_hash,
@@ -368,6 +457,12 @@ def _raise_case_management_error(error: EvalCaseManagementError) -> NoReturn:
         raise HTTPException(status_code=409, detail=str(error)) from error
     if isinstance(error, EvalCaseValidationError):
         raise HTTPException(status_code=400, detail=str(error)) from error
+    raise HTTPException(status_code=400, detail=str(error)) from error
+
+
+def _raise_eval_instructions_error(error: EvalInstructionsError) -> NoReturn:
+    if isinstance(error, EvalInstructionsNotFoundError):
+        raise HTTPException(status_code=404, detail=str(error)) from error
     raise HTTPException(status_code=400, detail=str(error)) from error
 
 
@@ -420,6 +515,30 @@ def _report_detail_out(report: EvalRunRecord) -> EvalReportDetailOut:
         additional_settings=report.additional_settings,
         cases=[_case_out(case_record) for case_record in report.cases],
     )
+
+
+@router.get("/instruction-versions", response_model=list[EvalInstructionVersionOut])
+async def list_eval_instruction_versions(
+    session: SessionDep, _current_user: EvalsAccessUser
+) -> list[EvalInstructionVersionOut]:
+    del _current_user
+    versions = (
+        await session.scalars(
+            select(PromptSetVersion)
+            .where(PromptSetVersion.is_internal.is_(True))
+            .where(PromptSetVersion.scope == PromptSetScope.ASSISTANT)
+            .order_by(desc(PromptSetVersion.version_number), desc(PromptSetVersion.created_at))
+        )
+    ).all()
+    return [
+        EvalInstructionVersionOut(
+            id=version.id,
+            version_number=version.version_number,
+            name=version.name,
+            is_deployed=version.is_deployed,
+        )
+        for version in versions
+    ]
 
 
 @router.get("/test-cases", response_model=EvalTestCasesOut)
@@ -511,7 +630,7 @@ async def restore_eval_case(
 @router.get("/trace-index", response_model=PageOut[TraceSummaryOut])
 async def get_eval_trace_index(
     _current_user: EvalsAccessUser,
-    page_params: Annotated[PaginationParams, Depends()],
+    page_params: Annotated[TracePaginationParams, Depends()],
     ai_only: Annotated[bool, Query()] = False,
     start: Annotated[datetime | None, Query()] = None,
     end: Annotated[datetime | None, Query()] = None,
@@ -531,10 +650,20 @@ async def get_eval_trace_index(
         case((OtelSpan.parent_span_id.is_(None), OtelSpan.name), else_=None)
     ).label("root_span_name")
     error_expr = func.bool_or(OtelSpan.status_code == "ERROR").label("is_error")
+    failed_result_count_expr = (
+        func.count(OtelSpan.id)
+        .filter(
+            func.jsonb_extract_path_text(OtelSpan.attributes, "app.eval.result.kind")
+            == "assertion",
+            func.jsonb_extract_path_text(OtelSpan.attributes, "gen_ai.evaluation.score.label")
+            == "fail",
+        )
+        .label("failed_result_count")
+    )
     ai_expr = func.bool_or(OtelSpan.is_ai).label("is_ai")
     model_expr = func.max(OtelSpan.request_model).label("model")
 
-    stmt = select(
+    base_stmt = select(
         OtelSpan.trace_id,
         started_at_expr,
         ended_at_expr,
@@ -542,55 +671,64 @@ async def get_eval_trace_index(
         span_count_expr,
         root_name_expr,
         error_expr,
+        failed_result_count_expr,
         ai_expr,
         model_expr,
     ).group_by(OtelSpan.trace_id)
     if ai_only:
-        ai_trace_ids = select(func.distinct(OtelSpan.trace_id)).where(OtelSpan.is_ai.is_(True))
-        stmt = stmt.where(OtelSpan.trace_id.in_(ai_trace_ids))
+        base_stmt = base_stmt.having(ai_expr)
     if start is not None:
-        stmt = stmt.having(started_at_expr >= start)
+        base_stmt = base_stmt.having(started_at_expr >= start)
     if end is not None:
-        stmt = stmt.having(started_at_expr <= end)
+        base_stmt = base_stmt.having(started_at_expr <= end)
+
+    duration_ms_expr = func.extract("epoch", ended_at_expr - started_at_expr) * 1000.0
+    sort_column = {
+        "duration_ms": func.coalesce(duration_ms_expr, 0.0),
+        "span_count": span_count_expr,
+        "latest_start": latest_start_expr,
+    }.get(page_params.sort_by, started_at_expr)
+    ordered_sort = (
+        sort_column.desc().nullslast() if page_params.descending else sort_column.asc().nullsfirst()
+    )
+    page_stmt = base_stmt.add_columns(func.count().over().label("page_total")).order_by(
+        ordered_sort, OtelSpan.trace_id.asc()
+    )
+    page_stmt = page_stmt.offset(page_params.offset).limit(page_params.limit)
 
     async with eval_report_session() as session:
-        rows = (await session.execute(stmt)).all()
+        rows = (await session.execute(page_stmt)).all()
+        if rows:
+            total = rows[0].page_total
+        elif page_params.offset > 0:
+            count_source = base_stmt.with_only_columns(
+                OtelSpan.trace_id, maintain_column_froms=True
+            ).subquery()
+            total = (
+                await session.execute(select(func.count()).select_from(count_source))
+            ).scalar() or 0
+        else:
+            total = 0
 
-    items = [
-        TraceSummaryOut(
-            trace_id=row.trace_id,
-            started_at=row.started_at,
-            duration_ms=_trace_duration_ms(row.started_at, row.ended_at),
-            span_count=row.span_count,
-            root_span_name=row.root_span_name,
-            model=row.model,
-            is_error=bool(row.is_error),
-            is_public=None,
-            conversation_id=None,
-            is_ai=bool(row.is_ai),
-        )
-        for row in rows
-    ]
-
-    earliest_time = datetime.min.replace(tzinfo=UTC)
-    if page_params.sort_by == "duration_ms":
-        items.sort(key=lambda item: item.duration_ms or 0.0, reverse=page_params.descending)
-    elif page_params.sort_by == "span_count":
-        items.sort(key=lambda item: item.span_count, reverse=page_params.descending)
-    elif page_params.sort_by == "latest_start":
-        latest_start_by_trace = {row.trace_id: row.latest_start for row in rows}
-        items.sort(
-            key=lambda item: latest_start_by_trace.get(item.trace_id) or earliest_time,
-            reverse=page_params.descending,
-        )
-    else:
-        items.sort(
-            key=lambda item: item.started_at or earliest_time, reverse=page_params.descending
-        )
-
-    total = len(items)
-    end_offset = page_params.offset + page_params.limit if page_params.limit > 0 else None
-    return PageOut[TraceSummaryOut](items=items[page_params.offset : end_offset], total=total)
+    return PageOut[TraceSummaryOut](
+        items=[
+            TraceSummaryOut(
+                trace_id=row.trace_id,
+                started_at=row.started_at,
+                duration_ms=_trace_duration_ms(row.started_at, row.ended_at),
+                span_count=row.span_count,
+                root_span_name=row.root_span_name,
+                model=row.model,
+                is_error=bool(row.is_error),
+                failed_result_count=row.failed_result_count,
+                is_public=None,
+                conversation_id=None,
+                is_ai=bool(row.is_ai),
+            )
+            for row in rows
+        ],
+        total=total,
+    )
 
 
 @router.get("/trace/{trace_id}", response_model=TraceDetailOut)
@@ -622,6 +760,7 @@ async def get_eval_trace_detail(trace_id: str, _current_user: EvalsAccessUser) -
         started_at=started_at,
         duration_ms=_trace_duration_ms(started_at, ended_at),
         span_count=len(spans),
+        total_cost=trace_total_cost(spans),
         is_public=None,
         conversation_id=None,
         spans=[_trace_span_out(span) for span in spans],
@@ -682,13 +821,29 @@ async def run_eval_stream(
 
     suite = _resolve_eval_suite_name(run_request.suite)
     selected_test_cases = parse_test_cases_filter(run_request.test_cases)
+    draft_templates = (
+        None
+        if run_request.draft_prompt_templates is None
+        else tuple(
+            (template.filename, template.content) for template in run_request.draft_prompt_templates
+        )
+    )
     try:
         async with get_session() as session:
             case_payloads = await resolve_eval_case_payloads_for_run(
                 session, suite, selected_test_cases
             )
+            instructions = await resolve_eval_instructions(
+                session,
+                source=run_request.instructions_source,
+                prompt_set_version_id=run_request.prompt_set_version_id,
+                draft_base_prompt_set_version_id=run_request.draft_base_prompt_set_version_id,
+                draft_templates=draft_templates,
+            )
     except EvalCaseManagementError as error:
         _raise_case_management_error(error)
+    except EvalInstructionsError as error:
+        _raise_eval_instructions_error(error)
 
     config = EvalRunRequestConfig(
         suite=suite,
@@ -696,6 +851,7 @@ async def run_eval_stream(
         max_concurrency=run_request.max_concurrency,
         test_cases=selected_test_cases,
         case_payloads=case_payloads,
+        instructions=instructions,
         pass_threshold=run_request.pass_threshold,
         rebuild_rag=run_request.rebuild_rag,
         chatbot_model=run_request.chatbot_model,
@@ -704,50 +860,50 @@ async def run_eval_stream(
     )
     paths = EvalRunPaths(logs_dir=LOGS_DIR)
     try:
-        job = EVAL_RUN_MANAGER.start_run(config, paths=paths, user_id=current_user.id)
+        job = await EVAL_RUN_MANAGER.start_run(config, paths=paths, user_id=current_user.id)
     except EvalRunAlreadyRunningError as error:
         raise HTTPException(status_code=409, detail=str(error)) from error
 
-    async def event_stream() -> AsyncGenerator[str]:
-        async for event in job.subscribe():
-            if await request.is_disconnected():
-                return
-            yield _format_sse(event.event, event.payload)
-
-    return StreamingResponse(event_stream(), media_type="text/event-stream")
+    return StreamingResponse(
+        _stream_persisted_eval_run(job.run_id, current_user.id, request),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 @router.get("/runs/current", response_model=EvalRunSnapshotOut | None)
-async def get_current_eval_run(current_user: EvalsAccessUser) -> EvalRunSnapshotOut | None:
-    job = EVAL_RUN_MANAGER.current_run(current_user.id)
-    if job is None:
-        return None
-    return _eval_run_snapshot_out(job.snapshot())
+async def get_current_eval_run_route(current_user: EvalsAccessUser) -> EvalRunSnapshotOut | None:
+    snapshot = await get_current_eval_run(current_user.id)
+    return None if snapshot is None else _eval_run_snapshot_out(snapshot)
 
 
 @router.post("/runs/{run_id}/stream")
 async def stream_existing_eval_run(
     run_id: str, request: Request, current_user: EvalsStreamAccessUser
 ) -> StreamingResponse:
-    try:
-        job = EVAL_RUN_MANAGER.get_run(run_id, user_id=current_user.id)
-    except EvalRunNotFoundError as error:
-        raise HTTPException(status_code=404, detail="Eval run not found") from error
-
-    async def event_stream() -> AsyncGenerator[str]:
-        async for event in job.subscribe():
-            if await request.is_disconnected():
-                return
-            yield _format_sse(event.event, event.payload)
-
-    return StreamingResponse(event_stream(), media_type="text/event-stream")
+    snapshot = await get_eval_run(run_id, current_user.id)
+    if snapshot is None:
+        raise HTTPException(status_code=404, detail="Eval run not found")
+    return StreamingResponse(
+        _stream_persisted_eval_run(run_id, current_user.id, request),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 @router.post("/runs/{run_id}/cancel", response_model=EvalRunSnapshotOut)
 async def cancel_eval_run(run_id: str, current_user: EvalsAccessUser) -> EvalRunSnapshotOut:
+    snapshot = await request_eval_run_cancellation(run_id, current_user.id)
+    if snapshot is None:
+        raise HTTPException(status_code=404, detail="Eval run not found")
+
     try:
-        job = EVAL_RUN_MANAGER.get_run(run_id, user_id=current_user.id)
-    except EvalRunNotFoundError as error:
-        raise HTTPException(status_code=404, detail="Eval run not found") from error
-    await job.cancel()
-    return _eval_run_snapshot_out(job.snapshot())
+        local_job = EVAL_RUN_MANAGER.get_run(run_id, user_id=current_user.id)
+    except EvalRunNotFoundError:
+        local_job = None
+    if local_job is not None:
+        await local_job.cancel()
+        completed_snapshot = await get_eval_run(run_id, current_user.id)
+        if completed_snapshot is not None:
+            snapshot = completed_snapshot
+    return _eval_run_snapshot_out(snapshot)

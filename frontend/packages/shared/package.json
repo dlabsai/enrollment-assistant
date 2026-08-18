@@ -11,7 +11,7 @@
         "./*": "./src/*"
     },
     "scripts": {
-        "type-check": "pnpm -w exec tsgo -b --noEmit packages/shared",
+        "type-check": "pnpm -w exec tsc -b --noEmit packages/shared",
         "lint": "eslint src --fix --cache --cache-strategy content --cache-location ../../node_modules/.cache/eslint/shared"
     },
     "dependencies": {

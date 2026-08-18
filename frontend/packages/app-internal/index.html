@@ -12,6 +12,10 @@
             href="/assets/icons/graduation-cap.svg"
         />
         <title>%VITE_UNIVERSITY_NAME% Enrollment Assistant</title>
+        <meta
+            name="deploy-commit-sha"
+            content="%VITE_DEPLOY_COMMIT_SHA%"
+        />
         <script type="module">
             if (import.meta.env.DEV) {
                 if (!document.title.startsWith("DEV · ")) {

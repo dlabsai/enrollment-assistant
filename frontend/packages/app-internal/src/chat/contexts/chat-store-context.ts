@@ -13,6 +13,8 @@ const useChatStoreContext = (): ChatStore => {
     return value;
 };
 
+export const useChatStoreApi = (): ChatStore => useChatStoreContext();
+
 export const useChatStore = <T>(selector: (state: ChatStoreState) => T): T => {
     const store = useChatStoreContext();
     return useStore(store, selector);
@@ -30,11 +32,13 @@ export const useChatActions = (): ChatActions => {
     return {
         loadChats: state.loadChats,
         selectChat: state.selectChat,
-        reloadChat: state.reloadChat,
         loadConversationTree: state.loadConversationTree,
-        setActiveChild: state.setActiveChild,
+        setActiveBranch: state.setActiveBranch,
         clearCurrentChat: state.clearCurrentChat,
+        abortChat: state.abortChat,
         sendMessage: state.sendMessage,
+        retryMessage: state.retryMessage,
+        retryGroundingSources: state.retryGroundingSources,
         deleteChat: state.deleteChat,
         renameChatTitle: state.renameChatTitle,
         regenerateChatTitle: state.regenerateChatTitle,

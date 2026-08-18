@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, desc, select
 
 from app.core.db import get_session
 from app.models import (
@@ -36,7 +36,7 @@ async def create_rag_build_job(
         job = RagBuildJob(
             job_name=job_name,
             trigger=trigger,
-            status="running",
+            status="pending",
             force_rebuild=force_rebuild,
             started_by_user_id=started_by_user_id,
             started_at=now,
@@ -48,17 +48,35 @@ async def create_rag_build_job(
         return job_id
 
 
+async def start_rag_build_job(job_id: UUID) -> None:
+    async with get_session() as session:
+        job = await session.scalar(
+            select(RagBuildJob).where(RagBuildJob.id == job_id).with_for_update()
+        )
+        if job is None:
+            raise RuntimeError(f"RAG build job {job_id} no longer exists")
+        if job.status != "pending":
+            raise RuntimeError(f"RAG build job {job_id} cannot start from status {job.status}")
+        job.status = "running"
+        await session.commit()
+
+
 async def record_rag_build_progress(job_id: UUID, snapshot: RagPipelineProgressSnapshot) -> None:
     async with get_session() as session:
         job = await session.scalar(select(RagBuildJob).where(RagBuildJob.id == job_id))
         if job is None:
             logger.warning("Skipping RAG build progress update for missing job %s", job_id)
             return
+        if job.status not in {"running", "cancelling"}:
+            logger.warning(
+                "Skipping RAG build progress update for terminal job %s with status %s",
+                job_id,
+                job.status,
+            )
+            return
 
         now = current_time_utc()
         job.current_step = snapshot.current_step
-        if job.status != "running":
-            job.status = "running"
 
         existing_steps = {
             step.step_key: step
@@ -156,6 +174,14 @@ async def finish_rag_build_job(
             logger.warning("Skipping RAG build finish update for missing job %s", job_id)
             return
 
+        if job.status not in {"pending", "running", "cancelling"}:
+            logger.warning(
+                "Skipping RAG build finish update for terminal job %s with status %s",
+                job_id,
+                job.status,
+            )
+            return
+
         finished_at = current_time_utc()
         job.status = status
         job.finished_at = finished_at
@@ -163,3 +189,29 @@ async def finish_rag_build_job(
         job.current_step = None
         job.error_message = error_message
         await session.commit()
+
+
+async def request_active_manual_rag_build_cancellation() -> UUID | None:
+    async with get_session() as session:
+        job = await session.scalar(
+            select(RagBuildJob)
+            .where(
+                RagBuildJob.trigger == "manual", RagBuildJob.status.in_(("running", "cancelling"))
+            )
+            .order_by(desc(RagBuildJob.started_at), desc(RagBuildJob.id))
+            .limit(1)
+        )
+        if job is None:
+            return None
+
+        if job.status != "cancelling":
+            job.status = "cancelling"
+            await session.commit()
+
+        return job.id
+
+
+async def rag_build_cancellation_requested(job_id: UUID) -> bool:
+    async with get_session() as session:
+        status = await session.scalar(select(RagBuildJob.status).where(RagBuildJob.id == job_id))
+        return status in {"cancelling", "cancelled"}

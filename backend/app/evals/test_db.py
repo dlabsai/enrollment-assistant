@@ -62,7 +62,7 @@ def run_test_db_migrations(database_url: str) -> None:
 
 def create_test_db_engine(database_url: str) -> AsyncEngine:
     """Create an async engine for the guarded test/eval database."""
-    return create_async_engine(database_url, echo=False)
+    return create_async_engine(database_url, echo=False, pool_pre_ping=True)
 
 
 async def initialize_test_db_schema(engine: AsyncEngine) -> None:

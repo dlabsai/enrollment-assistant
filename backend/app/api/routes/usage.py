@@ -2,20 +2,26 @@ from __future__ import annotations
 
 import uuid  # noqa: TC003
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 from enum import StrEnum
 from functools import lru_cache
 from typing import TYPE_CHECKING, Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
-from sqlalchemy import Float, Integer, String, case, cast, func, or_, select
+from sqlalchemy import Float, Integer, String, and_, case, cast, func, or_, select
 from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.sql import ColumnElement
 
 from app.api.deps import CurrentUser, SessionDep, require_permission
 from app.api.response_costs import price_usage
-from app.api.schemas import PageOut, PaginationParams
+from app.api.routes.owner_group_filter import (
+    OwnerGroup,
+    apply_aggregate_owner_filter,
+    validate_exclusive_user_filters,
+)
+from app.api.schemas import PageOut, TracePaginationParams
+from app.api.trace_costs import trace_total_cost
 from app.api.trace_projection import TraceOverviewItemOut, build_trace_overview
 from app.core.rbac import (
     PermissionKey,
@@ -31,7 +37,6 @@ if TYPE_CHECKING:
 
 router = APIRouter(prefix="/usage", tags=["usage"])
 
-_EARLIEST_TIME = datetime.min.replace(tzinfo=UTC)
 _PROVIDER_PREFIXES = frozenset({"azure", "openai", "openrouter"})
 _EMBEDDING_PRICE_PROVIDER = "azure"
 UsageAccessUser = Annotated[CurrentUser, Depends(require_permission(PermissionKey.ACCESS_USAGE))]
@@ -343,6 +348,7 @@ class TraceDetailOut(BaseModel):
     started_at: datetime | None
     duration_ms: float | None
     span_count: int
+    total_cost: float | None
     is_public: bool | None
     conversation_id: uuid.UUID | None
     spans: list[TraceSpanOut]
@@ -380,6 +386,24 @@ async def _get_conversation_owner_group_slug(
         select(RbacGroup.slug)
         .join(User, User.group_id == RbacGroup.id)
         .where(User.id == conversation.user_id)
+    )
+
+
+def _trace_page_visibility_condition(current_user: CurrentUser, *, unlinked_is_public: Any) -> Any:
+    is_admin = _is_admin_user(current_user)
+    has_conversation = Conversation.id.is_not(None)
+    internal_conversation = and_(
+        has_conversation,
+        Conversation.is_public.is_not(True),
+        has_conversation if is_admin else Conversation.user_id == current_user.id,
+    )
+    if not is_admin:
+        return internal_conversation
+
+    return or_(
+        and_(has_conversation, Conversation.is_public.is_(True)),
+        internal_conversation,
+        and_(Conversation.id.is_(None), unlinked_is_public.is_not(None)),
     )
 
 
@@ -497,38 +521,6 @@ async def _resolve_trace_context_map(
     return resolved
 
 
-async def _build_trace_meta_map(
-    session: SessionDep, trace_ids: list[str]
-) -> dict[str, dict[str, Any]]:
-    if not trace_ids:
-        return {}
-
-    root_name_expr = func.max(
-        case((OtelSpan.parent_span_id.is_(None), OtelSpan.name), else_=None)
-    ).label("root_span_name")
-    error_expr = func.bool_or(OtelSpan.status_code == "ERROR").label("is_error")
-    ai_expr = func.bool_or(OtelSpan.is_ai).label("is_ai")
-    model_expr = func.max(OtelSpan.request_model).label("request_model")
-
-    rows = (
-        await session.execute(
-            select(OtelSpan.trace_id, root_name_expr, error_expr, ai_expr, model_expr)
-            .where(OtelSpan.trace_id.in_(trace_ids))
-            .group_by(OtelSpan.trace_id)
-        )
-    ).all()
-
-    return {
-        row.trace_id: {
-            "root_span_name": row.root_span_name,
-            "is_error": bool(row.is_error),
-            "is_ai": bool(row.is_ai),
-            "model": row.request_model,
-        }
-        for row in rows
-    }
-
-
 def _trace_duration_ms(started_at: datetime | None, ended_at: datetime | None) -> float | None:
     if started_at is None or ended_at is None:
         return None
@@ -543,13 +535,20 @@ async def get_usage_summary(
     start: Annotated[datetime | None, Query()] = None,
     end: Annotated[datetime | None, Query()] = None,
     models: Annotated[list[str] | None, Query()] = None,
+    user_email: Annotated[str | None, Query()] = None,
+    user_group: Annotated[OwnerGroup | None, Query()] = None,
     latest_limit: Annotated[int, Query(ge=1, le=200)] = 20,
 ) -> Any:
-    _ = current_user
     if platform not in {None, "both", "internal", "public"}:
         raise HTTPException(status_code=400, detail="Invalid platform")
     if start is not None and end is not None and start > end:
         raise HTTPException(status_code=400, detail="Invalid time range")
+    validate_exclusive_user_filters(user_email=user_email, user_group=user_group)
+    permission_map = (
+        await get_effective_permission_map(session, current_user)
+        if user_group is not None or (user_email is not None and user_email.strip() != "")
+        else {}
+    )
 
     platform_value = "both" if platform in (None, "both") else platform
 
@@ -587,39 +586,44 @@ async def get_usage_summary(
     if model_filter is not None:
         filters.append(model_filter)
 
-    trace_context_subquery = None
-    platform_filter = None
-    if platform_value in {"internal", "public"}:
-        trace_context_subquery = (
-            select(
-                OtelSpan.trace_id.label("trace_id"),
-                func.max(cast(OtelSpan.conversation_id, String)).label("conversation_id"),
-                func.bool_or(OtelSpan.is_internal).label("is_internal"),
-            )
-            .where(or_(OtelSpan.conversation_id.is_not(None), OtelSpan.is_internal.is_not(None)))
-            .group_by(OtelSpan.trace_id)
-            .subquery()
+    trace_context_subquery = (
+        select(
+            OtelSpan.trace_id.label("trace_id"),
+            func.max(cast(OtelSpan.conversation_id, String)).label("conversation_id"),
+            func.bool_or(OtelSpan.is_internal).label("is_internal"),
         )
+        .where(or_(OtelSpan.conversation_id.is_not(None), OtelSpan.is_internal.is_not(None)))
+        .group_by(OtelSpan.trace_id)
+        .subquery()
+    )
 
-        is_public_expr = case(
-            (
-                trace_context_subquery.c.is_internal.is_not(None),
-                ~trace_context_subquery.c.is_internal,
+    is_public_expr = case(
+        (trace_context_subquery.c.is_internal.is_not(None), ~trace_context_subquery.c.is_internal),
+        (Conversation.is_public.is_not(None), Conversation.is_public),
+        else_=None,
+    )
+    is_public_filter_expr = func.coalesce(is_public_expr, False)
+    platform_filter = (
+        is_public_filter_expr.is_(platform_value == "public")
+        if platform_value in {"internal", "public"}
+        else None
+    )
+
+    def apply_usage_filters(statement: Any) -> Any:
+        statement = apply_aggregate_owner_filter(
+            statement.outerjoin(
+                trace_context_subquery, trace_context_subquery.c.trace_id == OtelSpan.trace_id
+            ).outerjoin(
+                Conversation,
+                Conversation.id == cast(trace_context_subquery.c.conversation_id, PGUUID),
             ),
-            (Conversation.is_public.is_not(None), Conversation.is_public),
-            else_=None,
+            current_user=current_user,
+            permission_map=permission_map,
+            user_email=user_email,
+            user_group=user_group,
+            include_internal=platform_value != "public",
         )
-        is_public_filter_expr = func.coalesce(is_public_expr, False)
-        platform_filter = is_public_filter_expr.is_(platform_value == "public")
-
-    def apply_platform_filters(statement: Any) -> Any:
-        if trace_context_subquery is None:
-            return statement
-        return statement.outerjoin(
-            trace_context_subquery, trace_context_subquery.c.trace_id == OtelSpan.trace_id
-        ).outerjoin(
-            Conversation, Conversation.id == cast(trace_context_subquery.c.conversation_id, PGUUID)
-        )
+        return statement.where(platform_filter) if platform_filter is not None else statement
 
     use_hourly_buckets = _use_hourly_buckets(start, end)
     bucket_unit = "hour" if use_hourly_buckets else "day"
@@ -651,9 +655,7 @@ async def get_usage_summary(
         ),
         func.avg(case((~is_embedding_expr, duration_expr), else_=None)).label("avg_duration"),
     ).select_from(OtelSpan)
-    daily_stmt = apply_platform_filters(daily_stmt).where(*filters)
-    if platform_filter is not None:
-        daily_stmt = daily_stmt.where(platform_filter)
+    daily_stmt = apply_usage_filters(daily_stmt).where(*filters)
     daily_stmt = daily_stmt.group_by(time_bucket).order_by(time_bucket)
 
     daily_rows = (await session.execute(daily_stmt)).all()
@@ -688,9 +690,7 @@ async def get_usage_summary(
         ),
         func.avg(case((~is_embedding_expr, duration_expr), else_=None)).label("avg_duration"),
     ).select_from(OtelSpan)
-    summary_stmt = apply_platform_filters(summary_stmt).where(*filters)
-    if platform_filter is not None:
-        summary_stmt = summary_stmt.where(platform_filter)
+    summary_stmt = apply_usage_filters(summary_stmt).where(*filters)
     summary_row = (await session.execute(summary_stmt)).one()
 
     model_stmt = select(
@@ -699,17 +699,13 @@ async def get_usage_summary(
         func.coalesce(func.sum(tokens_expr), 0).label("tokens"),
         func.coalesce(func.sum(func.coalesce(effective_cost_expr, 0.0)), 0.0).label("cost"),
     ).select_from(OtelSpan)
-    model_stmt = apply_platform_filters(model_stmt).where(*filters)
-    if platform_filter is not None:
-        model_stmt = model_stmt.where(platform_filter)
+    model_stmt = apply_usage_filters(model_stmt).where(*filters)
     model_stmt = model_stmt.group_by(model_expr).order_by(func.count(OtelSpan.id).desc())
 
     model_rows = (await session.execute(model_stmt)).all()
 
     span_stmt = select(OtelSpan)
-    span_stmt = apply_platform_filters(span_stmt).where(*filters)
-    if platform_filter is not None:
-        span_stmt = span_stmt.where(platform_filter)
+    span_stmt = apply_usage_filters(span_stmt).where(*filters)
     span_stmt = span_stmt.order_by(span_time_expr.desc()).limit(latest_limit)
 
     spans = (await session.execute(span_stmt)).scalars().all()
@@ -789,6 +785,7 @@ async def _build_trace_detail(
         started_at=started_at,
         duration_ms=_trace_duration_ms(started_at, ended_at),
         span_count=len(spans),
+        total_cost=trace_total_cost(spans),
         is_public=context.is_public,
         conversation_id=context.conversation_id,
         spans=[
@@ -817,7 +814,7 @@ async def _build_trace_detail(
 @router.get("/trace-index", response_model=PageOut[TraceSummaryOut])
 async def get_trace_index(
     session: SessionDep,
-    page_params: Annotated[PaginationParams, Depends()],
+    page_params: Annotated[TracePaginationParams, Depends()],
     current_user: TracesAccessUser,
     ai_only: Annotated[bool, Query()] = False,
     platform: Annotated[str | None, Query()] = None,
@@ -835,75 +832,110 @@ async def get_trace_index(
         "ended_at"
     )
     latest_start_expr = func.max(span_time_expr).label("latest_start")
-    span_count_expr = func.count(OtelSpan.id).label("span_count")
-
-    summary_stmt = select(
-        OtelSpan.trace_id, started_at_expr, ended_at_expr, latest_start_expr, span_count_expr
+    is_ai_expr = func.bool_or(OtelSpan.is_ai).label("is_ai")
+    trace_summary_stmt = select(
+        OtelSpan.trace_id,
+        started_at_expr,
+        ended_at_expr,
+        latest_start_expr,
+        func.count(OtelSpan.id).label("span_count"),
+        func.max(case((OtelSpan.parent_span_id.is_(None), OtelSpan.name), else_=None)).label(
+            "root_span_name"
+        ),
+        func.bool_or(OtelSpan.status_code == "ERROR").label("is_error"),
+        is_ai_expr,
+        func.max(OtelSpan.request_model).label("model"),
+        func.max(cast(OtelSpan.conversation_id, String)).label("conversation_id"),
+        func.bool_or(OtelSpan.is_internal).label("is_internal"),
     ).group_by(OtelSpan.trace_id)
-
     if ai_only:
-        ai_trace_ids_stmt = select(func.distinct(OtelSpan.trace_id)).where(OtelSpan.is_ai.is_(True))
-        summary_stmt = summary_stmt.where(OtelSpan.trace_id.in_(ai_trace_ids_stmt))
+        trace_summary_stmt = trace_summary_stmt.having(is_ai_expr)
     if start is not None:
-        summary_stmt = summary_stmt.having(started_at_expr >= start)
+        trace_summary_stmt = trace_summary_stmt.having(started_at_expr >= start)
     if end is not None:
-        summary_stmt = summary_stmt.having(started_at_expr <= end)
+        trace_summary_stmt = trace_summary_stmt.having(started_at_expr <= end)
+    trace_summary = trace_summary_stmt.cte("trace_summary")
 
-    summary_rows = (await session.execute(summary_stmt)).all()
-    trace_ids = [row.trace_id for row in summary_rows]
-    latest_start_by_trace = {row.trace_id: row.latest_start for row in summary_rows}
-    context_map = await _resolve_trace_context_map(session, trace_ids)
-    meta_map = await _build_trace_meta_map(session, trace_ids)
+    summary_conversation_id: ColumnElement[uuid.UUID] = cast(
+        trace_summary.c.conversation_id, PGUUID
+    )
+    summary_is_public = case(
+        (trace_summary.c.is_internal.is_not(None), ~trace_summary.c.is_internal), else_=None
+    )
+    effective_is_public = case(
+        (Conversation.id.is_not(None), Conversation.is_public), else_=summary_is_public
+    ).label("is_public")
+    duration_ms_expr = (
+        func.extract("epoch", trace_summary.c.ended_at - trace_summary.c.started_at) * 1000.0
+    )
 
-    items: list[TraceSummaryOut] = []
-    for row in summary_rows:
-        context = context_map.get(
-            row.trace_id, _TraceContext(is_public=None, conversation_id=None, conversation=None)
+    visible_stmt = (
+        select(
+            trace_summary.c.trace_id,
+            trace_summary.c.started_at,
+            trace_summary.c.ended_at,
+            trace_summary.c.latest_start,
+            trace_summary.c.span_count,
+            trace_summary.c.root_span_name,
+            trace_summary.c.is_error,
+            trace_summary.c.is_ai,
+            trace_summary.c.model,
+            summary_conversation_id.label("conversation_id"),
+            effective_is_public,
         )
-        try:
-            await _ensure_trace_access(context, current_user, session, TraceAccessSource.PAGE)
-        except HTTPException:
-            continue
+        .select_from(trace_summary)
+        .outerjoin(Conversation, Conversation.id == summary_conversation_id)
+        .where(_trace_page_visibility_condition(current_user, unlinked_is_public=summary_is_public))
+    )
+    if platform == "public":
+        visible_stmt = visible_stmt.where(effective_is_public.is_(True))
+    elif platform == "internal":
+        visible_stmt = visible_stmt.where(effective_is_public.is_(False))
 
-        if platform == "public" and context.is_public is not True:
-            continue
-        if platform == "internal" and context.is_public is not False:
-            continue
+    sort_column = {
+        "duration_ms": func.coalesce(duration_ms_expr, 0.0),
+        "span_count": trace_summary.c.span_count,
+        "latest_start": trace_summary.c.latest_start,
+    }.get(page_params.sort_by, trace_summary.c.started_at)
+    ordered_sort = (
+        sort_column.desc().nullslast() if page_params.descending else sort_column.asc().nullsfirst()
+    )
+    page_stmt = visible_stmt.add_columns(func.count().over().label("page_total")).order_by(
+        ordered_sort, trace_summary.c.trace_id.asc()
+    )
+    page_stmt = page_stmt.offset(page_params.offset).limit(page_params.limit)
 
-        meta = meta_map.get(row.trace_id, {})
-        items.append(
+    rows = (await session.execute(page_stmt)).all()
+    if rows:
+        total = rows[0].page_total
+    elif page_params.offset > 0:
+        count_source = visible_stmt.with_only_columns(
+            trace_summary.c.trace_id, maintain_column_froms=True
+        ).subquery()
+        total = (
+            await session.execute(select(func.count()).select_from(count_source))
+        ).scalar() or 0
+    else:
+        total = 0
+
+    return PageOut[TraceSummaryOut](
+        items=[
             TraceSummaryOut(
                 trace_id=row.trace_id,
                 started_at=row.started_at,
                 duration_ms=_trace_duration_ms(row.started_at, row.ended_at),
                 span_count=row.span_count,
-                root_span_name=meta.get("root_span_name"),
-                model=meta.get("model"),
-                is_error=bool(meta.get("is_error", False)),
-                is_public=context.is_public,
-                conversation_id=context.conversation_id,
-                is_ai=bool(meta.get("is_ai", False)),
+                root_span_name=row.root_span_name,
+                model=row.model,
+                is_error=bool(row.is_error),
+                is_public=row.is_public,
+                conversation_id=row.conversation_id,
+                is_ai=bool(row.is_ai),
             )
-        )
-
-    sort_by = page_params.sort_by
-    if sort_by == "duration_ms":
-        items.sort(key=lambda item: item.duration_ms or 0.0, reverse=page_params.descending)
-    elif sort_by == "span_count":
-        items.sort(key=lambda item: item.span_count, reverse=page_params.descending)
-    elif sort_by == "latest_start":
-        items.sort(
-            key=lambda item: latest_start_by_trace.get(item.trace_id) or _EARLIEST_TIME,
-            reverse=page_params.descending,
-        )
-    else:
-        items.sort(
-            key=lambda item: item.started_at or _EARLIEST_TIME, reverse=page_params.descending
-        )
-
-    total = len(items)
-    end_offset = page_params.offset + page_params.limit if page_params.limit > 0 else None
-    return PageOut[TraceSummaryOut](items=items[page_params.offset : end_offset], total=total)
+            for row in rows
+        ],
+        total=total,
+    )
 
 
 @router.get("/trace/{trace_id}", response_model=TraceDetailOut)

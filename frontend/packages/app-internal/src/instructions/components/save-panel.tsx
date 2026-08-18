@@ -50,11 +50,11 @@ const SavePanelContent = ({
             </div>
             <div className="space-y-4 p-3">
                 <p className="text-muted-foreground text-sm">
-                    Create a testable version before deploying.
+                    Create a saved version of the instructions before deploying.
                 </p>
                 <div className="space-y-2">
                     <Label htmlFor="version-name">
-                        Version name <span className="text-destructive">*</span>
+                        Saved version name <span className="text-destructive">*</span>
                     </Label>
                     <Input
                         id="version-name"
@@ -101,7 +101,9 @@ const SavePanelContent = ({
                         void createVersion();
                     }}
                 >
-                    {isCreating ? "Creating..." : "Create version"}
+                    {isCreating
+                        ? "Creating..."
+                        : "Create saved version of the instructions"}
                 </Button>
             </div>
         </div>

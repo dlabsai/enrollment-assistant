@@ -46,6 +46,7 @@ from app.chat.engine_utils import (
     get_assistant_message_content,
     get_current_date_gmt_minus_4,
     normalize_whitespace,
+    prompt_context_trace_attributes,
     run_agent,
 )
 from app.chat.template_utils import get_runtime_jinja_environment
@@ -623,13 +624,19 @@ async def _run_chatbot_guardrails_iteration(
 
 
 def _build_trace_metadata(
-    *, conversation_id: UUID | None, user_id: UUID | None, is_internal: bool, conversation_turn: int
+    *,
+    conversation_id: UUID | None,
+    user_id: UUID | None,
+    is_internal: bool,
+    conversation_turn: int,
+    prompt_context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     metadata: dict[str, Any] = {"is_internal": is_internal, "conversation_turn": conversation_turn}
     if conversation_id is not None:
         metadata["conversation_id"] = str(conversation_id)
     if user_id is not None:
         metadata["user_id"] = str(user_id)
+    metadata.update(prompt_context_trace_attributes(prompt_context))
     return metadata
 
 
@@ -663,6 +670,8 @@ async def handle_investigation_turn(
         raise ValueError(f"Conversation with ID {conversation_id} not found")
     if conversation.kind != "investigation":
         raise ValueError("Investigation turn requires an investigation conversation")
+    if is_regeneration and parent_message_id is None:
+        raise ValueError("Regeneration requires an explicit parent message")
 
     parent_message: Message | None = None
     branch_messages: list[dict[str, str]] = []
@@ -671,6 +680,10 @@ async def handle_investigation_turn(
         parent_message = await session.get(Message, parent_message_id)
         if parent_message is None:
             raise ValueError(f"Parent message with ID {parent_message_id} not found")
+        if parent_message.conversation_id != conversation_id:
+            raise ValueError("Parent message is not in this conversation")
+        if is_regeneration and parent_message.role != "user":
+            raise ValueError("Regeneration parent must be a user message")
         branch_message_records = await get_conversation_path(session, parent_message_id)
         branch_messages = [
             {"role": message.role, "content": _message_content_for_llm_history(message)}
@@ -710,6 +723,10 @@ async def handle_investigation_turn(
         }
     )
 
+    # Request-session inputs are loaded and sessions use expire_on_commit=False. Release
+    # the pooled connection before template loading opens its independent DB session and
+    # before the provider/tool wait.
+    await session.commit()
     jinja_env = await get_runtime_jinja_environment(
         TEMPLATES_DIR,
         is_internal=True,
@@ -767,8 +784,10 @@ async def handle_investigation_turn(
         session.add(assistant_record)
         await session.flush()
         user_record.active_child = assistant_record
-        if user_record.parent:
-            user_record.parent.active_child_id = user_record.id
+        if parent_message is None:
+            conversation.active_root_message_id = user_record.id
+        else:
+            parent_message.active_child_id = user_record.id
         user_message_id = user_record.id
 
     total_time = time.perf_counter() - start_timestamp
@@ -791,6 +810,8 @@ async def handle_investigation_turn(
         system_prompt_rendered=system_prompt,
         conversation_turn=conversation_turn,
         total_time=total_time,
+        chatbot_model_settings=chatbot_model_settings.to_dict(),
+        chatbot_time=chatbot_time,
     )
     session.add(metadata)
     await session.flush()
@@ -838,6 +859,8 @@ async def handle_conversation_turn(
     enable_guardrails: bool = True,
     max_guardrails_retries: int | None = None,
     prompt_set_version_id: UUID | None = None,
+    prompt_template_overrides: dict[str, str] | None = None,
+    prompt_context: dict[str, Any] | None = None,
     event_emitter: EventEmitter | None = None,
 ) -> tuple[UUID, MessageOut]:
     """Handle a conversation turn for a given project and template using tree structure.
@@ -845,11 +868,16 @@ async def handle_conversation_turn(
     Parameters
     ----------
     - conversation_id=None, parent_message_id=None: Start new conversation
-    - conversation_id=existing_id, parent_message_id=None: Continue at current branch leaf
-    - conversation_id=existing_id, parent_message_id=specific_id: Create branch from specific
-        message
+    - conversation_id=existing_id, parent_message_id=None: Create a new root branch for a
+        normal turn
+    - conversation_id=existing_id, parent_message_id=specific_id: Create a branch from the
+        specific message
+    - regeneration requires an existing conversation and an explicit user-message parent
+    - callers continuing the current branch must resolve and pass its leaf as `parent_message_id`
     - prompt_set_version_id: Optional specific prompt set version to use for testing.
         If None, uses the deployed prompt set version (if any) or disk templates.
+    - prompt_template_overrides: Optional in-memory prompt templates to use for draft testing
+        without creating a prompt-set version.
 
     The system prompt message is generated dynamically at each turn from the active prompt set.
     User/assistant messages are stored in the database as a branchable tree.
@@ -871,6 +899,8 @@ async def handle_conversation_turn(
         debug(user_prompt)
 
     if conversation_id is None:
+        if is_regeneration:
+            raise ValueError("Regeneration requires an existing conversation and parent message")
         conversation = Conversation(
             title=user_prompt, project=project_name, user_id=user_id, is_public=not is_internal
         )
@@ -878,11 +908,19 @@ async def handle_conversation_turn(
         conversation = await session.get(Conversation, conversation_id)
         if not conversation:
             raise ValueError(f"Conversation with ID {conversation_id} not found")
+        if conversation.kind != "chat":
+            raise ValueError("Chat turn requires a chat conversation")
+        if is_regeneration and parent_message_id is None:
+            raise ValueError("Regeneration requires an explicit parent message")
 
         if parent_message_id is not None:
             parent_message = await session.get(Message, parent_message_id)
             if not parent_message:
                 raise ValueError(f"Parent message with ID {parent_message_id} not found")
+            if parent_message.conversation_id != conversation_id:
+                raise ValueError("Parent message is not in this conversation")
+            if is_regeneration and parent_message.role != "user":
+                raise ValueError("Regeneration parent must be a user message")
 
             branch_message_records = await get_conversation_path(session, parent_message_id)
             branch_messages = [
@@ -924,6 +962,7 @@ async def handle_conversation_turn(
         user_id=user_id,
         is_internal=is_internal,
         conversation_turn=conversation_turn,
+        prompt_context=prompt_context,
     )
     _set_current_span_attributes(
         {
@@ -934,6 +973,7 @@ async def handle_conversation_turn(
             "gen_ai.input.messages": json.dumps(
                 [{"role": "user", "content": user_prompt}], separators=(",", ":")
             ),
+            **prompt_context_trace_attributes(prompt_context),
         }
     )
 
@@ -949,11 +989,22 @@ async def handle_conversation_turn(
     guardrail_retry_count = 0
     guardrails_log: list[dict[str, str]] = []
 
+    allowed_url_registry: frozenset[str] | None = None
+    if enable_guardrails:
+        allowed_url_registry = await get_allowed_url_registry_for_va(
+            session, is_internal=is_internal
+        )
+
+    # Request-session inputs are loaded and sessions use expire_on_commit=False. Release
+    # the pooled connection before template loading opens its independent DB session and
+    # before provider/tool waits.
+    await session.commit()
     assistant_jinja_env = await get_runtime_jinja_environment(
         TEMPLATES_DIR,
         is_internal=is_internal,
         scope=PromptSetScope.ASSISTANT,
         prompt_set_version_id=prompt_set_version_id,
+        template_overrides=prompt_template_overrides,
     )
     deps = get_deps_with_jinja_env(
         session_factory=tool_session_factory,
@@ -966,12 +1017,6 @@ async def handle_conversation_turn(
 
     chatbot_template = assistant_jinja_env.get_template("chatbot_agent.j2")
     guardrails_template = assistant_jinja_env.get_template("guardrails_agent.j2")
-
-    allowed_url_registry: frozenset[str] | None = None
-    if enable_guardrails:
-        allowed_url_registry = await get_allowed_url_registry_for_va(
-            session, is_internal=is_internal
-        )
 
     guardrail_time: float | None = None
     total_guardrail_time: float = 0.0
@@ -1093,11 +1138,10 @@ async def handle_conversation_turn(
         await session.flush()
 
         user_record.active_child = assistant_record
-        if user_record.parent:
-            # for user message edit
-            # TODO: Configure model to allow setting active_child directly.
-            #   Now it would result in circular dependency error
-            user_record.parent.active_child_id = user_record.id
+        if parent_message is None:
+            conversation.active_root_message_id = user_record.id
+        else:
+            parent_message.active_child_id = user_record.id
 
         user_message_id = user_record.id
 
@@ -1125,6 +1169,8 @@ async def handle_conversation_turn(
     if tool_call_messages:
         all_tool_calls.extend(tool_call_messages)
 
+    chatbot_time = sum(chatbot_times) if chatbot_times else None
+
     metadata = AssistantMessageMetadataRecord(
         message_id=assistant_message_id,
         tool_calls=all_tool_calls or None,
@@ -1132,6 +1178,8 @@ async def handle_conversation_turn(
         system_prompt_rendered=system_prompt,
         conversation_turn=conversation_turn,
         total_time=total_time,
+        chatbot_model_settings=chatbot_model_settings.to_dict(),
+        chatbot_time=chatbot_time,
         guardrail_model_settings=(
             guardrail_model_settings.to_dict() if guardrail_time is not None else None
         ),
@@ -1146,8 +1194,6 @@ async def handle_conversation_turn(
     await session.refresh(conversation)
     await session.refresh(assistant_record)
     await session.refresh(metadata)
-
-    chatbot_time = sum(chatbot_times) if chatbot_times else None
 
     assistant_message_metadata_out = MessageMetadataOut(
         id=metadata.id,

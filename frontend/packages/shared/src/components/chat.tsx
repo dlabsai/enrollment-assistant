@@ -28,6 +28,7 @@ interface ChatProps {
     onSendMessage: (message: string) => void;
     messagesInitialized?: boolean;
     canSendMessages?: boolean;
+    composerDisabled?: boolean;
     headerContent?: ReactNode;
     disableVoiceFeatures?: boolean;
     emptyStateContent?: ReactNode;
@@ -61,6 +62,7 @@ export const Chat = ({
     onSendMessage,
     messagesInitialized = true,
     canSendMessages = true,
+    composerDisabled = false,
     headerContent,
     disableVoiceFeatures = false,
     emptyStateContent,
@@ -297,7 +299,9 @@ export const Chat = ({
                                         actionsAccessory={
                                             composerActionsAccessory
                                         }
-                                        disabled={!canSendMessages}
+                                        disabled={
+                                            !canSendMessages || composerDisabled
+                                        }
                                         isLoading={isLoading}
                                         isRecording={
                                             sttSupported ? isRecording : false
@@ -365,7 +369,9 @@ export const Chat = ({
                                 <InputBox
                                     accessory={composerAccessory}
                                     actionsAccessory={composerActionsAccessory}
-                                    disabled={!canSendMessages}
+                                    disabled={
+                                        !canSendMessages || composerDisabled
+                                    }
                                     isLoading={isLoading}
                                     isRecording={
                                         sttSupported ? isRecording : false

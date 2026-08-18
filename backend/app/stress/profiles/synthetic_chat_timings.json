@@ -1,0 +1,38 @@
+[
+  {
+    "handle_ms": 1200.0,
+    "conversation_turn": 1,
+    "chatbot_ms": 700.0,
+    "guardrail_ms": 250.0,
+    "tool_names": ["find_document_chunks", "retrieve_documents"],
+    "embeddings": 1,
+    "grounding_ms": 200.0
+  },
+  {
+    "handle_ms": 900.0,
+    "conversation_turn": 1,
+    "chatbot_ms": 500.0,
+    "guardrail_ms": 200.0,
+    "tool_names": [],
+    "embeddings": 0,
+    "grounding_ms": 150.0
+  },
+  {
+    "handle_ms": 1600.0,
+    "conversation_turn": 2,
+    "chatbot_ms": 950.0,
+    "guardrail_ms": 300.0,
+    "tool_names": ["find_document_titles", "retrieve_documents"],
+    "embeddings": 0,
+    "grounding_ms": 250.0
+  },
+  {
+    "handle_ms": 2100.0,
+    "conversation_turn": 3,
+    "chatbot_ms": 1250.0,
+    "guardrail_ms": 350.0,
+    "tool_names": ["find_document_chunks", "find_document_chunks"],
+    "embeddings": 2,
+    "grounding_ms": 300.0
+  }
+]

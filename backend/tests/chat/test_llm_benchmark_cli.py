@@ -15,14 +15,16 @@ def test_resolve_models_expands_all_and_dedupes(monkeypatch: pytest.MonkeyPatch)
     monkeypatch.setattr(llm_benchmark.settings, "GUARDRAIL_MODEL", "azure/c")
     monkeypatch.setattr(llm_benchmark.settings, "EVALUATION_MODEL", "azure/d")
     monkeypatch.setattr(llm_benchmark.settings, "SUMMARIZER_MODEL", "azure/e")
+    monkeypatch.setattr(llm_benchmark.settings, "TITLE_MODEL", "azure/f")
 
-    assert llm_benchmark.resolve_models(["all", "azure/a", "azure/f"]) == [
+    assert llm_benchmark.resolve_models(["all", "azure/a", "azure/g"]) == [
         "azure/a",
         "azure/b",
         "azure/c",
         "azure/d",
         "azure/e",
         "azure/f",
+        "azure/g",
     ]
 
 

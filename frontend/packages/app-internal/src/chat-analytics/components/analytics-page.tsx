@@ -6,10 +6,14 @@ import {
 import { Filter, RefreshCw } from "lucide-react";
 import { type JSX, useEffect, useMemo, useState } from "react";
 
+import { useDashboardUserFilter } from "../../chats/hooks/use-dashboard-user-filter";
+import { parseStoredUserFilter } from "../../chats/lib/user-filter-options";
+import type { ChatUserOption } from "../../chats/types";
 import { PageHeader, PageHeaderGroup } from "../../components/page-header";
 import { PageSection, PageShell } from "../../components/page-shell";
 import { LoadingState, PageError } from "../../components/page-state";
 import { TimeRangeFilter } from "../../components/time-range-filter";
+import { UserFilterPopover } from "../../components/user-filter-popover";
 import {
     type CustomTimeRange,
     isTimeRangeValue,
@@ -39,6 +43,7 @@ interface StoredAnalyticsFilters {
         start?: string;
         end?: string;
     };
+    selectedUser?: ChatUserOption;
 }
 
 const isPlatformFilter = (value: string): value is PlatformFilter =>
@@ -96,6 +101,7 @@ const parseStoredAnalyticsFilters = (
                         ? customRangeValue.end
                         : undefined,
             },
+            selectedUser: parseStoredUserFilter(parsed.selectedUser),
         };
     } catch {
         return undefined;
@@ -122,6 +128,10 @@ export const AnalyticsPage = (): JSX.Element => {
         }
         return "both";
     });
+    const userFilter = useDashboardUserFilter({
+        initialSelectedUser: storedFilters?.selectedUser,
+        platform,
+    });
     const [timeRange, setTimeRange] = useState<TimeRangeValue>(() => {
         const storedTimeRange = storedFilters?.timeRange;
         if (storedTimeRange !== undefined) {
@@ -133,7 +143,13 @@ export const AnalyticsPage = (): JSX.Element => {
         parseStoredCustomRange(storedFilters?.customRange),
     );
     const { summary, loading, hasLoaded, error, refresh } =
-        useChatAnalyticsData(platform, timeRange, customRange);
+        useChatAnalyticsData(
+            platform,
+            timeRange,
+            customRange,
+            userFilter.userFilterParams.userEmail,
+            userFilter.userFilterParams.userGroup,
+        );
 
     useEffect(() => {
         if (typeof window === "undefined") {
@@ -146,12 +162,13 @@ export const AnalyticsPage = (): JSX.Element => {
                 start: customRange.start?.toISOString(),
                 end: customRange.end?.toISOString(),
             },
+            selectedUser: userFilter.selectedUser,
         };
         window.localStorage.setItem(
             analyticsFilterStorageKey,
             JSON.stringify(payload),
         );
-    }, [customRange, platform, timeRange]);
+    }, [customRange, platform, timeRange, userFilter.selectedUser]);
 
     if (loading && !hasLoaded) {
         return <LoadingState />;
@@ -161,7 +178,7 @@ export const AnalyticsPage = (): JSX.Element => {
         return (
             <PageError
                 message={error ?? "Failed to load chat analytics."}
-                onRetry={() => void refresh()}
+                onRetry={refresh}
             />
         );
     }
@@ -169,6 +186,16 @@ export const AnalyticsPage = (): JSX.Element => {
     return (
         <PageShell variant="dashboard">
             <PageHeader title="Chat Analytics">
+                <UserFilterPopover
+                    label={userFilter.label}
+                    loading={userFilter.loading}
+                    onChange={userFilter.handleChange}
+                    onOpenChange={userFilter.handleOpenChange}
+                    onSearchInputChange={userFilter.handleSearchInputChange}
+                    open={userFilter.open}
+                    options={userFilter.options}
+                    searchInput={userFilter.searchInput}
+                />
                 <PageHeaderGroup>
                     <ToggleGroup
                         aria-label="Platform"
@@ -202,6 +229,7 @@ export const AnalyticsPage = (): JSX.Element => {
                 </PageHeaderGroup>
                 <Button
                     onClick={() => {
+                        userFilter.clear();
                         setPlatform("both");
                         setTimeRange("30d");
                         setCustomRange({});
@@ -212,7 +240,7 @@ export const AnalyticsPage = (): JSX.Element => {
                     Clear
                 </Button>
                 <Button
-                    onClick={() => void refresh()}
+                    onClick={refresh}
                     variant="outline"
                 >
                     <RefreshCw data-icon="inline-start" />

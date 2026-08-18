@@ -11,6 +11,8 @@ services:
       - run
       - --reload
       - app/main.py
+    environment:
+      - WEB_CONCURRENCY=1
     develop:
       watch:
         - path: ./backend

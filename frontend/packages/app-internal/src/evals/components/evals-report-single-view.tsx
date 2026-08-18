@@ -16,7 +16,7 @@ import {
 interface EvalsReportSingleViewProps {
     detailError: string | undefined;
     detailLoading: boolean;
-    onLoadReportDetail: (reportId: string) => Promise<void> | void;
+    onRetryReportDetail: (reportId: string) => void;
     onViewModeChange: (viewMode: EvalsReportViewMode) => void;
     reportMeta: EvalReportDetail | EvalReportSummary | undefined;
     selectedReportDetail: EvalReportDetail | undefined;
@@ -27,7 +27,7 @@ interface EvalsReportSingleViewProps {
 export const EvalsReportSingleView = ({
     detailError,
     detailLoading,
-    onLoadReportDetail,
+    onRetryReportDetail,
     onViewModeChange,
     reportMeta,
     selectedReportDetail,
@@ -75,7 +75,7 @@ export const EvalsReportSingleView = ({
             {detailError !== undefined && selectedReportId !== undefined && (
                 <InlineError
                     message={detailError}
-                    onRetry={() => void onLoadReportDetail(selectedReportId)}
+                    onRetry={() => { onRetryReportDetail(selectedReportId); }}
                 />
             )}
             {selectedReportId === undefined ? (

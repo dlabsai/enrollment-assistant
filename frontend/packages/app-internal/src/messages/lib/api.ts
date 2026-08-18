@@ -19,8 +19,10 @@ interface MessageListItemResponse {
     conversation_user_name?: string | null;
     conversation_user_email?: string | null;
     generation_time_ms?: number | null;
-    input_tokens?: number | null;
+    uncached_input_tokens?: number | null;
+    cache_read_input_tokens?: number | null;
     output_tokens?: number | null;
+    response_cost?: number | null;
     tool_call_count: number;
     guardrail_failure_count: number;
     guardrails_blocked: boolean;
@@ -107,8 +109,10 @@ export const fetchMessageListPage = async (
             conversationUserName: item.conversation_user_name ?? undefined,
             conversationUserEmail: item.conversation_user_email ?? undefined,
             generationTimeMs: item.generation_time_ms ?? undefined,
-            inputTokens: item.input_tokens ?? undefined,
+            uncachedInputTokens: item.uncached_input_tokens ?? undefined,
+            cacheReadInputTokens: item.cache_read_input_tokens ?? undefined,
             outputTokens: item.output_tokens ?? undefined,
+            responseCost: item.response_cost ?? undefined,
             toolCallCount: item.tool_call_count,
             guardrailFailureCount: item.guardrail_failure_count,
             guardrailsBlocked: item.guardrails_blocked,

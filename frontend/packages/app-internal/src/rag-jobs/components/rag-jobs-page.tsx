@@ -40,7 +40,9 @@ import type {
 
 const statusOptions = [
     { label: "All statuses", value: "all" },
+    { label: "Pending", value: "pending" },
     { label: "Running", value: "running" },
+    { label: "Cancelling", value: "cancelling" },
     { label: "Completed", value: "completed" },
     { label: "Failed", value: "failed" },
     { label: "Skipped", value: "skipped" },
@@ -56,8 +58,14 @@ const triggerOptions = [
 
 const statusLabel = (status: string): string => {
     switch (status) {
+        case "pending": {
+            return "Pending";
+        }
         case "running": {
             return "Running";
+        }
+        case "cancelling": {
+            return "Cancelling";
         }
         case "completed": {
             return "Completed";
@@ -122,7 +130,9 @@ const statusVariant = (
     status: string,
 ): "default" | "secondary" | "destructive" | "outline" => {
     switch (status) {
-        case "running": {
+        case "pending":
+        case "running":
+        case "cancelling": {
             return "default";
         }
         case "completed": {

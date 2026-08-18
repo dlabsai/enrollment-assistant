@@ -1,6 +1,6 @@
 export type EvalSuite = "chatbot" | "guardrails";
 
-export type EvalCaseStatus = "disk" | "overridden" | "deleted" | "database";
+type EvalCaseStatus = "disk" | "overridden" | "deleted" | "database";
 
 export interface EvalCaseDefinition {
     suite: EvalSuite;
@@ -9,6 +9,7 @@ export interface EvalCaseDefinition {
     active: boolean;
     payload: Record<string, unknown>;
     payloadHash: string;
+    verified: boolean;
     canonicalPayload: Record<string, unknown> | null;
     diskHash: string | null;
     overlayBaseDiskHash: string | null;
@@ -24,6 +25,7 @@ export interface EvalCaseDefinitionApi {
     active: boolean;
     payload: Record<string, unknown>;
     payload_hash: string;
+    verified: boolean;
     canonical_payload: Record<string, unknown> | null;
     disk_hash: string | null;
     overlay_base_disk_hash: string | null;
@@ -88,12 +90,37 @@ export interface EvalReportDetail extends EvalReportSummary {
     cases: EvalCaseResult[];
 }
 
+export interface EvalInstructionVersion {
+    id: string;
+    versionNumber: number;
+    name: string;
+    isDeployed: boolean;
+}
+
+export interface EvalInstructionVersionApi {
+    id: string;
+    version_number: number;
+    name: string;
+    is_deployed: boolean;
+}
+
+type EvalInstructionsSource = "live" | "saved" | "draft";
+
+interface EvalDraftPromptTemplate {
+    filename: string;
+    content: string;
+}
+
 export interface EvalRunRequest {
     suite: EvalSuite;
     repeat: number;
     maxConcurrency: number;
     passThreshold: number;
     testCases?: string;
+    instructionsSource: EvalInstructionsSource;
+    promptSetVersionId?: string;
+    draftBasePromptSetVersionId?: string;
+    draftPromptTemplates?: EvalDraftPromptTemplate[];
     chatbotModel?: string;
     guardrailModel?: string;
     evaluationModel?: string;
@@ -104,7 +131,7 @@ export interface EvalRunLogEntry {
 }
 
 export interface EvalRunStatusEvent {
-    status: "start" | "complete" | "error" | "cancelled";
+    status: "start" | "cancelling" | "complete" | "error" | "cancelled";
     runId?: string;
 }
 

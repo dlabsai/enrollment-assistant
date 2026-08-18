@@ -14,8 +14,11 @@ import {
 } from "@va/shared/components/ui/card";
 import type { JSX } from "react";
 
-import { formatLocaleNumber } from "../../lib/number-format";
-import { formatUsageCost, formatUsageDuration } from "../lib/formatters";
+import {
+    formatLocaleNumber,
+    formatUsdCost,
+} from "../../lib/number-format";
+import { formatUsageDuration } from "../lib/formatters";
 import type { UsageSummary } from "../types";
 
 interface UsageSummaryCardsProps {
@@ -53,7 +56,7 @@ export const LlmSummaryCards = ({
             <CardHeader>
                 <CardDescription>LLM cost</CardDescription>
                 <CardTitle className="text-2xl font-semibold tabular-nums @[250px]/card:text-3xl">
-                    {formatUsageCost(summary.totalCost)}
+                    {formatUsdCost(summary.totalCost)}
                 </CardTitle>
                 <CardAction>
                     <IconCoin className="text-muted-foreground size-5" />
@@ -115,7 +118,7 @@ export const EmbeddingSummaryCards = ({
             <CardHeader>
                 <CardDescription>Embedding cost</CardDescription>
                 <CardTitle className="text-2xl font-semibold tabular-nums @[250px]/card:text-3xl">
-                    {formatUsageCost(summary.totalEmbeddingCost)}
+                    {formatUsdCost(summary.totalEmbeddingCost)}
                 </CardTitle>
                 <CardAction>
                     <IconCoin className="text-muted-foreground size-5" />

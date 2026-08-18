@@ -10,7 +10,8 @@ import type {
     ChatDetailResponse,
     ChatListItem,
     ChatSearchResult,
-    ConversationDetailTreeResponse,
+    ConversationTreeResponse,
+    DraftPromptTemplate,
     MessageFeedback,
     MessageGenerationTiming,
     MessageGuardrailsFailure,
@@ -19,11 +20,19 @@ import type {
     ModelOverrides,
     Rating,
 } from "../types";
+import type { GenerationAttemptRecord } from "./generation-attempt";
 import { parseServerGuardrailsFailures } from "./guardrails";
+import {
+    assertPrimaryMessageStreamCompleted,
+    type PrimaryMessageStreamOutcome,
+    recordPrimaryMessageStreamOutcome,
+} from "./message-stream-lifecycle";
 
 const CHATS_BASE = "/conversations";
 
 export type ChatCollectionKind = "chat" | "investigation";
+export type ConversationDetailSource =
+    "chat" | "chats" | "messages" | "investigate" | "investigations";
 
 export const fetchChats = async (
     api: AuthenticatedApi,
@@ -39,12 +48,7 @@ export const fetchChatDetail = async (
     api: AuthenticatedApi,
     chatId: string,
     options?: {
-        source?:
-            | "chat"
-            | "chats"
-            | "messages"
-            | "investigate"
-            | "investigations";
+        source?: ConversationDetailSource;
         targetMessageId?: string;
     },
 ): Promise<ChatDetailResponse> => {
@@ -149,28 +153,58 @@ export const fetchInternalModels = async (
     api: AuthenticatedApi,
 ): Promise<string[]> => api.get<string[]>("/models");
 
+interface GroundingSourcesResponse {
+    assistant_message_id: string;
+    grounding_sources_used: MessageSourceUsed[];
+    grounding_source_status: Exclude<GroundingSourceStatus, "pending">;
+}
+
+export const fetchGenerationAttempt = async (
+    api: AuthenticatedApi,
+    generationAttemptId: string,
+): Promise<GenerationAttemptRecord> =>
+    api.get<GenerationAttemptRecord>(
+        `/messages/internal/generation-attempts/${generationAttemptId}`,
+    );
+
+export const retryGroundingSources = async (
+    api: AuthenticatedApi,
+    messageId: string,
+): Promise<GroundingSourcesResponse> =>
+    api.post<GroundingSourcesResponse>(
+        `/messages/internal/${messageId}/grounding/retry`,
+        {},
+    );
+
 export const fetchConversationTree = async (
     api: AuthenticatedApi,
     chatId: string,
-): Promise<ConversationDetailTreeResponse> =>
-    api.get<ConversationDetailTreeResponse>(`/conversations/${chatId}/tree`);
-
-export const updateMessageActiveChild = async (
-    api: AuthenticatedApi,
-    messageId: string,
-    activeChildId?: string,
-): Promise<void> => {
-    await api.put(`/conversations/messages/${messageId}/active-child`, {
-        active_child_id: activeChildId ?? undefined,
-    });
+    options?: { source?: ConversationDetailSource },
+): Promise<ConversationTreeResponse> => {
+    const query = new URLSearchParams();
+    query.set("source", options?.source ?? "chat");
+    return api.get<ConversationTreeResponse>(
+        `${CHATS_BASE}/${chatId}/tree?${query.toString()}`,
+    );
 };
 
+export const updateConversationActiveBranch = async (
+    api: AuthenticatedApi,
+    chatId: string,
+    messageId: string,
+): Promise<ChatDetailResponse> =>
+    api.put<ChatDetailResponse>(`${CHATS_BASE}/${chatId}/active-branch`, {
+        message_id: messageId,
+    });
+
+interface MessageStreamError {
+    code: "message_generation_failed";
+    message: string;
+    retryable: boolean;
+}
+
 interface SendMessageCallbacks {
-    onChatId: (
-        chatId: string,
-        parentMessageId?: string,
-        chatTitle?: string,
-    ) => void;
+    onChatId: (chatId: string, chatTitle?: string) => void;
     onAssistantMessage: (payload: {
         assistantMessageId: string;
         content: string;
@@ -193,7 +227,7 @@ interface SendMessageCallbacks {
         groundingSourcesUsed: MessageSourceUsed[];
         groundingSourceStatus: GroundingSourceStatus;
     }) => void;
-    onError: (errorMessage: string) => void;
+    onError: (error: MessageStreamError) => void;
 }
 
 type ChatTitleStage = "initial" | "post_assistant";
@@ -380,7 +414,8 @@ const parseGroundingSourceStatus = (
     if (
         value === "pending" ||
         value === "selected" ||
-        value === "no_selection"
+        value === "no_selection" ||
+        value === "failed"
     ) {
         return value;
     }
@@ -391,9 +426,11 @@ export const sendMessageStream = async (
     api: AuthenticatedApi,
     params: {
         userMessage: string;
+        generationAttemptId: string;
         chatId?: string;
-        parentMessageId?: string;
+        parentMessageId?: string | null;
         promptSetVersionId?: string;
+        draftPromptTemplates?: DraftPromptTemplate[];
         modelOverrides?: ModelOverrides;
         isRegeneration?: boolean;
         conversationKind?: ChatCollectionKind;
@@ -403,6 +440,7 @@ export const sendMessageStream = async (
 ): Promise<void> => {
     const body: Record<string, unknown> = {
         user_prompt: params.userMessage,
+        generation_attempt_id: params.generationAttemptId,
     };
 
     if (params.chatId !== undefined) {
@@ -419,6 +457,9 @@ export const sendMessageStream = async (
         params.promptSetVersionId !== ""
     ) {
         body.prompt_set_version_id = params.promptSetVersionId;
+    }
+    if (params.draftPromptTemplates !== undefined) {
+        body.draft_prompt_templates = params.draftPromptTemplates;
     }
     const chatbotModel = params.modelOverrides?.chatbotModel;
     if (chatbotModel !== undefined && chatbotModel !== "") {
@@ -453,6 +494,7 @@ export const sendMessageStream = async (
     }
     const decoder = new TextDecoder();
     let buffer = "";
+    let primaryOutcome: PrimaryMessageStreamOutcome = "pending";
 
     while (true) {
         // eslint-disable-next-line no-await-in-loop
@@ -480,7 +522,6 @@ export const sendMessageStream = async (
                                 if (typeof chatId === "string") {
                                     callbacks.onChatId(
                                         chatId,
-                                        undefined,
                                         typeof payload.conversation_title ===
                                             "string"
                                             ? payload.conversation_title
@@ -662,6 +703,11 @@ export const sendMessageStream = async (
                                     typeof messageId === "string" &&
                                     typeof content === "string"
                                 ) {
+                                    primaryOutcome =
+                                        recordPrimaryMessageStreamOutcome(
+                                            primaryOutcome,
+                                            "assistant",
+                                        );
                                     callbacks.onAssistantMessage({
                                         assistantMessageId: messageId,
                                         content,
@@ -824,11 +870,21 @@ export const sendMessageStream = async (
                                 break;
                             }
                             case "error": {
-                                const { message } = payload;
-                                if (typeof message === "string") {
-                                    callbacks.onError(message);
+                                const { code, message, retryable } = payload;
+                                if (
+                                    code === "message_generation_failed" &&
+                                    typeof message === "string" &&
+                                    typeof retryable === "boolean"
+                                ) {
+                                    primaryOutcome =
+                                        recordPrimaryMessageStreamOutcome(
+                                            primaryOutcome,
+                                            "generation_failure",
+                                        );
+                                    callbacks.onError({ code, message, retryable });
+                                    break;
                                 }
-                                break;
+                                throw new TypeError("Invalid SSE error payload");
                             }
                             default: {
                                 break;
@@ -839,6 +895,8 @@ export const sendMessageStream = async (
             }
         }
     }
+
+    assertPrimaryMessageStreamCompleted(primaryOutcome);
 };
 
 export const fetchMessageFeedback = async (
@@ -847,9 +905,9 @@ export const fetchMessageFeedback = async (
     source: "chat" | "chats" = "chat",
 ): Promise<MessageFeedback[]> =>
     api
-        .get<
-            (Omit<MessageFeedback, "text"> & { text: string | null })[]
-        >(`/conversations/messages/${messageId}/feedback?source=${source}`)
+        .get<(Omit<MessageFeedback, "text"> & { text: string | null })[]>(
+            `/conversations/messages/${messageId}/feedback?source=${source}`,
+        )
         .then((items) =>
             items.map((item) => ({
                 ...item,

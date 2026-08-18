@@ -19,6 +19,9 @@ const useInstructionsStoreContext = (): InstructionsStore => {
     return value;
 };
 
+export const useInstructionsStoreApi = (): InstructionsStore =>
+    useInstructionsStoreContext();
+
 export const useInstructionsStore = <T>(
     selector: (state: InstructionsStoreState) => T,
 ): T => {
@@ -39,7 +42,6 @@ export const useInstructionsActions = (): InstructionsActions => {
         loadVersions: state.loadVersions,
         loadDeployedVersion: state.loadDeployedVersion,
         loadVersionDetail: state.loadVersionDetail,
-        setActiveTab: state.setActiveTab,
         setActivePlatform: state.setActivePlatform,
         setActiveSection: state.setActiveSection,
         setSectionExpanded: state.setSectionExpanded,
@@ -66,21 +68,9 @@ export const useInstructionsActions = (): InstructionsActions => {
         deleteVersion: state.deleteVersion,
         closeConfirmDialog: state.closeConfirmDialog,
         confirmAction: state.confirmAction,
-        setTestChatVersion: state.setTestChatVersion,
-        setTestChatChat: state.setTestChatChat,
-        clearTestChat: state.clearTestChat,
         setChatPanelOpen: state.setChatPanelOpen,
         toggleChatPanel: state.toggleChatPanel,
+        setTestChatState: state.setTestChatState,
         getBaseContent: state.getBaseContent,
     };
 };
-
-/**
- * Subscribe to store changes with a selector.
- * Returns the subscribe function from subscribeWithSelector middleware.
- */
-export const useInstructionsStoreSubscribe =
-    (): InstructionsStore["subscribe"] => {
-        const store = useInstructionsStoreContext();
-        return store.subscribe;
-    };

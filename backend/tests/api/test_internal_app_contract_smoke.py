@@ -235,10 +235,11 @@ async def test_internal_app_backend_contract_smoke(
         user_prompt: str,
         assistant_message: str,
         *,
+        assistant_message_id: UUID,
         is_internal: bool,
         on_title: Callable[[str], Awaitable[None]] | None = None,
     ) -> None:
-        del user_prompt, assistant_message, is_internal
+        del user_prompt, assistant_message, assistant_message_id, is_internal
         if on_title is not None:
             await on_title(f"Updated {conversation_id}")
 

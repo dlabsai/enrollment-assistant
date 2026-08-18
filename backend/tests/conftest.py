@@ -127,6 +127,17 @@ def pytest_unconfigure(config: pytest.Config) -> None:
     del config
 
 
+@pytest_asyncio.fixture(autouse=True)
+async def close_process_provider_clients_after_test() -> AsyncGenerator[None]:
+    """Keep process-local provider clients inside the event loop of the test that used them."""
+    from app.chat.provider_http import close_provider_http_clients
+
+    try:
+        yield
+    finally:
+        await close_provider_http_clients()
+
+
 @pytest_asyncio.fixture(scope="session")
 async def db_engine(request: pytest.FixtureRequest):
     """Create the database engine and tables once per test session.

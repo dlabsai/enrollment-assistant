@@ -35,6 +35,8 @@ from app.models import User
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+    from app.evals.instructions import EvalInstructionsSnapshot
+
 # ============================================================================
 # Models
 # ============================================================================
@@ -48,6 +50,7 @@ class ChatbotInput:
     criteria: str
     test_case_id: str
     is_internal: bool = True
+    verified: bool = False
 
 
 @dataclass
@@ -154,6 +157,8 @@ class ChatbotJudge(Evaluator[ChatbotInput, ChatbotOutput, Any]):
                 temperature=settings.EVALUATION_MODEL_TEMPERATURE,
                 max_tokens=settings.EVALUATION_MODEL_MAX_TOKENS,
             ),
+            metadata={"is_internal": ctx.inputs.is_internal},
+            agent_name="eval_judge",
             system_prompt=CHATBOT_JUDGE_SYSTEM_PROMPT,
         )
 
@@ -293,7 +298,10 @@ TEST_CASES = [
 
 
 async def run_chatbot(
-    inputs: ChatbotInput, models: dict[str, str], session_factory: async_sessionmaker[AsyncSession]
+    inputs: ChatbotInput,
+    models: dict[str, str],
+    session_factory: async_sessionmaker[AsyncSession],
+    instructions: EvalInstructionsSnapshot | None = None,
 ) -> ChatbotOutput:
     """Call the chatbot and return response with context.
 
@@ -339,6 +347,10 @@ async def run_chatbot(
             is_internal=inputs.is_internal,
             enable_guardrails=settings.ENABLE_GUARDRAILS,
             max_guardrails_retries=settings.MAX_GUARDRAILS_RETRIES,
+            prompt_template_overrides=(
+                instructions.template_overrides if instructions is not None else None
+            ),
+            prompt_context=(instructions.prompt_context() if instructions is not None else None),
         )
 
         assert isinstance(assistant_message, MessageOut)
@@ -406,14 +418,21 @@ async def run_chatbot_evaluation(
         ),
     }
 
-    additional_settings = {
+    additional_settings: dict[str, Any] = {
         "enable_guardrails": settings.ENABLE_GUARDRAILS,
         "max_guardrails_retries": settings.MAX_GUARDRAILS_RETRIES,
     }
+    if config.instructions is not None:
+        additional_settings["instructions"] = config.instructions.report_metadata()
 
     return await evaluate(
         dataset,
-        lambda inputs: run_chatbot(inputs, model_overrides, session_factory),
+        lambda inputs: run_chatbot(
+            inputs,
+            model_overrides,
+            session_factory,
+            config.instructions if inputs.is_internal else None,
+        ),
         evaluators=[ChatbotJudge(model=model_overrides["evaluation"]), MetricsEvaluator()],
         repeats=config.repeat,
         max_concurrency=config.max_concurrency,

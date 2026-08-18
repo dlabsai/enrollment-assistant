@@ -8,7 +8,6 @@ import type { AuthenticatedApi } from "../../auth/hooks/use-authenticated-api";
 import type {
     ActiveVersion,
     ConfirmDialogAction,
-    InstructionsTab,
     PromptFile,
     PromptSetVersion,
     PromptSetVersionCreate,
@@ -35,7 +34,21 @@ import {
     type PromptPlatform,
 } from "./sections";
 
-const STORAGE_KEY = "instructions-store";
+const STORAGE_KEY_PREFIX = "instructions-store";
+
+const getStorageKey = (userId: string): string =>
+    `${STORAGE_KEY_PREFIX}:${userId}`;
+
+const migrateUnscopedStorage = (storageKey: string): void => {
+    const unscopedState = window.localStorage.getItem(STORAGE_KEY_PREFIX);
+    if (unscopedState === null) {
+        return;
+    }
+    if (window.localStorage.getItem(storageKey) === null) {
+        window.localStorage.setItem(storageKey, unscopedState);
+    }
+    window.localStorage.removeItem(STORAGE_KEY_PREFIX);
+};
 
 interface InstructionsState {
     diskTemplates: PromptFile[];
@@ -51,7 +64,6 @@ interface InstructionsState {
     selectedVersionIdBySection: Record<string, string | undefined>;
     isDefaultSelectedBySection: Record<string, boolean | undefined>;
 
-    activeTab: InstructionsTab;
     showGuide: boolean;
     hasSeenGuide: boolean;
     error?: string;
@@ -72,11 +84,8 @@ interface InstructionsState {
     confirmDialogAction?: ConfirmDialogAction;
     confirmDialogVersionId?: string;
 
-    testChatVersionId: string;
-    testChatChatId?: string;
-    testChatParentMessageId?: string;
-
     isChatPanelOpen: boolean;
+    testChatId?: string;
 
     isCreating: boolean;
     isDeploying: boolean;
@@ -89,7 +98,6 @@ export interface InstructionsActions {
     loadDeployedVersion: (sectionId?: string) => Promise<void>;
     loadVersionDetail: (versionId: string) => Promise<void>;
 
-    setActiveTab: (tab: InstructionsTab) => void;
     setActivePlatform: (platform: PromptPlatform) => void;
     setActiveSection: (sectionId: string, platform: PromptPlatform) => void;
     setSectionExpanded: (sectionId: string, expanded: boolean) => void;
@@ -105,7 +113,7 @@ export interface InstructionsActions {
     requestSelectVersion: (versionId: string) => void;
     requestSelectDefault: () => void;
 
-    updateContent: (content: string) => void;
+    updateContent: (filename: string, content: string) => void;
     toggleDiff: () => void;
     toggleWrapLines: () => void;
     requestResetTemplate: () => void;
@@ -123,11 +131,9 @@ export interface InstructionsActions {
     closeConfirmDialog: () => void;
     confirmAction: () => Promise<void>;
 
-    setTestChatVersion: (versionId: string) => void;
-    setTestChatChat: (chatId: string, parentMessageId?: string) => void;
-    clearTestChat: () => void;
     setChatPanelOpen: (open: boolean) => void;
     toggleChatPanel: () => void;
+    setTestChatState: (chatId?: string) => void;
 
     getBaseContent: (filename: string) => string;
 }
@@ -197,9 +203,12 @@ type PersistedInstructionsState = Pick<
     | "isDefaultSelected"
     | "isDefaultSelectedBySection"
     | "selectedTemplate"
+    | "editedContent"
     | "drafts"
+    | "showDiff"
     | "wrapLines"
     | "isChatPanelOpen"
+    | "testChatId"
 >;
 
 type InstructionsStoreMutators = [
@@ -232,7 +241,7 @@ const filterInternalSectionEntries = <T>(
         Object.entries(entries).filter(
             ([sectionId]) => getPlatformForSectionId(sectionId) === "internal",
         ),
-    ) as Record<string, T>;
+    );
 
 const filterInternalTemplateEntries = <T>(
     entries: Record<string, T>,
@@ -243,7 +252,7 @@ const filterInternalTemplateEntries = <T>(
                 getPlatformForFilename(filename) === "internal" &&
                 getSectionIdForTemplate(filename) !== undefined,
         ),
-    ) as Record<string, T>;
+    );
 
 const getDefaultTemplateForSection = (
     diskTemplates: PromptFile[],
@@ -275,7 +284,6 @@ const createInitialInstructionsState = (): InstructionsState => ({
     expandedSections: {},
     selectedVersionIdBySection: {},
     isDefaultSelectedBySection: {},
-    activeTab: "editor",
     showGuide: true,
     hasSeenGuide: false,
     error: undefined,
@@ -291,10 +299,8 @@ const createInitialInstructionsState = (): InstructionsState => ({
     versionDescription: "",
     confirmDialogAction: undefined,
     confirmDialogVersionId: undefined,
-    testChatVersionId: "",
-    testChatChatId: undefined,
-    testChatParentMessageId: undefined,
     isChatPanelOpen: true,
+    testChatId: undefined,
     isCreating: false,
     isDeploying: false,
     isDeleting: false,
@@ -350,7 +356,7 @@ const createInstructionsActions = (
         const versions = await withErrorHandling(
             async () => fetchVersions(api, platform === "internal", scope),
 
-            "Failed to load versions",
+            "Failed to load saved versions of the instructions",
             (error) => {
                 set({ error });
             },
@@ -411,7 +417,7 @@ const createInstructionsActions = (
                         : get().isDefaultSelected,
                 error:
                     shouldResetSelection && activeSectionId === targetSectionId
-                        ? "Selected version is no longer available. It may have been deleted."
+                        ? "Selected saved version of the instructions is no longer available. It may have been deleted."
                         : get().error,
             });
         }
@@ -435,7 +441,7 @@ const createInstructionsActions = (
             async () =>
                 fetchDeployedVersion(api, platform === "internal", scope),
 
-            "Failed to load deployed version",
+            "Failed to load live saved version of the instructions",
             (error) => {
                 set({ error });
             },
@@ -480,10 +486,10 @@ const createInstructionsActions = (
             const { activeSectionId } = get();
             const message =
                 isApiError(error) && error.status === 404
-                    ? "Selected version is no longer available. It may have been deleted."
+                    ? "Selected saved version of the instructions is no longer available. It may have been deleted."
                     : error instanceof Error
                       ? error.message
-                      : "Failed to load version detail";
+                      : "Failed to load saved version of the instructions";
             set({
                 error: message,
                 selectedVersionId: undefined,
@@ -507,17 +513,6 @@ const createInstructionsActions = (
         }
     },
 
-    setActiveTab: (tab: InstructionsTab): void => {
-        set({ activeTab: tab });
-        if (tab === "test-chat") {
-            const sectionId = getSectionIdForScope(
-                "assistant",
-                get().activePlatform,
-            );
-            void get().loadVersions(sectionId);
-        }
-    },
-
     setActivePlatform: (platform: PromptPlatform): void => {
         const { activePlatform } = get();
         if (activePlatform === platform) {
@@ -533,9 +528,6 @@ const createInstructionsActions = (
             editedContent: "",
             showDiff: false,
             editorKey: get().editorKey + 1,
-            testChatVersionId: "",
-            testChatChatId: undefined,
-            testChatParentMessageId: undefined,
         });
     },
 
@@ -555,6 +547,7 @@ const createInstructionsActions = (
             selectedVersionId: storedDefault ? undefined : storedVersionId,
             isDefaultSelected: storedDefault,
             selectedVersionDetail: undefined,
+            showDiff: false,
             isDefaultSelectedBySection:
                 state.isDefaultSelectedBySection[sectionId] === undefined
                     ? {
@@ -666,7 +659,6 @@ const createInstructionsActions = (
             selectedTemplate: filename,
             editedContent: content,
             editorKey: get().editorKey + 1,
-            showDiff: filename in drafts,
             activeSectionId: sectionId ?? get().activeSectionId,
             selectedVersionId: nextSelectedVersionId,
             isDefaultSelected: nextIsDefaultSelected,
@@ -721,6 +713,7 @@ const createInstructionsActions = (
             drafts: remainingDrafts,
             editedContent: "",
             selectedVersionDetail: undefined,
+            showDiff: false,
             selectedVersionIdBySection:
                 activeSectionId === undefined
                     ? get().selectedVersionIdBySection
@@ -756,6 +749,7 @@ const createInstructionsActions = (
             drafts: remainingDrafts,
             editedContent: "",
             selectedVersionDetail: undefined,
+            showDiff: false,
             editorKey: get().editorKey + 1,
             selectedVersionIdBySection:
                 activeSectionId === undefined
@@ -808,31 +802,41 @@ const createInstructionsActions = (
         }
     },
 
-    updateContent: (content: string): void => {
-        const { selectedTemplate, drafts } = get();
-        if (selectedTemplate === undefined) {
+    updateContent: (filename: string, content: string): void => {
+        const { selectedTemplate, drafts, editedContent } = get();
+        const baseContent = get().getBaseContent(filename);
+        const currentContent =
+            selectedTemplate === filename
+                ? editedContent
+                : (drafts[filename] ?? baseContent);
+
+        if (content === currentContent) {
             return;
         }
 
-        const baseContent = get().getBaseContent(selectedTemplate);
         if (content === baseContent) {
-            const { [selectedTemplate]: removed, ...restDrafts } = drafts;
+            const { [filename]: removed, ...restDrafts } = drafts;
             void removed;
             set({
-                editedContent: content,
+                ...(selectedTemplate === filename
+                    ? { editedContent: content }
+                    : {}),
                 drafts: restDrafts,
             });
             return;
         }
 
         set({
-            editedContent: content,
-            drafts: { ...drafts, [selectedTemplate]: content },
+            ...(selectedTemplate === filename ? { editedContent: content } : {}),
+            drafts: { ...drafts, [filename]: content },
         });
     },
 
     toggleDiff: (): void => {
-        set({ showDiff: !get().showDiff });
+        const { drafts, selectedTemplate, showDiff } = get();
+        const canShowDiff =
+            selectedTemplate !== undefined && selectedTemplate in drafts;
+        set({ showDiff: showDiff ? false : canShowDiff });
     },
     toggleWrapLines: (): void => {
         set({ wrapLines: !get().wrapLines });
@@ -855,7 +859,6 @@ const createInstructionsActions = (
         set({
             editedContent: baseContent,
             drafts: restDrafts,
-            showDiff: false,
             editorKey: get().editorKey + 1,
         });
     },
@@ -879,7 +882,9 @@ const createInstructionsActions = (
         } = get();
 
         if (!versionName.trim()) {
-            set({ error: "Please enter a version name" });
+            set({
+                error: "Please enter a name for the saved version of the instructions",
+            });
             return;
         }
 
@@ -910,7 +915,7 @@ const createInstructionsActions = (
             scope === undefined
         ) {
             set({
-                error: "Select a section before saving a version.",
+                error: "Select a section before creating a saved version of the instructions.",
             });
             return;
         }
@@ -941,14 +946,14 @@ const createInstructionsActions = (
 
         if (scopeTemplates.length === 0) {
             set({
-                error: "No templates found for this section.",
+                error: "No instructions found for this section.",
             });
             return;
         }
 
         if (scopeTemplates.length !== scopeFilenames.length) {
             set({
-                error: "Some templates are missing for this section.",
+                error: "Some instructions are missing for this section.",
             });
             return;
         }
@@ -968,7 +973,7 @@ const createInstructionsActions = (
 
         const result = await withErrorHandling(
             async () => apiCreateVersion(api, data),
-            "Failed to create version",
+            "Failed to create saved version of the instructions",
             (error) => {
                 set({ error });
             },
@@ -981,9 +986,10 @@ const createInstructionsActions = (
                 drafts: {},
                 editedContent: "",
                 selectedTemplate: undefined,
+                showDiff: false,
             });
             await get().loadVersions(sectionId);
-            toast.success("Version created");
+            toast.success("Saved version of the instructions created");
         }
 
         set({ isCreating: false });
@@ -995,7 +1001,7 @@ const createInstructionsActions = (
 
         const result = await withErrorHandling(
             async () => apiDeployVersion(api, versionId),
-            "Failed to deploy version",
+            "Failed to deploy saved version of the instructions",
             (error) => {
                 set({ error });
             },
@@ -1006,7 +1012,7 @@ const createInstructionsActions = (
                 get().loadVersions(sectionId),
                 get().loadDeployedVersion(sectionId),
             ]);
-            toast.success("Version deployed");
+            toast.success("Saved version of the instructions deployed");
         }
 
         set({ isDeploying: false });
@@ -1028,7 +1034,7 @@ const createInstructionsActions = (
 
         const result = await withErrorHandling(
             async () => apiUndeployVersion(api, platform === "internal", scope),
-            "Failed to undeploy version",
+            "Failed to restore default instructions",
             (error) => {
                 set({ error });
             },
@@ -1058,7 +1064,6 @@ const createInstructionsActions = (
             selectedVersionId,
             selectedVersionIdBySection,
             isDefaultSelectedBySection,
-            testChatVersionId,
         } = get();
         if (confirmDialogVersionId === undefined) {
             return;
@@ -1071,7 +1076,7 @@ const createInstructionsActions = (
                 await apiDeleteVersion(api, confirmDialogVersionId);
                 return true;
             },
-            "Failed to delete version",
+            "Failed to delete saved version of the instructions",
             (error) => {
                 set({ error });
             },
@@ -1109,22 +1114,10 @@ const createInstructionsActions = (
                     selectedVersionId === confirmDialogVersionId
                         ? true
                         : get().isDefaultSelected,
-                testChatVersionId:
-                    testChatVersionId === confirmDialogVersionId
-                        ? ""
-                        : testChatVersionId,
-                testChatChatId:
-                    testChatVersionId === confirmDialogVersionId
-                        ? undefined
-                        : get().testChatChatId,
-                testChatParentMessageId:
-                    testChatVersionId === confirmDialogVersionId
-                        ? undefined
-                        : get().testChatParentMessageId,
             });
 
             await get().loadVersions(get().activeSectionId);
-            toast.success("Version deleted");
+            toast.success("Saved version of the instructions deleted");
         }
 
         set({ isDeleting: false, confirmDialogAction: undefined });
@@ -1191,34 +1184,16 @@ const createInstructionsActions = (
         }
     },
 
-    setTestChatVersion: (versionId: string): void => {
-        set({
-            testChatVersionId: versionId,
-            testChatChatId: undefined,
-            testChatParentMessageId: undefined,
-        });
-    },
-
-    setTestChatChat: (chatId: string, parentMessageId?: string): void => {
-        set({
-            testChatChatId: chatId,
-            testChatParentMessageId: parentMessageId,
-        });
-    },
-
-    clearTestChat: (): void => {
-        set({
-            testChatChatId: undefined,
-            testChatParentMessageId: undefined,
-        });
-    },
-
     setChatPanelOpen: (open: boolean): void => {
         set({ isChatPanelOpen: open });
     },
 
     toggleChatPanel: (): void => {
         set({ isChatPanelOpen: !get().isChatPanelOpen });
+    },
+
+    setTestChatState: (chatId?: string): void => {
+        set({ testChatId: chatId });
     },
 
     getBaseContent: (filename: string): string => {
@@ -1233,8 +1208,12 @@ const createInstructionsActions = (
 
 export const createInstructionsStore = (
     api: AuthenticatedApi,
-): InstructionsStore =>
-    createStore<InstructionsStoreState>()(
+    userId: string,
+): InstructionsStore => {
+    const storageKey = getStorageKey(userId);
+    migrateUnscopedStorage(storageKey);
+
+    return createStore<InstructionsStoreState>()(
         subscribeWithSelector(
             persist(
                 (set, get) => ({
@@ -1243,7 +1222,7 @@ export const createInstructionsStore = (
                     ...createInstructionsActions(api, set, get),
                 }),
                 {
-                    name: STORAGE_KEY,
+                    name: storageKey,
                     partialize: (
                         state: InstructionsStoreState,
                     ): PersistedInstructionsState => ({
@@ -1258,9 +1237,12 @@ export const createInstructionsStore = (
                         isDefaultSelected: state.isDefaultSelected,
                         isDefaultSelectedBySection:
                             state.isDefaultSelectedBySection,
+                        editedContent: state.editedContent,
                         drafts: state.drafts,
+                        showDiff: state.showDiff,
                         wrapLines: state.wrapLines,
                         isChatPanelOpen: state.isChatPanelOpen,
+                        testChatId: state.testChatId,
                     }),
                     merge: (persistedState: unknown, currentState) => {
                         const persisted = isPersistedInstructionsState(
@@ -1299,7 +1281,7 @@ export const createInstructionsStore = (
                                 : filterInternalSectionEntries(
                                       persisted.isDefaultSelectedBySection,
                                   );
-                        const selectedVersionId =
+                        const storedSelectedVersionId =
                             activeSectionId === undefined
                                 ? undefined
                                 : (selectedVersionIdBySection[
@@ -1313,13 +1295,48 @@ export const createInstructionsStore = (
                                   ] ??
                                   persisted?.isDefaultSelected ??
                                   true);
+                        const selectedVersionId = isDefaultSelected
+                            ? undefined
+                            : storedSelectedVersionId;
                         const hasSeenGuide =
                             persisted?.hasSeenGuide ??
                             currentState.hasSeenGuide;
+                        const drafts =
+                            persisted === undefined
+                                ? currentState.drafts
+                                : filterInternalTemplateEntries(
+                                      persisted.drafts,
+                                  );
+                        const persistedEditedContent =
+                            typeof persisted?.editedContent === "string"
+                                ? persisted.editedContent
+                                : undefined;
+                        const normalizedDrafts =
+                            selectedTemplate !== undefined &&
+                            persistedEditedContent !== undefined &&
+                            selectedTemplate in drafts
+                                ? {
+                                      ...drafts,
+                                      [selectedTemplate]:
+                                          persistedEditedContent,
+                                  }
+                                : drafts;
+                        const editedContent =
+                            selectedTemplate === undefined
+                                ? currentState.editedContent
+                                : (persistedEditedContent ??
+                                  normalizedDrafts[selectedTemplate] ??
+                                  currentState.editedContent);
 
                         return {
                             ...currentState,
-                            ...persisted,
+                            hasSeenGuide,
+                            wrapLines:
+                                persisted?.wrapLines ?? currentState.wrapLines,
+                            isChatPanelOpen:
+                                persisted?.isChatPanelOpen ??
+                                currentState.isChatPanelOpen,
+                            testChatId: persisted?.testChatId,
                             activePlatform: "internal",
                             activeSectionId,
                             expandedSections:
@@ -1333,12 +1350,11 @@ export const createInstructionsStore = (
                             selectedVersionIdBySection,
                             isDefaultSelected,
                             isDefaultSelectedBySection,
-                            drafts:
-                                persisted === undefined
-                                    ? currentState.drafts
-                                    : filterInternalTemplateEntries(
-                                          persisted.drafts,
-                                      ),
+                            drafts: normalizedDrafts,
+                            editedContent,
+                            showDiff:
+                                selectedTemplate !== undefined &&
+                                persisted?.showDiff === true,
                             showGuide: !hasSeenGuide,
                         };
                     },
@@ -1346,3 +1362,4 @@ export const createInstructionsStore = (
             ),
         ),
     );
+};

@@ -2,10 +2,10 @@ from dataclasses import dataclass
 from datetime import datetime  # noqa: TC003
 from typing import Annotated, Any, Literal
 from typing import cast as type_cast
-from uuid import UUID
+from uuid import UUID  # noqa: TC003
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 from sqlalchemy import (
     Float,
     String,
@@ -26,6 +26,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload
 
 from app.api.deps import CurrentUser, SessionDep
+from app.api.grounding_agent import effective_grounding_source_status
 from app.api.guardrails_failures import (
     GUARDRAILS_AGENT_NAMES,
     GUARDRAILS_URL_SPAN_NAME,
@@ -51,13 +52,12 @@ from app.api.routes.owner_group_filter import (
     validate_exclusive_user_filters,
 )
 from app.api.schemas import PaginationParams
-from app.chat.engine import Feedback, MessageOut
 from app.chat.title import build_fallback_title, generate_conversation_title_from_transcript
 from app.chat.tree_utils import (
-    get_conversation_path,
+    get_branch_path_through_message_from_messages,
     get_current_branch_path,
-    get_message_children,
-    update_active_child_for_branch_switch,
+    get_current_branch_path_from_messages,
+    update_active_branch_to_message,
 )
 from app.core.config import settings
 from app.core.rbac import (
@@ -68,6 +68,7 @@ from app.core.rbac import (
 )
 from app.models import (
     AssistantMessageMetadata,
+    ChatGenerationAttempt,
     Conversation,
     ConversationFeedback,
     Message,
@@ -84,6 +85,8 @@ router = APIRouter(prefix="/conversations", tags=["conversations"])
 _PREVIEW_MAX_LENGTH = 60
 _CHATBOT_TIMING_AGENT_NAMES = ("chatbot", "investigation")
 
+ConversationDetailSource = Literal["chat", "chats", "messages", "investigate", "investigations"]
+
 
 class ConversationSummary(BaseModel):
     id: UUID
@@ -94,6 +97,7 @@ class ConversationSummary(BaseModel):
     created_at: datetime
     updated_at: datetime
     is_public: bool = False
+    prompt_source: str | None = None
     user_name: str | None = None
     user_email: str | None = None
 
@@ -173,8 +177,10 @@ class ConversationDetail(BaseModel):
     created_at: datetime
     updated_at: datetime
     is_public: bool = False
+    prompt_source: str | None = None
     user_name: str | None = None
     user_email: str | None = None
+    has_pending_generation_attempt: bool = False
 
 
 class ConversationListItem(BaseModel):
@@ -183,9 +189,12 @@ class ConversationListItem(BaseModel):
     summary: str | None = None
     last_message_preview: str | None
     message_count: int
+    user_message_count: int
+    assistant_message_count: int
     created_at: datetime
     updated_at: datetime
     is_public: bool = False
+    prompt_source: str | None = None
     user_name: str | None = None
     user_email: str | None = None
     total_cost: float | None = None
@@ -245,28 +254,20 @@ class FeedbackOut(BaseModel):
     updated_at: datetime
 
 
-class MessageTreeNodeOut(BaseModel):
-    message: MessageOut
-    message_tree_nodes: list[MessageTreeNodeOut] = Field(default_factory=list)  # pyright: ignore[reportUnknownVariableType]
+class ConversationTreeMessageOut(BaseModel):
+    id: UUID
+    role: str
+    content: str
+    parent_id: UUID | None
 
 
 class ConversationTreeOut(BaseModel):
-    message_tree_nodes: dict[UUID, MessageTreeNodeOut] = Field(default_factory=dict)  # pyright: ignore[reportUnknownVariableType]
-    current_branch_path: list[UUID] = Field(default_factory=list)  # pyright: ignore[reportUnknownVariableType]
-    subtree_active_paths: dict[UUID, list[UUID]] = Field(default_factory=dict)  # pyright: ignore[reportUnknownVariableType]
+    messages: list[ConversationTreeMessageOut]
+    current_branch_path: list[UUID]
 
 
-class ConversationDetailTreeOut(BaseModel):
-    id: UUID
-    title: str | None
-    user: bool
-    conversation_tree: ConversationTreeOut
-    created_at: datetime
-    updated_at: datetime
-
-
-class UpdateActiveChildIn(BaseModel):
-    active_child_id: str | None
+class UpdateActiveBranchIn(BaseModel):
+    message_id: UUID
 
 
 def _format_message_preview(content: str) -> str:
@@ -281,7 +282,7 @@ def _blocked_display_message(*, blocked: bool | None, blocked_message: str | Non
     return blocked_message or settings.GUARDRAILS_BLOCKED_MESSAGE
 
 
-def _message_preview_content(
+def _message_display_content(
     *,
     role: str | None,
     content: str | None,
@@ -396,7 +397,13 @@ def _build_generation_timing(
     chatbot_time_ms = (
         sum(chatbot_times_ms)
         if chatbot_times_ms is not None and len(chatbot_times_ms) > 1
-        else _seconds_to_ms(trace_timing.chatbot_time if trace_timing is not None else None)
+        else _seconds_to_ms(
+            metadata.chatbot_time
+            if metadata.chatbot_time is not None
+            else trace_timing.chatbot_time
+            if trace_timing is not None
+            else None
+        )
     )
 
     timing = ConversationMessageGenerationTiming(
@@ -405,7 +412,10 @@ def _build_generation_timing(
         guardrail_time_ms=_seconds_to_ms(metadata.guardrail_time),
         chatbot_times_ms=chatbot_times_ms,
         guardrail_times_ms=guardrail_times_ms,
-        chatbot_model=trace_timing.chatbot_model if trace_timing is not None else None,
+        chatbot_model=(
+            _get_model_name(metadata.chatbot_model_settings)
+            or (trace_timing.chatbot_model if trace_timing is not None else None)
+        ),
         guardrail_model=_get_model_name(metadata.guardrail_model_settings),
     )
 
@@ -471,11 +481,21 @@ async def _ensure_internal_conversation_access(
         _ensure_investigation_access(permission_map)
 
 
+async def _ensure_conversation_author_access(
+    session: AsyncSession, conversation: Conversation, current_user: CurrentUser
+) -> None:
+    if conversation.is_public or conversation.user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Access denied")
+    if conversation.kind == "investigation":
+        permission_map = await get_effective_permission_map(session, current_user)
+        _ensure_investigation_access(permission_map)
+
+
 async def _ensure_conversation_access_for_source(
     session: AsyncSession,
     conversation: Conversation,
     current_user: CurrentUser,
-    source: Literal["chat", "chats", "messages", "investigate", "investigations"],
+    source: ConversationDetailSource,
 ) -> None:
     if conversation.kind == "investigation":
         permission_map = await get_effective_permission_map(session, current_user)
@@ -539,28 +559,15 @@ async def _get_message_or_404(session: AsyncSession, message_id: UUID) -> Messag
 
 
 async def _get_conversation_path_through_message(
-    session: AsyncSession, target_message_id: UUID
+    session: AsyncSession, conversation_id: UUID, target_message_id: UUID
 ) -> list[UUID]:
-    """Return the branch containing the target message, extended to its active leaf."""
-    target_path = await get_conversation_path(session, target_message_id)
-    path_ids = [message.id for message in target_path]
-    current_message = target_path[-1] if target_path else None
-
-    while current_message is not None:
-        children = await get_message_children(session, current_message.id)
-        if not children:
-            break
-        if len(children) == 1:
-            current_message = children[0]
-        elif current_message.active_child_id is not None:
-            current_message = await session.get(Message, current_message.active_child_id)
-        else:
-            current_message = children[0]
-
-        if current_message is not None:
-            path_ids.append(current_message.id)
-
-    return path_ids
+    stmt = (
+        select(Message)
+        .where(Message.conversation_id == conversation_id)
+        .order_by(Message.created_at, Message.id)
+    )
+    messages = list((await session.execute(stmt)).scalars().all())
+    return get_branch_path_through_message_from_messages(messages, target_message_id)
 
 
 async def _get_message_feedback_or_404(session: AsyncSession, feedback_id: UUID) -> MessageFeedback:
@@ -714,19 +721,14 @@ async def list_internal_conversations(
         Message.content,
         Message.guardrails_blocked,
         Message.guardrails_blocked_message,
+        Message.created_at,
         func.row_number()
         .over(partition_by=Message.conversation_id, order_by=desc(Message.created_at))
         .label("rn"),
     ).subquery()
 
-    latest_message_time_subquery = (
-        select(Message.conversation_id, func.max(Message.created_at).label("latest_message_time"))
-        .group_by(Message.conversation_id)
-        .subquery()
-    )
-
     effective_updated_at = func.coalesce(
-        latest_message_time_subquery.c.latest_message_time, Conversation.created_at
+        last_message_subquery.c.created_at, Conversation.created_at
     ).label("effective_updated_at")
 
     stmt = (
@@ -747,10 +749,6 @@ async def list_internal_conversations(
             (Conversation.id == last_message_subquery.c.conversation_id)
             & (last_message_subquery.c.rn == 1),
         )
-        .outerjoin(
-            latest_message_time_subquery,
-            Conversation.id == latest_message_time_subquery.c.conversation_id,
-        )
         .where(Conversation.is_public.is_(False))
         .where(Conversation.kind == kind)
         .where(Conversation.user_id == current_user.id)
@@ -760,14 +758,14 @@ async def list_internal_conversations(
             last_message_subquery.c.content,
             last_message_subquery.c.guardrails_blocked,
             last_message_subquery.c.guardrails_blocked_message,
-            latest_message_time_subquery.c.latest_message_time,
+            last_message_subquery.c.created_at,
         )
         .order_by(desc(effective_updated_at))
     )
 
     rows = (await session.execute(stmt)).all()
 
-    return [
+    items = [
         ConversationSummary(
             id=conversation.id,
             title=conversation.title,
@@ -779,6 +777,7 @@ async def list_internal_conversations(
             created_at=conversation.created_at,
             updated_at=updated_at,
             is_public=False,
+            prompt_source=conversation.prompt_source,
         )
         for (
             conversation,
@@ -790,7 +789,7 @@ async def list_internal_conversations(
             updated_at,
         ) in rows
         for preview_content in [
-            _message_preview_content(
+            _message_display_content(
                 role=last_role,
                 content=last_content,
                 guardrails_blocked=last_guardrails_blocked,
@@ -798,6 +797,9 @@ async def list_internal_conversations(
             )
         ]
     ]
+    # Release the reserved connection before FastAPI validates and serializes the response.
+    await session.commit()
+    return items
 
 
 @router.get(
@@ -877,7 +879,7 @@ async def search_internal_conversations(
         message_match_guardrails_blocked_message,
         updated_at,
     ) in rows:
-        message_candidate = _message_preview_content(
+        message_candidate = _message_display_content(
             role=message_match_role,
             content=message_match_content,
             guardrails_blocked=message_match_guardrails_blocked,
@@ -964,7 +966,15 @@ async def list_conversation_users(
     permission_map = await get_effective_permission_map(session, current_user)
     if kind == "investigation":
         _ensure_investigation_access(permission_map)
-    elif not permission_map.get(PermissionKey.ACCESS_CHATS, False):
+    elif not any(
+        permission_map.get(permission, False)
+        for permission in (
+            PermissionKey.ACCESS_CHATS,
+            PermissionKey.ACCESS_USAGE,
+            PermissionKey.ACCESS_ANALYTICS,
+            PermissionKey.ACCESS_ADOPTION,
+        )
+    ):
         raise HTTPException(status_code=403, detail="Access denied")
 
     if kind == "investigation" and platform == "public":
@@ -1083,93 +1093,192 @@ async def list_internal_conversations_paginated(
 
     if start is not None and end is not None and start > end:
         raise HTTPException(status_code=400, detail="Invalid time range")
+    validate_exclusive_user_filters(user_email=user_email, user_group=user_group)
 
-    message_count_subquery = (
-        select(
-            Message.conversation_id.label("conversation_id"),
-            func.count(Message.id).label("message_count"),
+    def _apply_list_filters(statement: Any, updated_at_expression: Any) -> Any:
+        platform_conditions: list[Any] = []
+        if include_internal:
+            platform_conditions.append(
+                Conversation.is_public.is_(False) & internal_visibility_condition
+            )
+        if include_public:
+            platform_conditions.append(Conversation.is_public.is_(True))
+        if platform_conditions:
+            statement = statement.where(or_(*platform_conditions))
+        statement = statement.where(Conversation.kind == kind)
+        if start is not None:
+            statement = statement.where(updated_at_expression >= start)
+        if end is not None:
+            statement = statement.where(updated_at_expression <= end)
+        if search is not None and search.strip() != "":
+            search_text = search.strip()
+            statement = statement.where(
+                or_(
+                    *_build_conversation_search_conditions(
+                        search_text, phrase_search=phrase_search
+                    ),
+                    *_build_public_contact_search_conditions(
+                        search_text, phrase_search=phrase_search
+                    ),
+                )
+            )
+        if user_email is not None and user_email.strip() != "":
+            normalized_email = user_email.strip()
+            user_conditions: list[Any] = []
+            if include_internal:
+                user_conditions.append(User.email == normalized_email)
+            if include_public:
+                user_conditions.append(PublicChatContact.email == normalized_email)
+            if user_conditions:
+                statement = statement.where(or_(*user_conditions))
+        return build_owner_group_filter(
+            statement,
+            owner_group=user_group,
+            include_internal=include_internal,
+            permission_map=permission_map,
         )
-        .group_by(Message.conversation_id)
-        .subquery()
-    )
 
-    last_message_subquery = select(
+    # Base-field sorts can select the page before calculating message, feedback,
+    # and trace aggregates. Aggregate sorts determine their page after aggregation.
+    page_ids: list[UUID] | None = None
+    page_total: int | None = None
+    if page_params.sort_by in {"updated_at", "created_at", "title"}:
+        latest_message_at = (
+            select(Message.created_at)
+            .where(Message.conversation_id == Conversation.id)
+            .order_by(Message.created_at.desc())
+            .limit(1)
+            .correlate(Conversation)
+            .scalar_subquery()
+        )
+        page_updated_at = func.coalesce(latest_message_at, Conversation.created_at)
+        page_stmt = (
+            select(Conversation.id)
+            .outerjoin(User, Conversation.user_id == User.id)
+            .outerjoin(RbacGroup, User.group_id == RbacGroup.id)
+            .outerjoin(PublicChatContact, Conversation.id == PublicChatContact.conversation_id)
+        )
+
+        page_stmt = _apply_list_filters(page_stmt, page_updated_at)
+        page_sort_column = {
+            "updated_at": page_updated_at,
+            "created_at": Conversation.created_at,
+            "title": Conversation.title,
+        }[page_params.sort_by]
+        page_rows = (
+            await session.execute(
+                page_stmt.add_columns(func.count().over().label("page_total"))
+                .order_by(
+                    page_sort_column.desc() if page_params.descending else page_sort_column.asc()
+                )
+                .offset(page_params.offset)
+                .limit(page_params.limit)
+            )
+        ).all()
+        if page_rows:
+            page_total = int(page_rows[0].page_total)
+            page_ids = [row[0] for row in page_rows]
+        else:
+            page_total = (
+                await session.execute(select(func.count()).select_from(page_stmt.subquery()))
+            ).scalar() or 0
+            response = ConversationListPage(items=[], total=page_total)
+            # Preserve the total while releasing the reserved connection before serialization.
+            await session.commit()
+            return response
+
+    message_count_stmt = select(
+        Message.conversation_id.label("conversation_id"),
+        func.count(Message.id).label("message_count"),
+        func.count(Message.id).filter(Message.role == "user").label("user_message_count"),
+        func.count(Message.id).filter(Message.role == "assistant").label("assistant_message_count"),
+    )
+    if page_ids is not None:
+        message_count_stmt = message_count_stmt.where(Message.conversation_id.in_(page_ids))
+    message_count_subquery = message_count_stmt.group_by(Message.conversation_id).subquery()
+
+    last_message_stmt = select(
         Message.conversation_id,
         Message.role,
         Message.content,
         Message.guardrails_blocked,
         Message.guardrails_blocked_message,
+        Message.created_at,
         func.row_number()
         .over(partition_by=Message.conversation_id, order_by=desc(Message.created_at))
         .label("rn"),
-    ).subquery()
-
-    latest_message_time_subquery = (
-        select(Message.conversation_id, func.max(Message.created_at).label("latest_message_time"))
-        .group_by(Message.conversation_id)
-        .subquery()
     )
+    if page_ids is not None:
+        last_message_stmt = last_message_stmt.where(Message.conversation_id.in_(page_ids))
+    last_message_subquery = last_message_stmt.subquery()
 
     def _build_cost_subquery(conversation_ids: list[UUID] | None = None) -> Any:
-        trace_context_subquery = (
-            select(
-                OtelSpan.trace_id.label("trace_id"),
-                func.max(cast(OtelSpan.conversation_id, String)).label("conversation_id"),
+        trace_context_stmt = select(
+            OtelSpan.trace_id.label("trace_id"),
+            func.max(cast(OtelSpan.conversation_id, String)).label("conversation_id"),
+        ).where(OtelSpan.conversation_id.is_not(None))
+        if conversation_ids is not None:
+            trace_context_stmt = trace_context_stmt.where(
+                OtelSpan.conversation_id.in_(conversation_ids)
             )
-            .where(OtelSpan.conversation_id.is_not(None))
-            .group_by(OtelSpan.trace_id)
+        trace_context = trace_context_stmt.group_by(OtelSpan.trace_id).subquery()
+        conversation_id: Any = func.coalesce(
+            OtelSpan.conversation_id, cast(trace_context.c.conversation_id, PGUUID)
+        )
+        stmt = select(
+            conversation_id.label("conversation_id"),
+            func.sum(OtelSpan.total_cost).label("total_cost"),
+        )
+        if conversation_ids is None:
+            stmt = stmt.outerjoin(trace_context, trace_context.c.trace_id == OtelSpan.trace_id)
+            stmt = stmt.where(conversation_id.is_not(None))
+        else:
+            stmt = stmt.join(trace_context, trace_context.c.trace_id == OtelSpan.trace_id)
+            stmt = stmt.where(conversation_id.in_(conversation_ids))
+        return (
+            stmt.where(OtelSpan.total_cost.is_not(None))
+            .where(response_cost_span_condition(OtelSpan))
+            .group_by(conversation_id)
             .subquery()
         )
 
-        conversation_id_expr = func.coalesce(
-            OtelSpan.conversation_id, cast(trace_context_subquery.c.conversation_id, PGUUID)
-        )
-        stmt = (
-            select(
-                conversation_id_expr.label("conversation_id"),
-                func.sum(OtelSpan.total_cost).label("total_cost"),
-            )
-            .outerjoin(
-                trace_context_subquery, trace_context_subquery.c.trace_id == OtelSpan.trace_id
-            )
-            .where(OtelSpan.total_cost.is_not(None))
-            .where(response_cost_span_condition(OtelSpan))
-            .where(conversation_id_expr.is_not(None))
-        )
-        if conversation_ids:
-            stmt = stmt.where(conversation_id_expr.in_(conversation_ids))
-        return stmt.group_by(conversation_id_expr).subquery()
+    message_feedback_stmt = select(
+        Message.conversation_id.label("conversation_id"),
+        func.sum(case((MessageFeedback.rating == MessageRating.THUMBS_UP, 1), else_=0)).label(
+            "message_feedback_up"
+        ),
+        func.sum(case((MessageFeedback.rating == MessageRating.THUMBS_DOWN, 1), else_=0)).label(
+            "message_feedback_down"
+        ),
+    ).join(MessageFeedback, MessageFeedback.message_id == Message.id)
+    if page_ids is not None:
+        message_feedback_stmt = message_feedback_stmt.where(Message.conversation_id.in_(page_ids))
+    message_feedback_subquery = message_feedback_stmt.group_by(Message.conversation_id).subquery()
 
-    message_feedback_subquery = (
-        select(
-            Message.conversation_id.label("conversation_id"),
-            func.sum(case((MessageFeedback.rating == MessageRating.THUMBS_UP, 1), else_=0)).label(
-                "message_feedback_up"
-            ),
-            func.sum(case((MessageFeedback.rating == MessageRating.THUMBS_DOWN, 1), else_=0)).label(
-                "message_feedback_down"
-            ),
-        )
-        .join(MessageFeedback, MessageFeedback.message_id == Message.id)
-        .group_by(Message.conversation_id)
-        .subquery()
+    conversation_feedback_stmt = select(
+        ConversationFeedback.conversation_id.label("conversation_id"),
+        func.sum(case((ConversationFeedback.rating == MessageRating.THUMBS_UP, 1), else_=0)).label(
+            "conversation_feedback_up"
+        ),
+        func.sum(
+            case((ConversationFeedback.rating == MessageRating.THUMBS_DOWN, 1), else_=0)
+        ).label("conversation_feedback_down"),
     )
-
-    conversation_feedback_subquery = (
-        select(
-            ConversationFeedback.conversation_id.label("conversation_id"),
-            func.sum(
-                case((ConversationFeedback.rating == MessageRating.THUMBS_UP, 1), else_=0)
-            ).label("conversation_feedback_up"),
-            func.sum(
-                case((ConversationFeedback.rating == MessageRating.THUMBS_DOWN, 1), else_=0)
-            ).label("conversation_feedback_down"),
+    if page_ids is not None:
+        conversation_feedback_stmt = conversation_feedback_stmt.where(
+            ConversationFeedback.conversation_id.in_(page_ids)
         )
-        .group_by(ConversationFeedback.conversation_id)
-        .subquery()
-    )
+    conversation_feedback_subquery = conversation_feedback_stmt.group_by(
+        ConversationFeedback.conversation_id
+    ).subquery()
 
     message_count = func.coalesce(message_count_subquery.c.message_count, 0).label("message_count")
+    user_message_count = func.coalesce(message_count_subquery.c.user_message_count, 0).label(
+        "user_message_count"
+    )
+    assistant_message_count = func.coalesce(
+        message_count_subquery.c.assistant_message_count, 0
+    ).label("assistant_message_count")
     feedback_up = (
         func.coalesce(message_feedback_subquery.c.message_feedback_up, 0)
         + func.coalesce(conversation_feedback_subquery.c.conversation_feedback_up, 0)
@@ -1179,7 +1288,7 @@ async def list_internal_conversations_paginated(
         + func.coalesce(conversation_feedback_subquery.c.conversation_feedback_down, 0)
     ).label("feedback_down")
     effective_updated_at = func.coalesce(
-        latest_message_time_subquery.c.latest_message_time, Conversation.created_at
+        last_message_subquery.c.created_at, Conversation.created_at
     ).label("effective_updated_at")
 
     public_name_expr = func.nullif(
@@ -1198,6 +1307,8 @@ async def list_internal_conversations_paginated(
         select(
             Conversation,
             message_count,
+            user_message_count,
+            assistant_message_count,
             last_message_subquery.c.role.label("last_message_role"),
             last_message_subquery.c.content.label("last_message_content"),
             last_message_subquery.c.guardrails_blocked.label("last_message_guardrails_blocked"),
@@ -1222,10 +1333,6 @@ async def list_internal_conversations_paginated(
             & (last_message_subquery.c.rn == 1),
         )
         .outerjoin(
-            latest_message_time_subquery,
-            Conversation.id == latest_message_time_subquery.c.conversation_id,
-        )
-        .outerjoin(
             message_feedback_subquery,
             Conversation.id == message_feedback_subquery.c.conversation_id,
         )
@@ -1235,6 +1342,8 @@ async def list_internal_conversations_paginated(
         )
     )
 
+    if page_ids is not None:
+        base_stmt = base_stmt.where(Conversation.id.in_(page_ids))
     total_cost: Any = type_cast(Any, cast(literal(None), Float).label("total_cost"))
     cost_subquery: Any | None = None
     if include_cost_in_query:
@@ -1244,55 +1353,13 @@ async def list_internal_conversations_paginated(
             Any, cast(cost_subquery_local.c.total_cost, Float).label("total_cost")
         )
 
-    platform_conditions: list[Any] = []
-    if include_internal:
-        platform_conditions.append(
-            Conversation.is_public.is_(False) & internal_visibility_condition
-        )
-    if include_public:
-        platform_conditions.append(Conversation.is_public.is_(True))
+    base_stmt = _apply_list_filters(base_stmt, effective_updated_at)
 
-    if platform_conditions:
-        base_stmt = base_stmt.where(or_(*platform_conditions))
-    base_stmt = base_stmt.where(Conversation.kind == kind)
-
-    if start is not None:
-        base_stmt = base_stmt.where(effective_updated_at >= start)
-    if end is not None:
-        base_stmt = base_stmt.where(effective_updated_at <= end)
-
-    if search is not None and search.strip() != "":
-        search_text = search.strip()
-        contact_search_conditions = _build_public_contact_search_conditions(
-            search_text, phrase_search=phrase_search
-        )
-        base_stmt = base_stmt.where(
-            or_(
-                *_build_conversation_search_conditions(search_text, phrase_search=phrase_search),
-                *contact_search_conditions,
-            )
-        )
-
-    validate_exclusive_user_filters(user_email=user_email, user_group=user_group)
-
-    if user_email is not None and user_email.strip() != "":
-        normalized_email = user_email.strip()
-        user_conditions: list[Any] = []
-        if include_internal:
-            user_conditions.append(User.email == normalized_email)
-        if include_public:
-            user_conditions.append(PublicChatContact.email == normalized_email)
-        base_stmt = base_stmt.where(or_(*user_conditions) if user_conditions else false())
-
-    base_stmt = build_owner_group_filter(
-        base_stmt,
-        owner_group=user_group,
-        include_internal=include_internal,
-        permission_map=permission_map,
-    )
-
-    count_stmt = select(func.count()).select_from(base_stmt.subquery())
-    total = (await session.execute(count_stmt)).scalar() or 0
+    if page_total is None:
+        count_stmt = select(func.count()).select_from(base_stmt.subquery())
+        total = (await session.execute(count_stmt)).scalar() or 0
+    else:
+        total = page_total
 
     stmt: Any = base_stmt.add_columns(total_cost)
     if include_cost_in_query and cost_subquery is not None:
@@ -1304,6 +1371,8 @@ async def list_internal_conversations_paginated(
         "updated_at": effective_updated_at,
         "created_at": Conversation.created_at,
         "message_count": message_count,
+        "user_message_count": user_message_count,
+        "assistant_message_count": assistant_message_count,
         "feedback_up": feedback_up,
         "feedback_down": feedback_down,
         "title": Conversation.title,
@@ -1311,13 +1380,21 @@ async def list_internal_conversations_paginated(
     }
     sort_column: Any = sort_map.get(page_params.sort_by, effective_updated_at)
 
-    stmt = (
-        stmt.order_by(sort_column.desc() if page_params.descending else sort_column.asc())
-        .offset(page_params.offset)
-        .limit(page_params.limit)
-    )
+    if page_ids is None:
+        stmt = (
+            stmt.order_by(sort_column.desc() if page_params.descending else sort_column.asc())
+            .offset(page_params.offset)
+            .limit(page_params.limit)
+        )
 
     rows = (await session.execute(stmt)).all()
+    if page_ids is not None:
+        rows_by_id = {row[0].id: row for row in rows}
+        rows = [
+            rows_by_id[conversation_id]
+            for conversation_id in page_ids
+            if conversation_id in rows_by_id
+        ]
 
     cost_map: dict[UUID, float | None] = {}
     if not include_cost_in_query and rows:
@@ -1342,9 +1419,12 @@ async def list_internal_conversations_paginated(
                 _format_message_preview(preview_content) if preview_content else None
             ),
             message_count=message_count_value,
+            user_message_count=user_message_count_value,
+            assistant_message_count=assistant_message_count_value,
             created_at=conversation.created_at,
             updated_at=updated_at,
             is_public=conversation.is_public,
+            prompt_source=conversation.prompt_source,
             user_name=user_name_value,
             user_email=user_email_value,
             total_cost=total_cost_value if include_cost_in_query else cost_map.get(conversation.id),
@@ -1354,6 +1434,8 @@ async def list_internal_conversations_paginated(
         for (
             conversation,
             message_count_value,
+            user_message_count_value,
+            assistant_message_count_value,
             last_role,
             last_content,
             last_guardrails_blocked,
@@ -1366,7 +1448,7 @@ async def list_internal_conversations_paginated(
             total_cost_value,
         ) in rows
         for preview_content in [
-            _message_preview_content(
+            _message_display_content(
                 role=last_role,
                 content=last_content,
                 guardrails_blocked=last_guardrails_blocked,
@@ -1375,23 +1457,20 @@ async def list_internal_conversations_paginated(
         ]
     ]
 
-    return ConversationListPage(items=items, total=total)
+    response = ConversationListPage(items=items, total=total)
+    # Release the reserved connection before FastAPI validates and serializes the response.
+    await session.commit()
+    return response
 
 
-@router.get(
-    "/{conversation_id}", response_model=ConversationDetail, response_model_exclude_none=True
-)
-async def get_internal_conversation(
-    conversation_id: UUID,
-    session: SessionDep,
+async def _build_internal_conversation_detail(
+    session: AsyncSession,
+    conversation: Conversation,
     current_user: CurrentUser,
-    source: Annotated[
-        Literal["chat", "chats", "messages", "investigate", "investigations"], Query()
-    ] = "chat",
-    target_message_id: Annotated[UUID | None, Query()] = None,
-) -> Any:
-    conversation = await _get_conversation_or_404(session, conversation_id)
-    await _ensure_conversation_access_for_source(session, conversation, current_user, source)
+    *,
+    target_message_id: UUID | None = None,
+) -> ConversationDetail:
+    conversation_id = conversation.id
     permission_map = await get_effective_permission_map(session, current_user)
     can_view_response_cost = permission_map.get(PermissionKey.CHAT_VIEW_RESPONSE_COST, False)
     can_view_guardrails_failures = permission_map.get(
@@ -1414,7 +1493,9 @@ async def get_internal_conversation(
             raise HTTPException(
                 status_code=400, detail="Target message is not in this conversation"
             )
-        path_ids = await _get_conversation_path_through_message(session, target_message_id)
+        path_ids = await _get_conversation_path_through_message(
+            session, conversation_id, target_message_id
+        )
     else:
         path_ids = await get_current_branch_path(session, conversation_id)
     messages: list[Message] = []
@@ -1427,7 +1508,7 @@ async def get_internal_conversation(
                 joinedload(Message.feedback).joinedload(MessageFeedback.user),
                 joinedload(Message.assistant_message_metadata),
             )
-            .where(Message.id.in_(path_ids))
+            .where(Message.id.in_(path_ids), Message.conversation_id == conversation_id)
         )
         result = await session.execute(stmt)
         messages_by_id = {message.id: message for message in result.scalars().unique().all()}
@@ -1436,6 +1517,19 @@ async def get_internal_conversation(
         ]
         for message in messages:
             feedback_by_message_id[message.id] = list(message.feedback)
+
+    has_pending_generation_attempt = False
+    if conversation.user_id == current_user.id:
+        pending_attempt_id = await session.scalar(
+            select(ChatGenerationAttempt.id)
+            .where(
+                ChatGenerationAttempt.conversation_id == conversation_id,
+                ChatGenerationAttempt.user_id == current_user.id,
+                ChatGenerationAttempt.status == "pending",
+            )
+            .limit(1)
+        )
+        has_pending_generation_attempt = pending_attempt_id is not None
 
     updated_at = max((message.created_at for message in messages), default=conversation.created_at)
     response_cost_by_message_id: dict[UUID, float] = {}
@@ -1569,6 +1663,7 @@ async def get_internal_conversation(
         title=conversation.title,
         summary=conversation.summary,
         is_public=conversation.is_public,
+        prompt_source=conversation.prompt_source,
         user_name=(
             f"{public_contact.first_name} {public_contact.last_name}".strip()
             if public_contact is not None
@@ -1583,6 +1678,7 @@ async def get_internal_conversation(
             if owner is not None
             else None
         ),
+        has_pending_generation_attempt=has_pending_generation_attempt,
         investigation_source_conversation_id=conversation.investigation_source_conversation_id,
         investigation_source_message_id=conversation.investigation_source_message_id,
         investigation_source_feedback_id=conversation.investigation_source_feedback_id,
@@ -1619,7 +1715,7 @@ async def get_internal_conversation(
                     else []
                 ),
                 grounding_source_status=(
-                    message.assistant_message_metadata.grounding_source_status
+                    effective_grounding_source_status(message.assistant_message_metadata)
                     if can_view_sources and message.assistant_message_metadata is not None
                     else None
                 ),
@@ -1655,6 +1751,23 @@ async def get_internal_conversation(
         ],
         created_at=conversation.created_at,
         updated_at=updated_at,
+    )
+
+
+@router.get(
+    "/{conversation_id}", response_model=ConversationDetail, response_model_exclude_none=True
+)
+async def get_internal_conversation(
+    conversation_id: UUID,
+    session: SessionDep,
+    current_user: CurrentUser,
+    source: Annotated[ConversationDetailSource, Query()] = "chat",
+    target_message_id: Annotated[UUID | None, Query()] = None,
+) -> ConversationDetail:
+    conversation = await _get_conversation_or_404(session, conversation_id)
+    await _ensure_conversation_access_for_source(session, conversation, current_user, source)
+    return await _build_internal_conversation_detail(
+        session, conversation, current_user, target_message_id=target_message_id
     )
 
 
@@ -1739,86 +1852,44 @@ async def delete_internal_conversation(
     await session.commit()
 
 
-@router.get("/{conversation_id}/tree", response_model=ConversationDetailTreeOut)
+@router.get("/{conversation_id}/tree", response_model=ConversationTreeOut)
 async def get_conversation_tree(
-    conversation_id: UUID, session: SessionDep, current_user: CurrentUser
-) -> Any:
+    conversation_id: UUID,
+    session: SessionDep,
+    current_user: CurrentUser,
+    source: Annotated[ConversationDetailSource, Query()] = "chat",
+) -> ConversationTreeOut:
     conversation = await _get_conversation_or_404(session, conversation_id)
-    await _ensure_internal_conversation_access(session, conversation, current_user)
+    await _ensure_conversation_access_for_source(session, conversation, current_user, source)
 
     stmt = (
         select(Message)
-        .options(joinedload(Message.feedback).joinedload(MessageFeedback.user))
         .where(Message.conversation_id == conversation_id)
-        .order_by(Message.created_at)
+        .order_by(Message.created_at, Message.id)
     )
-    messages = list((await session.execute(stmt)).scalars().unique().all())
-    current_branch_path = await get_current_branch_path(session, conversation_id)
+    messages = list((await session.execute(stmt)).scalars().all())
 
-    nodes_by_id: dict[UUID, MessageTreeNodeOut] = {}
-    children_by_parent: dict[UUID, list[UUID]] = {}
-
-    for message in messages:
-        feedback = [
-            Feedback(
-                id=item.id,
-                rating=item.rating,
-                text=item.text,
-                user_id=item.user_id,
-                user_name=item.user.name,
-                is_current_user=item.user_id == current_user.id,
-                created_at=item.created_at,
-                updated_at=item.updated_at,
-            )
-            for item in message.feedback
-        ]
-        nodes_by_id[message.id] = MessageTreeNodeOut(
-            message=MessageOut(
+    return ConversationTreeOut(
+        messages=[
+            ConversationTreeMessageOut(
                 id=message.id,
                 role=message.role,
-                content=message.content,
-                created_at=message.created_at,
-                parent_id=message.parent_id,
-                feedback=feedback,
-                guardrails_blocked=message.guardrails_blocked,
-                guardrails_blocked_message=_blocked_display_message(
-                    blocked=message.guardrails_blocked,
-                    blocked_message=message.guardrails_blocked_message,
+                content=(
+                    _message_display_content(
+                        role=message.role,
+                        content=message.content,
+                        guardrails_blocked=message.guardrails_blocked,
+                        guardrails_blocked_message=message.guardrails_blocked_message,
+                    )
+                    or ""
                 ),
-            ),
-            message_tree_nodes=[],
-        )
-        children_by_parent[message.id] = []
-
-    root_nodes: dict[UUID, MessageTreeNodeOut] = {}
-    for message in messages:
-        if message.parent_id is None:
-            root_nodes[message.id] = nodes_by_id[message.id]
-        else:
-            children_by_parent.setdefault(message.parent_id, []).append(message.id)
-
-    def attach_children(message_id: UUID) -> MessageTreeNodeOut:
-        node = nodes_by_id[message_id]
-        child_ids = sorted(
-            children_by_parent.get(message_id, []),
-            key=lambda child_id: nodes_by_id[child_id].message.created_at,
-        )
-        node.message_tree_nodes = [attach_children(child_id) for child_id in child_ids]
-        return node
-
-    tree_nodes = {message_id: attach_children(message_id) for message_id in root_nodes}
-
-    return ConversationDetailTreeOut(
-        id=conversation.id,
-        title=conversation.title,
-        user=conversation.user,
-        conversation_tree=ConversationTreeOut(
-            message_tree_nodes=tree_nodes,
-            current_branch_path=current_branch_path,
-            subtree_active_paths={},
+                parent_id=message.parent_id,
+            )
+            for message in messages
+        ],
+        current_branch_path=get_current_branch_path_from_messages(
+            messages, conversation.active_root_message_id
         ),
-        created_at=conversation.created_at,
-        updated_at=conversation.updated_at,
     )
 
 
@@ -1900,20 +1971,31 @@ async def delete_message_feedback(
     await session.commit()
 
 
-@router.put("/messages/{message_id}/active-child")
-async def update_message_active_child(
-    message_id: UUID, request: UpdateActiveChildIn, session: SessionDep, current_user: CurrentUser
-) -> None:
-    message = await _get_message_or_404(session, message_id)
-    conversation = await _get_conversation_or_404(session, message.conversation_id)
-    await _ensure_internal_conversation_access(session, conversation, current_user)
+@router.put(
+    "/{conversation_id}/active-branch",
+    response_model=ConversationDetail,
+    response_model_exclude_none=True,
+)
+async def update_conversation_active_branch(
+    conversation_id: UUID,
+    request: UpdateActiveBranchIn,
+    session: SessionDep,
+    current_user: CurrentUser,
+) -> ConversationDetail:
+    conversation = await _get_conversation_or_404(session, conversation_id)
+    await _ensure_conversation_author_access(session, conversation, current_user)
 
-    active_child_id = UUID(request.active_child_id) if request.active_child_id else None
-    if active_child_id is not None:
-        active_child = await _get_message_or_404(session, active_child_id)
-        if active_child.parent_id != message_id:
-            raise HTTPException(
-                status_code=400, detail="Active child must be a direct child of this message"
-            )
+    message = await _get_message_or_404(session, request.message_id)
+    if message.conversation_id != conversation_id:
+        raise HTTPException(status_code=400, detail="Message is not in this conversation")
 
-    await update_active_child_for_branch_switch(session, message_id, active_child_id)
+    try:
+        await update_active_branch_to_message(session, conversation, message.id)
+    except ValueError as error:
+        raise HTTPException(
+            status_code=400, detail="Message is not in this conversation"
+        ) from error
+
+    detail = await _build_internal_conversation_detail(session, conversation, current_user)
+    await session.commit()
+    return detail

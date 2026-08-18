@@ -121,11 +121,13 @@ def _model_settings() -> dict[str, ModelSettings]:
             model=settings.CHATBOT_MODEL,
             temperature=settings.CHATBOT_MODEL_TEMPERATURE,
             max_tokens=settings.CHATBOT_MODEL_MAX_TOKENS,
+            azure_service_tier=settings.CHATBOT_AZURE_SERVICE_TIER,
         ),
         "guardrail": ModelSettings(
             model=settings.GUARDRAIL_MODEL,
             temperature=settings.GUARDRAIL_MODEL_TEMPERATURE,
             max_tokens=settings.GUARDRAIL_MODEL_MAX_TOKENS,
+            azure_service_tier=settings.GUARDRAIL_AZURE_SERVICE_TIER,
         ),
     }
 

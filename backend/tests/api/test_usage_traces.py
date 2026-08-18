@@ -14,7 +14,7 @@ from app.core.rbac import (
 )
 from app.core.security import get_password_hash
 from app.main import app
-from app.models import Conversation, Message, OtelSpan, User
+from app.models import Conversation, Message, OtelSpan, PublicChatContact, User
 from app.rag.constants import EMBEDDING_MODEL
 from tests.api.auth_helpers import authenticate_client
 
@@ -41,7 +41,7 @@ def _usage_span(
     trace_id: str,
     span_id: str,
     started_at: datetime,
-    conversation_id: UUID,
+    conversation_id: UUID | None,
     request_model: str,
     provider_name: str | None,
     input_tokens: int | None,
@@ -49,7 +49,7 @@ def _usage_span(
     total_cost: float | None,
     duration_ms: float,
     is_embedding: bool,
-    is_internal: bool,
+    is_internal: bool | None,
     status_code: str = "OK",
     server_address: str | None = None,
 ) -> OtelSpan:
@@ -66,7 +66,9 @@ def _usage_span(
         span_time=started_at,
         duration_ms=duration_ms,
         attributes={
-            "app.conversation_id": str(conversation_id),
+            **(
+                {"app.conversation_id": str(conversation_id)} if conversation_id is not None else {}
+            ),
             "app.is_internal": is_internal,
             "gen_ai.request.model": request_model,
         },
@@ -119,8 +121,20 @@ async def test_usage_summary_aggregates_otel_spans(transactional_session: AsyncS
     )
     transactional_session.add_all([internal_conversation, public_conversation])
     await transactional_session.flush()
-
     started_at = datetime(2026, 1, 15, 12, 0, tzinfo=UTC)
+    transactional_session.add(
+        PublicChatContact(
+            first_name="Public",
+            last_name="Visitor",
+            email="usage-public@example.com",
+            phone="5551234567",
+            zip_code="12345",
+            visitor_id="usage-public-visitor",
+            conversation_id=public_conversation.id,
+            consented_at=started_at,
+            environment="test",
+        )
+    )
     transactional_session.add_all(
         [
             _usage_span(
@@ -185,6 +199,9 @@ async def test_usage_summary_aggregates_otel_spans(transactional_session: AsyncS
         azure_response = await client.get(
             "/api/usage/summary", params={**params, "models": "azure"}
         )
+        public_user_response = await client.get(
+            "/api/usage/summary", params={**params, "user_email": "usage-public@example.com"}
+        )
 
     assert response.status_code == 200
     body = response.json()
@@ -219,6 +236,11 @@ async def test_usage_summary_aggregates_otel_spans(transactional_session: AsyncS
     assert azure_response.status_code == 200
     assert azure_response.json()["summary"]["total_requests"] == 1
     assert azure_response.json()["summary"]["total_embedding_requests"] == 1
+
+    assert public_user_response.status_code == 200
+    assert public_user_response.json()["summary"]["total_requests"] == 1
+    assert public_user_response.json()["summary"]["total_tokens"] == 30
+    assert [trace["is_public"] for trace in public_user_response.json()["latest_traces"]] == [True]
 
 
 @pytest.mark.asyncio
@@ -323,6 +345,138 @@ async def test_usage_summary_estimates_missing_embedding_cost_only(
         if trace["model"] == expected_embedding_model and trace["prompt_tokens"] == 1000
     )
     assert abs(estimated_trace["cost"] - expected_estimated_embedding_cost) < 0.000001
+
+
+@pytest.mark.asyncio
+async def test_trace_index_returns_visible_platform_pages_and_totals(
+    transactional_session: AsyncSession,
+) -> None:
+    owner = await _create_user(
+        transactional_session, group_slug=SystemGroupSlug.USER, email_prefix="trace-index-owner"
+    )
+    other_owner = await _create_user(
+        transactional_session,
+        group_slug=SystemGroupSlug.USER,
+        email_prefix="trace-index-other-owner",
+    )
+    admin = await _create_user(
+        transactional_session, group_slug=SystemGroupSlug.ADMIN, email_prefix="trace-index-admin"
+    )
+    await replace_user_permission_overrides(
+        transactional_session, owner, {PermissionKey.ACCESS_TRACES: True}
+    )
+
+    own_conversation = Conversation(
+        title="Own internal trace", user=False, project="demo", user_id=owner.id, is_public=False
+    )
+    other_conversation = Conversation(
+        title="Other internal trace",
+        user=False,
+        project="demo",
+        user_id=other_owner.id,
+        is_public=False,
+    )
+    public_conversation = Conversation(
+        title="Public trace", user=False, project="demo", user_id=None, is_public=True
+    )
+    transactional_session.add_all([own_conversation, other_conversation, public_conversation])
+    await transactional_session.flush()
+
+    started_at = datetime(2098, 1, 1, 12, 0, tzinfo=UTC)
+
+    def span(
+        trace_id: str,
+        offset_seconds: int,
+        *,
+        conversation_id: UUID | None,
+        is_internal: bool | None,
+    ) -> OtelSpan:
+        return _usage_span(
+            trace_id=trace_id,
+            span_id=f"{trace_id}-span",
+            started_at=started_at + timedelta(seconds=offset_seconds),
+            conversation_id=conversation_id,
+            request_model="azure/gpt-5.5",
+            provider_name="azure",
+            input_tokens=10,
+            output_tokens=5,
+            total_cost=0.01,
+            duration_ms=500,
+            is_embedding=False,
+            is_internal=is_internal,
+        )
+
+    transactional_session.add_all(
+        [
+            span("trace-own", 0, conversation_id=own_conversation.id, is_internal=True),
+            span("trace-other", 1, conversation_id=other_conversation.id, is_internal=True),
+            span("trace-public", 2, conversation_id=public_conversation.id, is_internal=False),
+            span("trace-unlinked", 3, conversation_id=None, is_internal=True),
+            span("trace-unknown", 4, conversation_id=None, is_internal=None),
+        ]
+    )
+    await transactional_session.commit()
+    time_params = {
+        "start": (started_at - timedelta(seconds=1)).isoformat(),
+        "end": (started_at + timedelta(seconds=5)).isoformat(),
+        "sort_by": "latest_start",
+        "descending": "true",
+    }
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://testserver"
+    ) as owner_client:
+        authenticate_client(owner_client, owner.id)
+        owner_response = await owner_client.get(
+            "/api/usage/trace-index", params={**time_params, "limit": 2}
+        )
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://testserver"
+    ) as admin_client:
+        authenticate_client(admin_client, admin.id)
+        admin_response = await admin_client.get(
+            "/api/usage/trace-index", params={**time_params, "limit": 2}
+        )
+        admin_next_response = await admin_client.get(
+            "/api/usage/trace-index", params={**time_params, "limit": 2, "offset": 2}
+        )
+        internal_response = await admin_client.get(
+            "/api/usage/trace-index", params={**time_params, "limit": 10, "platform": "internal"}
+        )
+        public_response = await admin_client.get(
+            "/api/usage/trace-index", params={**time_params, "limit": 10, "platform": "public"}
+        )
+        oversized_response = await admin_client.get(
+            "/api/usage/trace-index", params={**time_params, "limit": 201}
+        )
+
+    assert owner_response.status_code == 200
+    assert admin_response.status_code == 200
+    assert admin_next_response.status_code == 200
+    assert internal_response.status_code == 200
+    assert public_response.status_code == 200
+    assert oversized_response.status_code == 422
+    assert owner_response.json()["total"] == 1
+    assert [item["trace_id"] for item in owner_response.json()["items"]] == ["trace-own"]
+    assert admin_response.json()["total"] == 4
+    assert [item["trace_id"] for item in admin_response.json()["items"]] == [
+        "trace-unlinked",
+        "trace-public",
+    ]
+    assert admin_next_response.json()["total"] == 4
+    assert [item["trace_id"] for item in admin_next_response.json()["items"]] == [
+        "trace-other",
+        "trace-own",
+    ]
+    assert internal_response.json()["total"] == 3
+    assert {item["trace_id"] for item in internal_response.json()["items"]} == {
+        "trace-own",
+        "trace-other",
+        "trace-unlinked",
+    }
+    assert public_response.json()["total"] == 1
+    assert [item["trace_id"] for item in public_response.json()["items"]] == ["trace-public"]
 
 
 @pytest.mark.asyncio
@@ -471,7 +625,7 @@ async def test_usage_trace_routes_read_persisted_otel_spans(
                 server_address=None,
                 input_tokens=10,
                 output_tokens=20,
-                total_cost=None,
+                total_cost=0.03,
                 is_ai=True,
                 is_embedding=False,
                 is_internal=True,
@@ -506,7 +660,7 @@ async def test_usage_trace_routes_read_persisted_otel_spans(
                 server_address=None,
                 input_tokens=None,
                 output_tokens=None,
-                total_cost=None,
+                total_cost=0.01,
                 is_ai=True,
                 is_embedding=False,
                 is_internal=True,
@@ -534,6 +688,7 @@ async def test_usage_trace_routes_read_persisted_otel_spans(
     trace_detail = trace_by_message_response.json()
     assert trace_detail["trace_id"] == trace_id
     assert trace_detail["conversation_id"] == str(conversation.id)
+    assert abs(trace_detail["total_cost"] - 0.04) < 0.000001
     span_names = {span["name"] for span in trace_detail["spans"]}
     assert {"handle_conversation_turn", "execute_tool find_document_chunks"}.issubset(span_names)
     chatbot_span = next(
@@ -572,6 +727,7 @@ async def test_usage_trace_routes_read_persisted_otel_spans(
         item for item in trace_detail["overview"] if item["type"] == "conversation_turn"
     )
     assert conversation_turn_overview["data"]["message_id"] == str(assistant_message.id)
+    assert abs(conversation_turn_overview["data"]["total_cost"] - 0.04) < 0.000001
 
     assert trace_index_response.status_code == 403
 
@@ -687,3 +843,122 @@ async def test_chats_trace_allows_non_admin_reviewers_with_explicit_permissions(
 
     assert response.status_code == 200
     assert response.json()["trace_id"] == trace_id
+
+
+@pytest.mark.asyncio
+async def test_usage_summary_filters_by_user_group_and_email(
+    transactional_session: AsyncSession,
+) -> None:
+    reviewer = await _create_user(
+        transactional_session, group_slug=SystemGroupSlug.DEV, email_prefix="usage-filter-reviewer"
+    )
+    limited_reviewer = await _create_user(
+        transactional_session, group_slug=SystemGroupSlug.USER, email_prefix="usage-filter-limited"
+    )
+    staff_owner = await _create_user(
+        transactional_session, group_slug=SystemGroupSlug.USER, email_prefix="usage-filter-staff"
+    )
+    developer_owner = await _create_user(
+        transactional_session, group_slug=SystemGroupSlug.DEV, email_prefix="usage-filter-developer"
+    )
+    await replace_user_permission_overrides(
+        transactional_session,
+        limited_reviewer,
+        {
+            PermissionKey.ACCESS_USAGE: True,
+            PermissionKey.CHATS_VIEW_OWN: True,
+            PermissionKey.CHATS_VIEW_USERS: False,
+            PermissionKey.CHATS_VIEW_DEVS: False,
+        },
+    )
+
+    staff_conversation = Conversation(
+        title="Staff usage", user=False, project="demo", user_id=staff_owner.id, is_public=False
+    )
+    developer_conversation = Conversation(
+        title="Developer usage",
+        user=False,
+        project="demo",
+        user_id=developer_owner.id,
+        is_public=False,
+    )
+    transactional_session.add_all([staff_conversation, developer_conversation])
+    await transactional_session.flush()
+    started_at = datetime(2098, 1, 1, 12, 0, tzinfo=UTC)
+    transactional_session.add_all(
+        [
+            _usage_span(
+                trace_id="usage-user-staff",
+                span_id="staff",
+                started_at=started_at,
+                conversation_id=staff_conversation.id,
+                request_model="azure/gpt-5.5",
+                provider_name="azure",
+                input_tokens=10,
+                output_tokens=5,
+                total_cost=0.01,
+                duration_ms=500,
+                is_embedding=False,
+                is_internal=True,
+            ),
+            _usage_span(
+                trace_id="usage-user-developer",
+                span_id="developer",
+                started_at=started_at,
+                conversation_id=developer_conversation.id,
+                request_model="azure/gpt-5.5",
+                provider_name="azure",
+                input_tokens=20,
+                output_tokens=10,
+                total_cost=0.02,
+                duration_ms=700,
+                is_embedding=False,
+                is_internal=True,
+            ),
+        ]
+    )
+    await transactional_session.commit()
+    time_params = {
+        "start": (started_at - timedelta(hours=1)).isoformat(),
+        "end": (started_at + timedelta(hours=1)).isoformat(),
+    }
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://testserver"
+    ) as client:
+        authenticate_client(client, reviewer.id)
+        all_response = await client.get("/api/usage/summary", params=time_params)
+        staff_response = await client.get(
+            "/api/usage/summary", params={**time_params, "user_group": "staff"}
+        )
+        exact_response = await client.get(
+            "/api/usage/summary", params={**time_params, "user_email": staff_owner.email}
+        )
+        conflict_response = await client.get(
+            "/api/usage/summary",
+            params={**time_params, "user_email": staff_owner.email, "user_group": "staff"},
+        )
+
+        authenticate_client(client, limited_reviewer.id)
+        hidden_response = await client.get(
+            "/api/usage/summary", params={**time_params, "user_email": staff_owner.email}
+        )
+
+    assert all_response.status_code == 200
+    assert all_response.json()["summary"]["total_requests"] == 2
+    assert staff_response.status_code == 200
+    assert staff_response.json()["summary"]["total_requests"] == 1
+    exact_body = exact_response.json()
+    assert exact_response.status_code == 200
+    assert exact_body["summary"]["total_tokens"] == 15
+    assert sum(row["tokens"] for row in exact_body["daily"]) == 15
+    assert exact_body["models"] == [
+        {"model": "azure:gpt-5.5", "requests": 1, "tokens": 15, "cost": 0.01}
+    ]
+    assert [row["prompt_tokens"] for row in exact_body["latest_traces"]] == [10]
+    assert hidden_response.status_code == 200
+    assert hidden_response.json()["summary"]["total_requests"] == 0
+    assert hidden_response.json()["models"] == []
+    assert hidden_response.json()["latest_traces"] == []
+    assert conflict_response.status_code == 400
+    assert conflict_response.json()["detail"] == "Specify only one of user_email or user_group"

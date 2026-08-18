@@ -1,4 +1,4 @@
-export interface RagBuildJobUser {
+interface RagBuildJobUser {
     id: string;
     email: string;
     name: string;
@@ -24,7 +24,7 @@ export interface RagBuildJobSummary {
     totalExistingDocuments: number;
 }
 
-export interface RagBuildJobStep {
+interface RagBuildJobStep {
     stepKey: string;
     label: string;
     status: string;
@@ -32,7 +32,7 @@ export interface RagBuildJobStep {
     finishedAt?: string;
 }
 
-export interface RagBuildJobSourceStat {
+interface RagBuildJobSourceStat {
     sourceName: string;
     documentType: string;
     newCount: number;

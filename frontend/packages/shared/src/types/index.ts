@@ -1,9 +1,13 @@
-export type MessageSourceUsage =
+type MessageSourceUsage =
     | "search"
     | "lookup"
     | "retrieved_by_id"
     | "prompt";
-export type GroundingSourceStatus = "pending" | "selected" | "no_selection";
+export type GroundingSourceStatus =
+    | "pending"
+    | "selected"
+    | "no_selection"
+    | "failed";
 
 export interface MessageSourceUsed {
     key: string;
@@ -37,9 +41,9 @@ export interface ChatMessage {
     groundingSourceStatus?: GroundingSourceStatus | null;
 }
 
-export type LoadingActivityStatus = "in_progress" | "complete" | "error";
+type LoadingActivityStatus = "in_progress" | "complete" | "error";
 
-export type LoadingActivityKind = "agent" | "tool" | "thinking";
+type LoadingActivityKind = "agent" | "tool" | "thinking";
 
 export type LoadingToolState =
     | "input-streaming"

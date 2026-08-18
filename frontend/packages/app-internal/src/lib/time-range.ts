@@ -60,15 +60,11 @@ const getCustomRangeQueryParams = (
         return {};
     }
 
-    const startDate = new Date(customRange.start);
-    const endDate = new Date(customRange.end ?? customRange.start);
-    startDate.setHours(0, 0, 0, 0);
-    endDate.setHours(23, 59, 59, 999);
-
-    return {
-        start: startDate.toISOString(),
-        end: endDate.toISOString(),
-    };
+    const start = customRange.start.toISOString();
+    if (!customRange.end) {
+        return { start };
+    }
+    return { start, end: customRange.end.toISOString() };
 };
 
 export const getTimeRangeQueryParams = (

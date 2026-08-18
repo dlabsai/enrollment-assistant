@@ -107,6 +107,8 @@ Backend settings come from process environment variables and, for host-based dev
 | `POSTGRES_USER` | Main PostgreSQL user. |
 | `POSTGRES_PASSWORD` | Main PostgreSQL password. |
 | `POSTGRES_DB` | Main application database name. |
+| `PGSSLMODE` | Standard libpq TLS mode inherited by psycopg and Alembic. Use `require` for Neon and `prefer` for local PostgreSQL. |
+| `PGCHANNELBINDING` | Standard libpq channel-binding mode. Use `require` with Neon connection strings that request channel binding and `prefer` locally. |
 | `PYTEST_POSTGRES_SERVER` | Eval/test PostgreSQL host. |
 | `PYTEST_POSTGRES_PORT` | Eval/test PostgreSQL port. |
 | `PYTEST_POSTGRES_USER` | Eval/test PostgreSQL user. |

@@ -1,7 +1,7 @@
 """Tests for the handle_conversation_turn function in engine.py."""
 
 from unittest.mock import AsyncMock, MagicMock, patch
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from pydantic_ai.messages import ModelRequest, SystemPromptPart
@@ -9,7 +9,12 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.chat import engine as chat_engine
-from app.chat.engine import MessageOut, ModelSettings, handle_conversation_turn
+from app.chat.engine import (
+    MessageOut,
+    ModelSettings,
+    handle_conversation_turn,
+    handle_investigation_turn,
+)
 from app.core.config import settings
 from app.core.db import async_session_factory
 from app.models import AssistantMessageMetadata, Conversation, Message, User
@@ -30,10 +35,6 @@ def mock_chatbot_result():
     """Create a mock result for chatbot agent."""
     mock_result = MagicMock()
     mock_result.output = "Hello! How can I help you today?"
-    mock_usage = MagicMock()
-    mock_usage.input_tokens = 200
-    mock_usage.output_tokens = 100
-    mock_result.usage.return_value = mock_usage
     mock_result.all_messages.return_value = []
     return mock_result
 
@@ -196,6 +197,9 @@ class TestHandleConversationTurnNewConversation:
         )
         assert metadata is not None
         assert metadata.system_prompt_rendered == "Mock chatbot system prompt"
+        assert metadata.chatbot_model_settings == model_settings.to_dict()
+        assert metadata.chatbot_time is not None
+        assert metadata.chatbot_time >= 0
 
     @pytest.mark.asyncio
     async def test_creates_new_conversation(
@@ -220,7 +224,7 @@ class TestHandleConversationTurnNewConversation:
                 mock_chatbot_result,
             )
 
-            _user_message_id, assistant_message = await handle_conversation_turn(
+            user_message_id, assistant_message = await handle_conversation_turn(
                 project_name="test_project",
                 conversation_id=None,
                 parent_message_id=None,
@@ -245,6 +249,7 @@ class TestHandleConversationTurnNewConversation:
             assert conversation is not None
             assert conversation.title == "Hello, I need help"
             assert conversation.project == "test_project"
+            assert conversation.active_root_message_id == user_message_id
 
             # Verify messages were created
             stmt = select(Message).filter_by(conversation_id=conversation.id)
@@ -358,15 +363,31 @@ class TestHandleConversationTurnContinuation:
             # Update mock response for second turn
             mock_chatbot_result_2 = MagicMock()
             mock_chatbot_result_2.output = "Here's more help for you!"
-            mock_chatbot_result_2.usage.return_value = mock_chatbot_result.usage()
             mock_chatbot_result_2.all_messages.return_value = []
 
-            setup_mock_agents(
+            mock_chatbot_agent = setup_mock_agents(
                 mock_create_chatbot,
                 mock_get_runtime_jinja_environment,
                 mock_get_deps_with_jinja_env,
                 mock_chatbot_result_2,
             )
+            jinja_environment = mock_get_runtime_jinja_environment.return_value
+
+            async def load_templates_without_request_transaction(
+                *_: object, **__: object
+            ) -> MagicMock:
+                assert not session.in_transaction()
+                return jinja_environment
+
+            mock_get_runtime_jinja_environment.side_effect = (
+                load_templates_without_request_transaction
+            )
+
+            async def run_without_request_transaction(*_: object, **__: object) -> MagicMock:
+                assert not session.in_transaction()
+                return mock_chatbot_result_2
+
+            mock_chatbot_agent.run.side_effect = run_without_request_transaction
 
             # Second turn: continue the conversation
             _, second_assistant_message = await handle_conversation_turn(
@@ -448,7 +469,6 @@ class TestHandleConversationTurnRegeneration:
             # Update mock for regeneration
             mock_chatbot_result_regen = MagicMock()
             mock_chatbot_result_regen.output = "A better response!"
-            mock_chatbot_result_regen.usage.return_value = mock_chatbot_result.usage()
             mock_chatbot_result_regen.all_messages.return_value = []
 
             setup_mock_agents(
@@ -488,6 +508,78 @@ class TestHandleConversationTurnRegeneration:
             assert len(messages) == 3
 
 
+class TestHandleInvestigationTurn:
+    """Tests for investigation conversation turns."""
+
+    @pytest.mark.asyncio
+    async def test_selects_new_root_for_a_root_turn(
+        self, session: AsyncSession, test_user: User, model_settings: ModelSettings
+    ) -> None:
+        conversation = Conversation(
+            title="Investigation",
+            project="test_project",
+            user_id=test_user.id,
+            is_public=False,
+            kind="investigation",
+        )
+        session.add(conversation)
+        await session.flush()
+        previous_root = Message(role="user", content="Previous root", conversation=conversation)
+        session.add(previous_root)
+        await session.flush()
+        conversation.active_root_message_id = previous_root.id
+
+        template = MagicMock()
+        template.render.return_value = "Investigation system prompt"
+        jinja_environment = MagicMock()
+        jinja_environment.get_template.return_value = template
+
+        async def load_templates_without_request_transaction(*_: object, **__: object) -> MagicMock:
+            assert not session.in_transaction()
+            return jinja_environment
+
+        async def run_without_request_transaction(
+            **_: object,
+        ) -> tuple[dict[str, object], str, list[object], float]:
+            assert not session.in_transaction()
+            return (
+                {"role": "assistant", "content": "Investigated answer", "tool_calls": None},
+                "Investigation system prompt",
+                [],
+                0.1,
+            )
+
+        with (
+            patch(
+                "app.chat.engine.get_runtime_jinja_environment",
+                new=load_templates_without_request_transaction,
+            ),
+            patch("app.chat.engine.get_deps_with_jinja_env"),
+            patch(
+                "app.chat.engine._handle_investigation_iteration",
+                new=run_without_request_transaction,
+            ),
+        ):
+            user_message_id, assistant_message = await handle_investigation_turn(
+                project_name="test_project",
+                conversation_id=conversation.id,
+                parent_message_id=None,
+                user_prompt="New root",
+                is_regeneration=False,
+                chatbot_model_settings=model_settings,
+                user_id=test_user.id,
+                session=session,
+                tool_session_factory=async_session_factory,
+            )
+
+        await session.refresh(conversation, attribute_names=["active_root_message_id"])
+        user_message = await session.get(Message, user_message_id)
+        assert user_message is not None
+        assert user_message.parent_id is None
+        assert assistant_message.parent_id == user_message_id
+        assert conversation.active_root_message_id == user_message_id
+
+
 class TestHandleConversationTurnErrors:
     """Tests for error handling."""
 
@@ -512,6 +604,56 @@ class TestHandleConversationTurnErrors:
                 session=session,
                 tool_session_factory=async_session_factory,
             )
+
+    @pytest.mark.asyncio
+    async def test_rejects_invalid_conversation_context(
+        self, session: AsyncSession, test_user: User, model_settings: ModelSettings
+    ) -> None:
+        conversation = Conversation(
+            title="Chat", project="test_project", user_id=test_user.id, is_public=False
+        )
+        other_conversation = Conversation(
+            title="Other chat", project="test_project", user_id=test_user.id, is_public=False
+        )
+        investigation = Conversation(
+            title="Investigation",
+            project="test_project",
+            user_id=test_user.id,
+            is_public=False,
+            kind="investigation",
+        )
+        session.add_all([conversation, other_conversation, investigation])
+        await session.flush()
+        assistant_parent = Message(
+            role="assistant", content="Existing answer", conversation=conversation
+        )
+        session.add(assistant_parent)
+        await session.flush()
+
+        async def turn(
+            target: Conversation, parent_message_id: UUID | None, *, regeneration: bool = False
+        ) -> None:
+            await handle_conversation_turn(
+                project_name="test_project",
+                conversation_id=target.id,
+                parent_message_id=parent_message_id,
+                user_prompt="Continue",
+                is_regeneration=regeneration,
+                chatbot_model_settings=model_settings,
+                guardrail_model_settings=model_settings,
+                user_id=test_user.id,
+                session=session,
+                tool_session_factory=async_session_factory,
+            )
+
+        with pytest.raises(ValueError, match="Chat turn requires a chat conversation"):
+            await turn(investigation, None)
+        with pytest.raises(ValueError, match="Regeneration requires an explicit parent message"):
+            await turn(conversation, None, regeneration=True)
+        with pytest.raises(ValueError, match="Regeneration parent must be a user message"):
+            await turn(conversation, assistant_parent.id, regeneration=True)
+        with pytest.raises(ValueError, match="Parent message is not in this conversation"):
+            await turn(other_conversation, assistant_parent.id)
 
     @pytest.mark.asyncio
     async def test_raises_error_for_nonexistent_parent_message(

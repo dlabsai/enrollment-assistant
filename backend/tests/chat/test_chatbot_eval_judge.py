@@ -61,7 +61,8 @@ async def _evaluate_with_captured_prompt(
     captured: dict[str, Any] = {}
 
     async def fake_run_agent(**kwargs: Any) -> tuple[Any, float]:
-        captured["agent"] = kwargs["agent"]
+        captured["agent_name"] = kwargs["agent_name"]
+        captured["metadata"] = kwargs["metadata"]
         captured["prompt"] = kwargs["prompt"]
         return (
             SimpleNamespace(
@@ -88,9 +89,10 @@ async def test_chatbot_judge_receives_retrieved_tool_context(
 
     captured, result = await _evaluate_with_captured_prompt(monkeypatch, judge)
 
+    assert captured["agent_name"] == "eval_judge"
+    assert captured["metadata"] == {"is_internal": True}
     assert "<retrieved_tool_context>" in captured["prompt"]
     assert "retrieve_documents returned Tuition & Fees page" in captured["prompt"]
     assert "<retrieved_tool_context>" in CHATBOT_JUDGE_SYSTEM_PROMPT
-    assert "<search-results> section" not in CHATBOT_JUDGE_SYSTEM_PROMPT
     assert result["passed"] == EvaluationReason(value=True, reason="grounded in context")
     assert result["is_grounded"] is True

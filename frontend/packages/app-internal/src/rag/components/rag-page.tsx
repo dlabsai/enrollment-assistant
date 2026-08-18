@@ -5,8 +5,12 @@ import {
     ResizablePanel,
     ResizablePanelGroup,
 } from "@va/shared/components/ui/resizable";
-import { handleFetchError, isAbortError } from "@va/shared/lib/api-client";
-import { Copy, Play, RefreshCw } from "lucide-react";
+import {
+    handleFetchError,
+    isAbortError,
+    isApiError,
+} from "@va/shared/lib/api-client";
+import { Copy, Play, RefreshCw, StopCircle } from "lucide-react";
 import {
     Fragment,
     type JSX,
@@ -21,7 +25,9 @@ import { useAuthenticatedApi } from "../../auth/hooks/use-authenticated-api";
 import { PageHeader } from "../../components/page-header";
 import { PageSection, PageShell } from "../../components/page-shell";
 import { InlineError } from "../../components/page-state";
+import { useStickyBottomScroll } from "../../lib/hooks/use-sticky-bottom-scroll";
 import {
+    cancelRagBuild,
     type RagOperationLogEntry,
     type RagOperationProgressEvent,
     type RagOperationProgressStepStatus,
@@ -32,6 +38,16 @@ import {
 
 interface RagOperationLogItem extends RagOperationLogEntry {
     id: string;
+}
+
+interface RagBuildStreamOptions {
+    forceRebuild?: boolean;
+    resumeExisting?: boolean;
+}
+
+interface ObserveRagBuildStreamOptions extends RagBuildStreamOptions {
+    errorContext: string;
+    markRunning?: boolean;
 }
 
 const RICH_TAG_CLASS_MAP: Record<string, string> = {
@@ -164,6 +180,7 @@ const resolveStepStatusVariant = (
 export const RagPage = (): JSX.Element => {
     const api = useAuthenticatedApi();
     const [isBuildRunning, setIsBuildRunning] = useState(false);
+    const [isStopRequestPending, setIsStopRequestPending] = useState(false);
     const [runLogs, setRunLogs] = useState<RagOperationLogItem[]>([]);
     const [runProgress, setRunProgress] = useState<RagOperationProgressEvent>();
     const [runError, setRunError] = useState<string | undefined>();
@@ -171,10 +188,16 @@ export const RagPage = (): JSX.Element => {
     const runAbortControllerRef = useRef<AbortController | undefined>(
         undefined,
     );
-    const runOutputContainerRef = useRef<HTMLDivElement | null>(null);
     const runLogCounterRef = useRef(0);
+    const {
+        containerRef: runOutputContainerRef,
+        handleScroll: handleRunOutputScroll,
+        resetStickToBottom: resetRunOutputStickToBottom,
+        scrollToBottomIfPinned: scrollRunOutputToBottomIfPinned,
+    } = useStickyBottomScroll();
 
-    const isOperationRunning = isBuildRunning || isCopyingEvalRag;
+    const isOperationRunning =
+        isBuildRunning || isStopRequestPending || isCopyingEvalRag;
     const shouldShowSteps = runProgress !== undefined;
     const shouldShowOutput = runError !== undefined || runLogs.length > 0;
     const shouldShowWorkspace = shouldShowSteps || shouldShowOutput;
@@ -192,7 +215,12 @@ export const RagPage = (): JSX.Element => {
 
     const handleRunStatus = useCallback(
         (status: RagOperationStatusEvent): void => {
-            setIsBuildRunning(status.status === "start");
+            const buildIsActive =
+                status.status === "start" || status.status === "cancelling";
+            setIsBuildRunning(buildIsActive);
+            if (!buildIsActive) {
+                setIsStopRequestPending(false);
+            }
         },
         [],
     );
@@ -208,59 +236,62 @@ export const RagPage = (): JSX.Element => {
         [],
     );
 
+    const requestRagBuildStream = useCallback(
+        async (
+            signal: AbortSignal,
+            {
+                forceRebuild,
+                resumeExisting = false,
+            }: RagBuildStreamOptions,
+        ): Promise<void> => {
+            await runRagBuildStream(
+                api,
+                {
+                    onLog: appendLog,
+                    onStatus: handleRunStatus,
+                    onError: handleRunError,
+                    onProgress: handleRunProgress,
+                },
+                { signal, forceRebuild, resumeExisting },
+            );
+        },
+        [api, appendLog, handleRunError, handleRunProgress, handleRunStatus],
+    );
+
     const observeRagBuildStream = useCallback(
         async ({
             errorContext,
-            forceRebuild = false,
             markRunning = false,
-            resumeExisting = false,
-        }: {
-            errorContext: string;
-            forceRebuild?: boolean;
-            markRunning?: boolean;
-            resumeExisting?: boolean;
-        }): Promise<void> => {
+            ...options
+        }: ObserveRagBuildStreamOptions): Promise<void> => {
             runAbortControllerRef.current?.abort();
             const controller = new AbortController();
             runAbortControllerRef.current = controller;
             runLogCounterRef.current = 0;
+            resetRunOutputStickToBottom();
             setRunLogs([]);
             setRunProgress(undefined);
             setRunError(undefined);
+            setIsStopRequestPending(false);
             if (markRunning) {
                 setIsBuildRunning(true);
             }
 
             try {
-                await runRagBuildStream(
-                    api,
-                    {
-                        onLog: appendLog,
-                        onStatus: handleRunStatus,
-                        onError: handleRunError,
-                        onProgress: handleRunProgress,
-                    },
-                    {
-                        signal: controller.signal,
-                        forceRebuild,
-                        resumeExisting,
-                    },
-                );
+                await requestRagBuildStream(controller.signal, options);
             } catch (error) {
-                if (isAbortError(error)) {
-                    return;
+                if (!isAbortError(error)) {
+                    setIsBuildRunning(false);
+                    setIsStopRequestPending(false);
+                    setRunError(handleFetchError(error, errorContext));
                 }
-
-                const message = handleFetchError(error, errorContext);
-                setIsBuildRunning(false);
-                setRunError(message);
             } finally {
                 if (runAbortControllerRef.current === controller) {
                     runAbortControllerRef.current = undefined;
                 }
             }
         },
-        [api, appendLog, handleRunError, handleRunProgress, handleRunStatus],
+        [requestRagBuildStream, resetRunOutputStickToBottom],
     );
 
     const handleRun = useCallback(
@@ -286,6 +317,28 @@ export const RagPage = (): JSX.Element => {
         void handleRun(true);
     }, [handleRun]);
 
+    const handleStopBuildClick = useCallback((): void => {
+        if (!isBuildRunning || isStopRequestPending) {
+            return;
+        }
+
+        setIsStopRequestPending(true);
+        setIsBuildRunning(true);
+        void cancelRagBuild(api)
+            .then((result) => {
+                setIsBuildRunning(result.status === "cancelling");
+            })
+            .catch((error: unknown) => {
+                if (isApiError(error) && error.status === 404) {
+                    setIsBuildRunning(false);
+                }
+                setRunError(handleFetchError(error, "Stopping KB builder"));
+            })
+            .finally(() => {
+                setIsStopRequestPending(false);
+            });
+    }, [api, isBuildRunning, isStopRequestPending]);
+
     const handleCopyEvalRagClick = useCallback(async (): Promise<void> => {
         if (isOperationRunning) {
             return;
@@ -296,9 +349,12 @@ export const RagPage = (): JSX.Element => {
         runAbortControllerRef.current = controller;
         setIsCopyingEvalRag(true);
         runLogCounterRef.current = 0;
+        resetRunOutputStickToBottom();
         setRunLogs([]);
         setRunProgress(undefined);
         setRunError(undefined);
+        setIsBuildRunning(false);
+        setIsStopRequestPending(false);
 
         try {
             await syncEvalRagStream(
@@ -325,34 +381,53 @@ export const RagPage = (): JSX.Element => {
             }
             setIsCopyingEvalRag(false);
         }
-    }, [api, appendLog, handleRunError, handleRunProgress, isOperationRunning]);
+    }, [
+        api,
+        appendLog,
+        handleRunError,
+        handleRunProgress,
+        isOperationRunning,
+        resetRunOutputStickToBottom,
+    ]);
 
     useEffect(() => {
-        void observeRagBuildStream({
-            errorContext: "Resuming KB builder",
-            resumeExisting: true,
-        });
-    }, [observeRagBuildStream]);
+        runAbortControllerRef.current?.abort();
+        const controller = new AbortController();
+        runAbortControllerRef.current = controller;
+        void requestRagBuildStream(controller.signal, { resumeExisting: true })
+            .catch((error: unknown) => {
+                if (!isAbortError(error)) {
+                    setIsBuildRunning(false);
+                    setIsStopRequestPending(false);
+                    setRunError(handleFetchError(error, "Resuming KB builder"));
+                }
+            })
+            .finally(() => {
+                if (runAbortControllerRef.current === controller) {
+                    runAbortControllerRef.current = undefined;
+                }
+            });
 
-    useEffect(
-        (): (() => void) => (): void => {
+        return (): void => {
             runAbortControllerRef.current?.abort();
-        },
-        [],
-    );
+            runAbortControllerRef.current = undefined;
+        };
+    }, [requestRagBuildStream]);
 
     useEffect(() => {
-        if (runOutputContainerRef.current !== null) {
-            runOutputContainerRef.current.scrollTop =
-                runOutputContainerRef.current.scrollHeight;
-        }
-    }, [runLogs]);
+        scrollRunOutputToBottomIfPinned();
+    }, [runLogs, scrollRunOutputToBottomIfPinned]);
 
     const outputPane = (
         <div className="flex h-full min-h-0 min-w-0 flex-1 flex-col gap-3">
             {runError !== undefined && <InlineError message={runError} />}
+            <p className="text-muted-foreground text-xs">
+                Live output is not replayed after reconnecting. Durable status and
+                results remain available in KB Builder Jobs.
+            </p>
             <div
                 className="bg-muted/20 min-h-0 flex-1 overflow-auto rounded-md border p-4"
+                onScroll={handleRunOutputScroll}
                 ref={runOutputContainerRef}
             >
                 <pre className="font-mono text-sm leading-relaxed break-words whitespace-pre-wrap">
@@ -393,6 +468,18 @@ export const RagPage = (): JSX.Element => {
                 >
                     <RefreshCw data-icon="inline-start" />
                     Rebuild KB
+                </Button>
+                <Button
+                    disabled={
+                        !isBuildRunning || isStopRequestPending || isCopyingEvalRag
+                    }
+                    onClick={handleStopBuildClick}
+                    title="Request the running KB job to stop after its current step finishes."
+                    type="button"
+                    variant="outline"
+                >
+                    <StopCircle data-icon="inline-start" />
+                    {isStopRequestPending ? "Stopping KB Job" : "Stop KB Job"}
                 </Button>
                 <Button
                     disabled={isOperationRunning}

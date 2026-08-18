@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import TYPE_CHECKING
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, literal, select, true
 
 from app.models import RbacGroup, RbacGroupPermission, RbacUserPermissionOverride, User
 
@@ -30,6 +30,7 @@ class PermissionKey(StrEnum):
     ACCESS_RBAC = "access_rbac"
     ACCESS_USAGE = "access_usage"
     ACCESS_ANALYTICS = "access_analytics"
+    ACCESS_ADOPTION = "access_adoption"
     ACCESS_PUBLIC_ANALYTICS = "access_public_analytics"
     ACCESS_EVALS = "access_evals"
     ACCESS_SETTINGS = "access_settings"
@@ -113,6 +114,12 @@ PERMISSION_DEFINITIONS: tuple[PermissionDefinition, ...] = (
         key=PermissionKey.ACCESS_ANALYTICS,
         label="Chat Analytics page",
         description="Access the Chat Analytics page.",
+        category="pages",
+    ),
+    PermissionDefinition(
+        key=PermissionKey.ACCESS_ADOPTION,
+        label="Adoption page",
+        description="Access the internal user adoption page.",
         category="pages",
     ),
     PermissionDefinition(
@@ -248,6 +255,7 @@ SYSTEM_GROUP_SPECS: tuple[tuple[SystemGroupSlug, str], ...] = (
     (SystemGroupSlug.DEV, "Developer access"),
 )
 
+# Callers add missing rows from this floor but never remove operator-managed grants.
 DEFAULT_GROUP_PERMISSIONS: dict[SystemGroupSlug, frozenset[PermissionKey]] = {
     SystemGroupSlug.USER: frozenset(
         {
@@ -298,6 +306,7 @@ DEFAULT_GROUP_PERMISSIONS: dict[SystemGroupSlug, frozenset[PermissionKey]] = {
             PermissionKey.ACCESS_RBAC,
             PermissionKey.ACCESS_USAGE,
             PermissionKey.ACCESS_ANALYTICS,
+            PermissionKey.ACCESS_ADOPTION,
             PermissionKey.ACCESS_PUBLIC_ANALYTICS,
             PermissionKey.ACCESS_EVALS,
             PermissionKey.ACCESS_SETTINGS,
@@ -423,31 +432,30 @@ async def get_effective_permission_map(
 ) -> dict[PermissionKey, bool]:
     permission_map = dict.fromkeys(ALL_PERMISSION_KEYS, False)
 
-    group_permission_rows = (
-        (
-            await session.execute(
-                select(RbacGroupPermission.permission_key).where(
-                    RbacGroupPermission.group_id == user.group_id
-                )
-            )
+    permission_rows = (
+        select(
+            RbacGroupPermission.permission_key.label("permission_key"),
+            true().label("is_allowed"),
+            literal(0).label("priority"),
         )
-        .scalars()
-        .all()
-    )
-    for permission_key in group_permission_rows:
-        try:
-            permission_map[PermissionKey(permission_key)] = True
-        except ValueError:
-            continue
-
-    user_override_rows = (
-        await session.execute(
+        .where(RbacGroupPermission.group_id == user.group_id)
+        .union_all(
             select(
-                RbacUserPermissionOverride.permission_key, RbacUserPermissionOverride.is_allowed
+                RbacUserPermissionOverride.permission_key.label("permission_key"),
+                RbacUserPermissionOverride.is_allowed.label("is_allowed"),
+                literal(1).label("priority"),
             ).where(RbacUserPermissionOverride.user_id == user.id)
         )
+        .subquery()
+    )
+    rows = (
+        await session.execute(
+            select(permission_rows.c.permission_key, permission_rows.c.is_allowed).order_by(
+                permission_rows.c.priority
+            )
+        )
     ).all()
-    for permission_key, is_allowed in user_override_rows:
+    for permission_key, is_allowed in rows:
         try:
             permission_map[PermissionKey(permission_key)] = bool(is_allowed)
         except ValueError:

@@ -83,7 +83,7 @@ export interface RagDocumentTreeNode {
     children: RagDocumentTreeNode[];
 }
 
-export interface RagDocumentExclusionSummary {
+interface RagDocumentExclusionSummary {
     documents: number;
     chunks: number;
     tokens: number;
@@ -125,7 +125,7 @@ export interface RagDocumentExclusionPayload {
     reason: string;
 }
 
-export type RagDocumentExclusionEventAction = "excluded" | "included";
+type RagDocumentExclusionEventAction = "excluded" | "included";
 export type RagDocumentExclusionEventFilter =
     | "all"
     | RagDocumentExclusionEventAction;

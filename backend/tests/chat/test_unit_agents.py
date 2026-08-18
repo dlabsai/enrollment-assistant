@@ -2,8 +2,10 @@
 
 from unittest.mock import MagicMock
 
+import pytest
 from jinja2 import Template
 from pydantic_ai.messages import ModelResponse, TextPart
+from pydantic_ai.models.test import TestModel
 from pydantic_ai.usage import RequestUsage
 
 from app.chat.agents import (
@@ -13,10 +15,12 @@ from app.chat.agents import (
     get_pydantic_ai_model_name,
     render_guardrails_system_prompt,
 )
+from app.chat.buffered_model import BufferedResponseModel
 from app.chat.engine import _get_transcript  # pyright: ignore[reportPrivateUsage]
 from app.chat.engine_utils import (
     _collect_llm_response_metrics,  # pyright: ignore[reportPrivateUsage]
 )
+from app.chat.provider_http import close_provider_http_clients, get_provider_http_client
 from app.chat.tools import Deps
 
 
@@ -193,6 +197,37 @@ class TestAgentCreation:
             agent = create_chatbot_agent("azure/gpt-4o", tools=None)
             assert agent is not None
 
+    def test_create_chatbot_agent_wraps_model_when_provider_streaming_is_disabled(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        model = TestModel()
+
+        def get_model(_name: str) -> TestModel:
+            return model
+
+        monkeypatch.setattr("app.chat.agents.get_pydantic_ai_model_name", get_model)
+        monkeypatch.setattr("app.chat.agents.settings.PROVIDER_MODEL_STREAMING_ENABLED", False)
+
+        agent = create_chatbot_agent("azure/gpt-4o")
+
+        assert isinstance(agent.model, BufferedResponseModel)
+        assert agent.model.wrapped is model
+
+    def test_create_chatbot_agent_keeps_streaming_model_for_rollback(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        model = TestModel()
+
+        def get_model(_name: str) -> TestModel:
+            return model
+
+        monkeypatch.setattr("app.chat.agents.get_pydantic_ai_model_name", get_model)
+        monkeypatch.setattr("app.chat.agents.settings.PROVIDER_MODEL_STREAMING_ENABLED", True)
+
+        agent = create_chatbot_agent("azure/gpt-4o")
+
+        assert agent.model is model
+
     def test_create_guardrails_agent(self):
         """Test guardrails agent creation."""
         from app.chat.config import TEMPLATES_DIR
@@ -212,6 +247,28 @@ class TestAgentCreation:
         )
         agent = create_guardrails_agent("azure/gpt-4o", template=template)
         assert agent is not None
+
+
+class TestProviderHttpClients:
+    @pytest.mark.asyncio
+    async def test_reuses_clients_by_endpoint_and_recreates_them_after_shutdown(self):
+        await close_provider_http_clients()
+
+        first = get_provider_http_client("https://resource-one.example/")
+        same_endpoint = get_provider_http_client("https://resource-one.example")
+        other_endpoint = get_provider_http_client("https://resource-two.example")
+
+        assert same_endpoint is first
+        assert other_endpoint is not first
+
+        await close_provider_http_clients()
+
+        assert first.is_closed
+        assert other_endpoint.is_closed
+
+        recreated = get_provider_http_client("https://resource-one.example")
+        assert recreated is not first
+        await close_provider_http_clients()
 
 
 class TestModelConversion:

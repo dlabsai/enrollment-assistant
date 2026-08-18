@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+from datetime import timedelta
 from types import SimpleNamespace
 from typing import Any
 from uuid import uuid4
 
 import pytest
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api import grounding_agent
@@ -15,10 +17,11 @@ from app.api.message_sources import (
 )
 from app.chat.agents import GroundingAgentCannedResponseGrounding
 from app.models import AssistantMessageMetadata, Conversation, DocumentType, Message
+from app.utils import current_time_utc
 
 
 @pytest.mark.asyncio
-async def test_select_grounding_source_keys_uses_gpt_55_medium_reasoning(
+async def test_select_grounding_source_keys_uses_configured_model_and_reasoning(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     source = MessageSourceUsed(
@@ -32,6 +35,8 @@ async def test_select_grounding_source_keys_uses_gpt_55_medium_reasoning(
         tool_name="find_document_chunks",
     )
     captured_model_settings: list[grounding_agent.ModelSettings] = []
+    monkeypatch.setattr(grounding_agent.settings, "GROUNDING_MODEL_MAX_TOKENS", 789)
+    monkeypatch.setattr(grounding_agent.settings, "GROUNDING_AZURE_SERVICE_TIER", "priority")
 
     class FakeTemplate:
         def render(self) -> str:
@@ -72,8 +77,16 @@ async def test_select_grounding_source_keys_uses_gpt_55_medium_reasoning(
 
     assert selected_keys == [source.key]
     assert len(captured_model_settings) == 1
-    assert captured_model_settings[0].model == "azure/gpt-5.5"
-    assert captured_model_settings[0].reasoning_effort == "medium"
+    assert captured_model_settings[0].model == grounding_agent.settings.GROUNDING_MODEL
+    assert captured_model_settings[0].max_tokens == 789
+    assert (
+        captured_model_settings[0].reasoning_effort
+        == grounding_agent.settings.GROUNDING_REASONING_EFFORT
+    )
+    assert (
+        captured_model_settings[0].azure_service_tier
+        == grounding_agent.settings.GROUNDING_AZURE_SERVICE_TIER
+    )
 
 
 @pytest.mark.asyncio
@@ -395,8 +408,45 @@ def test_filter_sources_by_keys_expands_structured_canned_response_selections() 
     assert selected_sources[1].explanation == "The answer framing came from internal instructions."
 
 
+def test_stale_pending_grounding_is_projected_as_retryable_without_mutating_metadata() -> None:
+    metadata = AssistantMessageMetadata(
+        message_id=uuid4(),
+        system_prompt_rendered="system",
+        conversation_turn=1,
+        grounding_source_status=grounding_agent.GROUNDING_SOURCE_STATUS_PENDING,
+        grounding_source_keys=None,
+        updated_at=(
+            current_time_utc()
+            - grounding_agent.GROUNDING_PENDING_STALE_AFTER
+            - timedelta(seconds=1)
+        ),
+    )
+
+    status = grounding_agent.effective_grounding_source_status(metadata)
+
+    assert status == grounding_agent.GROUNDING_SOURCE_STATUS_FAILED
+    assert metadata.grounding_source_keys is None
+    assert metadata.grounding_source_status == grounding_agent.GROUNDING_SOURCE_STATUS_PENDING
+
+
+def test_recent_pending_grounding_remains_pending() -> None:
+    metadata = AssistantMessageMetadata(
+        message_id=uuid4(),
+        system_prompt_rendered="system",
+        conversation_turn=1,
+        grounding_source_status=grounding_agent.GROUNDING_SOURCE_STATUS_PENDING,
+        grounding_source_keys=None,
+        updated_at=current_time_utc(),
+    )
+
+    assert (
+        grounding_agent.effective_grounding_source_status(metadata)
+        == grounding_agent.GROUNDING_SOURCE_STATUS_PENDING
+    )
+
+
 @pytest.mark.asyncio
-async def test_select_and_store_grounding_sources_propagates_selection_errors(
+async def test_select_and_store_grounding_sources_persists_failed_selection_status(
     transactional_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     conversation = Conversation(title="Grounding test", user=False, project="demo")
@@ -422,32 +472,45 @@ async def test_select_and_store_grounding_sources_propagates_selection_errors(
     await transactional_session.flush()
 
     async def fail_selection(**_: Any) -> list[str]:
+        assert not transactional_session.in_transaction()
         raise RuntimeError("grounding model unavailable")
 
     monkeypatch.setattr(grounding_agent, "select_grounding_source_keys", fail_selection)
 
-    with pytest.raises(RuntimeError, match="grounding model unavailable"):
-        await grounding_agent.select_and_store_grounding_sources(
-            transactional_session,
-            assistant_message_id=assistant_message.id,
-            user_message_id=user_message.id,
-            assistant_answer=assistant_message.content,
-            sources=[
-                MessageSourceUsed(
-                    key="tool-1:website_page:42:search:0",
-                    type=DocumentType.WEBSITE_PAGE,
-                    id=42,
-                    title="Tuition and Fees",
-                    url="https://demo-university.example.edu/tuition",
-                    usage="search",
-                    tool_call_id="tool-1",
-                    tool_name="find_document_chunks",
-                )
-            ],
-        )
+    selected_keys, status = await grounding_agent.select_and_store_grounding_sources(
+        transactional_session,
+        assistant_message_id=assistant_message.id,
+        user_message_id=user_message.id,
+        assistant_answer=assistant_message.content,
+        sources=[
+            MessageSourceUsed(
+                key="tool-1:website_page:42:search:0",
+                type=DocumentType.WEBSITE_PAGE,
+                id=42,
+                title="Tuition and Fees",
+                url="https://demo-university.example.edu/tuition",
+                usage="search",
+                tool_call_id="tool-1",
+                tool_name="find_document_chunks",
+            )
+        ],
+    )
 
-    assert metadata.grounding_source_keys is None
-    assert metadata.grounding_source_status is None
+    assert selected_keys == []
+    assert status == grounding_agent.GROUNDING_SOURCE_STATUS_FAILED
+
+    await transactional_session.commit()
+    transactional_session.expunge(metadata)
+    persisted_metadata = await transactional_session.scalar(
+        select(AssistantMessageMetadata).where(
+            AssistantMessageMetadata.message_id == assistant_message.id
+        )
+    )
+    assert persisted_metadata is not None
+    assert persisted_metadata.grounding_source_keys == []
+    assert (
+        persisted_metadata.grounding_source_status == grounding_agent.GROUNDING_SOURCE_STATUS_FAILED
+    )
 
 
 @pytest.mark.asyncio

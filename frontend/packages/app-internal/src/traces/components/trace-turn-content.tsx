@@ -12,7 +12,11 @@ import { JSONTree, type ShouldExpandNodeInitially } from "react-json-tree";
 
 import { formatLocaleNumber } from "../../lib/number-format";
 import { isRecord, parseJsonRecursively } from "../lib/trace-utils";
-import { jsonTreeTheme, shouldExpandJsonNode } from "../lib/trace-view-utils";
+import {
+    jsonTreeTheme,
+    shouldExpandJsonNode,
+    TRACE_TEXT_PREVIEW_LENGTH,
+} from "../lib/trace-view-utils";
 import { stringifyFieldValue, stringifyValue } from "./trace-turn-content-utils";
 
 const normalizeJsonValue = (value: unknown): unknown => {
@@ -202,26 +206,37 @@ const ExpandableJson = ({
     );
 };
 
-const ExpandableMarkdown = ({
+export const ExpandableMarkdownValue = ({
     content,
-    previewLength = 1400,
+    formatted,
 }: {
     content: string;
-    previewLength?: number;
+    formatted: boolean;
 }): JSX.Element => {
-    const isLong = content.length > previewLength;
-    const [expanded, setExpanded] = useState(!isLong);
+    const isLong = content.length > TRACE_TEXT_PREVIEW_LENGTH;
+    const [expansion, setExpansion] = useState(() => ({
+        content,
+        expanded: !isLong,
+    }));
+    const expanded =
+        expansion.content === content ? expansion.expanded : !isLong;
     const displayContent = expanded
         ? content
-        : `${content.slice(0, previewLength)}\n\n…`;
+        : `${content.slice(0, TRACE_TEXT_PREVIEW_LENGTH)}\n\n…`;
 
     return (
         <div className="space-y-2">
-            <MarkdownContent content={displayContent} />
+            {formatted ? (
+                <MarkdownContent content={displayContent} />
+            ) : (
+                <div className="text-sm break-words whitespace-pre-wrap">
+                    {displayContent}
+                </div>
+            )}
             {isLong ? (
                 <Button
                     onClick={() => {
-                        setExpanded((value) => !value);
+                        setExpansion({ content, expanded: !expanded });
                     }}
                     size="sm"
                     type="button"
@@ -236,16 +251,14 @@ const ExpandableMarkdown = ({
 
 const ExpandablePlainText = ({
     content,
-    previewLength = 1400,
 }: {
     content: string;
-    previewLength?: number;
 }): JSX.Element => {
-    const isLong = content.length > previewLength;
+    const isLong = content.length > TRACE_TEXT_PREVIEW_LENGTH;
     const [expanded, setExpanded] = useState(!isLong);
     const displayContent = expanded
         ? content
-        : `${content.slice(0, previewLength)}\n\n…`;
+        : `${content.slice(0, TRACE_TEXT_PREVIEW_LENGTH)}\n\n…`;
 
     return (
         <div className="space-y-2">
@@ -283,8 +296,6 @@ const isDocumentToolResult = (value: unknown): value is DocumentToolResult =>
     typeof value.type === "string" &&
     typeof value.id === "number" &&
     typeof value.title === "string";
-
-const DOCUMENT_RESULT_PREVIEW_LENGTH = 1400;
 
 type FindDocumentChunksV2SourceTuple = [number, number[], string];
 
@@ -375,11 +386,11 @@ const FindDocumentChunksV2Card = ({
     total: number;
 }): JSX.Element => {
     const sources = flattenChunkSources(item.sources);
-    const isLong = item.content.length > DOCUMENT_RESULT_PREVIEW_LENGTH;
+    const isLong = item.content.length > TRACE_TEXT_PREVIEW_LENGTH;
     const displayContent =
         expanded || !isLong
             ? item.content
-            : `${item.content.slice(0, DOCUMENT_RESULT_PREVIEW_LENGTH)}\n\n…`;
+            : `${item.content.slice(0, TRACE_TEXT_PREVIEW_LENGTH)}\n\n…`;
     return (
         <article
             className={`space-y-3 rounded-md border p-3 ${
@@ -588,11 +599,11 @@ const DocumentResultCard = ({
 }): JSX.Element => {
     const { content, title } = item;
     const isLong =
-        content !== undefined && content.length > DOCUMENT_RESULT_PREVIEW_LENGTH;
+        content !== undefined && content.length > TRACE_TEXT_PREVIEW_LENGTH;
     const displayContent =
         content === undefined || expanded || !isLong
             ? content
-            : `${content.slice(0, DOCUMENT_RESULT_PREVIEW_LENGTH)}\n\n…`;
+            : `${content.slice(0, TRACE_TEXT_PREVIEW_LENGTH)}\n\n…`;
     const metadata = Object.entries(item).filter(
         ([key, value]) => key !== "content" && value !== undefined && value !== null,
     );
@@ -834,5 +845,10 @@ export const ContentValue = ({
     if (typeof value === "string" && isJsonLikeString(value)) {
         return <ExpandablePlainText content={value} />;
     }
-    return <ExpandableMarkdown content={stringifyValue(value)} />;
+    return (
+        <ExpandableMarkdownValue
+            content={stringifyValue(value)}
+            formatted={formatted}
+        />
+    );
 };

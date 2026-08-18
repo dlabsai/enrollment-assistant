@@ -9,21 +9,8 @@ import { LoadingIndicator } from "@va/shared/components/loading-indicator";
 import { Streamdown } from "@va/shared/components/streamdown";
 import { Badge } from "@va/shared/components/ui/badge";
 import { Button } from "@va/shared/components/ui/button";
-import {
-    Command,
-    CommandEmpty,
-    CommandGroup,
-    CommandInput,
-    CommandItem,
-    CommandList,
-} from "@va/shared/components/ui/command";
 import { Input } from "@va/shared/components/ui/input";
 import { Label } from "@va/shared/components/ui/label";
-import {
-    Popover,
-    PopoverContent,
-    PopoverTrigger,
-} from "@va/shared/components/ui/popover";
 import {
     ResizableHandle,
     ResizablePanel,
@@ -52,7 +39,6 @@ import { UNIVERSITY_NAME } from "@va/shared/config";
 import { setDocumentTitle } from "@va/shared/lib/document-title";
 import type { ChatMessage } from "@va/shared/types";
 import {
-    ChevronsUpDown,
     Copy,
     ExternalLink,
     Filter,
@@ -61,7 +47,6 @@ import {
     RefreshCw,
     ThumbsDown,
     ThumbsUp,
-    UserRound,
 } from "lucide-react";
 import { type JSX, useCallback, useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
@@ -72,6 +57,10 @@ import { getDefaultDataTablePageSize } from "@/components/data-table-constants";
 import { useAuth } from "../../auth/contexts/auth-context";
 import { useAuthenticatedApi } from "../../auth/hooks/use-authenticated-api";
 import { hasPermission } from "../../auth/lib/permissions";
+import {
+    ConversationBranchNavigator,
+    ConversationBranchSwitcher,
+} from "../../chat/components/conversation-branch-navigation";
 import { renderGenerationTimeFooter } from "../../chat/components/generation-time-footer";
 import { GuardrailsFooter } from "../../chat/components/guardrails-footer";
 import { InvestigationButton } from "../../chat/components/investigation-button";
@@ -88,7 +77,16 @@ import { renderMessageTimestampFooter } from "../../chat/components/message-time
 import { renderResponseCostFooter } from "../../chat/components/response-cost-footer";
 import { useChatStore } from "../../chat/contexts/chat-store-context";
 import { ChatStoreProvider } from "../../chat/contexts/chat-store-provider";
-import { fetchChatDetail } from "../../chat/lib/api";
+import { fetchChatDetail, fetchConversationTree } from "../../chat/lib/api";
+import {
+    CONVERSATION_BRANCH_LOAD_ERROR,
+    type ConversationTreeState,
+    convertConversationTree,
+    createLatestRequestCoordinator,
+    hasConversationBranches,
+    hasMessageBranchAlternatives,
+    type ReviewConversationDetailSource,
+} from "../../chat/lib/conversation-tree";
 import { mapServerGuardrailsFailures } from "../../chat/lib/guardrails";
 import {
     buildResponseLink,
@@ -100,8 +98,12 @@ import { PageHeader, PageHeaderGroup } from "../../components/page-header";
 import { PageSection, PageShell } from "../../components/page-shell";
 import { InlineError, LoadingState } from "../../components/page-state";
 import { TimeRangeFilter } from "../../components/time-range-filter";
+import { UserFilterPopover } from "../../components/user-filter-popover";
 import { formatTableTimestamp } from "../../lib/date-format";
-import { formatLocaleNumber } from "../../lib/number-format";
+import {
+    formatLocaleNumber,
+    formatUsdCost,
+} from "../../lib/number-format";
 import {
     type CustomTimeRange,
     isTimeRangeValue,
@@ -115,8 +117,7 @@ import { fetchChatListPage, fetchChatUsers } from "../lib/api";
 import {
     buildOwnerGroupFilterOptions,
     buildUserFilterParams,
-    getUserOptionPrimaryLabel,
-    getUserOptionSecondaryLabel,
+    parseStoredUserFilter,
 } from "../lib/user-filter-options";
 import type {
     ChatListPage as ChatListPageResponse,
@@ -125,24 +126,6 @@ import type {
 } from "../types";
 import { ChatReviewSheetActions } from "./chat-review-sheet-actions";
 import { ChatTurnTraceSheet } from "./chat-turn-trace-sheet";
-
-const formatCost = (cost: number | undefined): string => {
-    if (cost === undefined) {
-        return "-";
-    }
-    if (cost === 0) {
-        return "$0.00";
-    }
-    return cost < 0.01
-        ? `$${formatLocaleNumber(cost, {
-              minimumFractionDigits: 4,
-              maximumFractionDigits: 4,
-          })}`
-        : `$${formatLocaleNumber(cost, {
-              minimumFractionDigits: 2,
-              maximumFractionDigits: 2,
-          })}`;
-};
 
 const formatTimestamp = formatTableTimestamp;
 
@@ -186,12 +169,22 @@ const buildColumns = (
 
                 return (
                     <div className="min-w-0 space-y-1">
-                        <div className="truncate text-sm font-semibold">
-                            <HighlightedText
-                                phrase={phrase}
-                                query={query}
-                                text={title}
-                            />
+                        <div className="flex min-w-0 items-center gap-2 text-sm font-semibold">
+                            <span className="min-w-0 truncate">
+                                <HighlightedText
+                                    phrase={phrase}
+                                    query={query}
+                                    text={title}
+                                />
+                            </span>
+                            {row.original.promptSource === "draft" && (
+                                <Badge
+                                    className="shrink-0"
+                                    variant="secondary"
+                                >
+                                    Draft instructions
+                                </Badge>
+                            )}
                         </div>
                         {preview !== "" && (
                             <div className="text-muted-foreground line-clamp-2 text-xs">
@@ -228,20 +221,82 @@ const buildColumns = (
                 );
             },
         },
+        ...(showPlatformColumn
+            ? [
+                  {
+                      id: "platform",
+                      header: "Platform",
+                      meta: {
+                          skeleton: skeletonLine("h-6 w-20 rounded-full"),
+                      },
+                      cell: ({
+                          row,
+                      }: {
+                          row: { original: ChatListRow };
+                      }): JSX.Element => (
+                          <Badge
+                              variant={
+                                  row.original.isPublic
+                                      ? "secondary"
+                                      : "outline"
+                              }
+                          >
+                              {row.original.isPublic ? "Public" : "Internal"}
+                          </Badge>
+                      ),
+                  },
+              ]
+            : []),
         {
-            id: "message_count",
-            accessorKey: "messageCount",
-            header: "Messages",
+            id: "user_message_count",
+            accessorKey: "userMessageCount",
+            header: "User messages",
             enableSorting: true,
             meta: {
                 skeleton: skeletonLine("h-4 w-12"),
             },
             cell: ({ row }): JSX.Element => (
                 <div className="tabular-nums">
-                    {formatLocaleNumber(row.original.messageCount)}
+                    {formatLocaleNumber(row.original.userMessageCount)}
                 </div>
             ),
         },
+        {
+            id: "assistant_message_count",
+            accessorKey: "assistantMessageCount",
+            header: "Assistant messages",
+            enableSorting: true,
+            meta: {
+                skeleton: skeletonLine("h-4 w-12"),
+            },
+            cell: ({ row }): JSX.Element => (
+                <div className="tabular-nums">
+                    {formatLocaleNumber(row.original.assistantMessageCount)}
+                </div>
+            ),
+        },
+        ...(canViewCost
+            ? [
+                  {
+                      id: "total_cost",
+                      accessorKey: "totalCost",
+                      header: "Cost",
+                      enableSorting: true,
+                      meta: {
+                          skeleton: skeletonLine("h-4 w-16"),
+                      },
+                      cell: ({
+                          row,
+                      }: {
+                          row: { original: ChatListRow };
+                      }): JSX.Element => (
+                          <div className="tabular-nums">
+                              {formatUsdCost(row.original.totalCost)}
+                          </div>
+                      ),
+                  },
+              ]
+            : []),
         ...(showFeedbackColumn
             ? [
                   {
@@ -306,40 +361,6 @@ const buildColumns = (
         },
     ];
 
-    if (showPlatformColumn) {
-        columns.splice(2, 0, {
-            id: "platform",
-            header: "Platform",
-            meta: {
-                skeleton: skeletonLine("h-6 w-20 rounded-full"),
-            },
-            cell: ({ row }): JSX.Element => (
-                <Badge
-                    variant={row.original.isPublic ? "secondary" : "outline"}
-                >
-                    {row.original.isPublic ? "Public" : "Internal"}
-                </Badge>
-            ),
-        });
-    }
-
-    if (canViewCost) {
-        columns.splice(showPlatformColumn ? 4 : 3, 0, {
-            id: "total_cost",
-            accessorKey: "totalCost",
-            header: "Cost",
-            enableSorting: true,
-            meta: {
-                skeleton: skeletonLine("h-4 w-16"),
-            },
-            cell: ({ row }): JSX.Element => (
-                <div className="tabular-nums">
-                    {formatCost(row.original.totalCost)}
-                </div>
-            ),
-        });
-    }
-
     return columns;
 };
 
@@ -371,7 +392,7 @@ const toInternalMessage = (
             ? message.guardrails_blocked_message
             : message.content,
     createdAt: new Date(message.created_at).getTime(),
-    parentId: message.parent_id,
+    parentId: message.parent_id ?? undefined,
     guardrailsBlocked: message.guardrails_blocked ?? false,
     guardrailsBlockedMessage: message.guardrails_blocked_message ?? undefined,
     assistantToolCalls: message.assistant_tool_calls,
@@ -452,6 +473,10 @@ interface FeedbackChange {
     next?: Rating;
 }
 
+type ChatDetailLoadState =
+    | { chatId: string; detail: ChatDetailResponse; error?: never }
+    | { chatId: string; detail?: never; error: string };
+
 type PlatformFilter = (typeof platformOptions)[number]["value"];
 
 interface StoredChatFilters {
@@ -464,12 +489,7 @@ interface StoredChatFilters {
     searchInput?: string;
     phraseSearch?: boolean;
     highlightMatches?: boolean;
-    selectedUser?: {
-        email: string;
-        name?: string;
-        ownerGroup?: ChatUserOption["ownerGroup"];
-        platform: ChatUserOption["platform"];
-    };
+    selectedUser?: ChatUserOption;
 }
 
 const isPlatformFilter = (value: string): value is PlatformFilter =>
@@ -477,14 +497,6 @@ const isPlatformFilter = (value: string): value is PlatformFilter =>
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
     typeof value === "object" && value !== null;
-
-const isChatPlatform = (value: string): value is ChatUserOption["platform"] =>
-    value === "internal" || value === "public";
-
-const isOwnerGroup = (
-    value: string,
-): value is NonNullable<ChatUserOption["ownerGroup"]> =>
-    value === "staff" || value === "devs";
 
 const parseStoredDate = (value?: string): Date | undefined => {
     if (value === undefined || value === "") {
@@ -522,27 +534,6 @@ const parseStoredChatFilters = (
             isTimeRangeValue(parsed.timeRange)
                 ? parsed.timeRange
                 : undefined;
-        const selectedUserValue = isRecord(parsed.selectedUser)
-            ? parsed.selectedUser
-            : undefined;
-        const selectedUserEmail =
-            typeof selectedUserValue?.email === "string"
-                ? selectedUserValue.email
-                : undefined;
-        const selectedUserPlatform =
-            typeof selectedUserValue?.platform === "string" &&
-            isChatPlatform(selectedUserValue.platform)
-                ? selectedUserValue.platform
-                : undefined;
-        const selectedUserOwnerGroup =
-            typeof selectedUserValue?.ownerGroup === "string" &&
-            isOwnerGroup(selectedUserValue.ownerGroup)
-                ? selectedUserValue.ownerGroup
-                : undefined;
-        const hasSelectedUser =
-            selectedUserEmail !== undefined &&
-            selectedUserEmail !== "" &&
-            selectedUserPlatform !== undefined;
         return {
             platform: platformValue,
             timeRange: timeRangeValue,
@@ -568,17 +559,7 @@ const parseStoredChatFilters = (
                         ? customRangeValue.end
                         : undefined,
             },
-            selectedUser: hasSelectedUser
-                ? {
-                      email: selectedUserEmail,
-                      name:
-                          typeof selectedUserValue?.name === "string"
-                              ? selectedUserValue.name
-                              : undefined,
-                      ownerGroup: selectedUserOwnerGroup,
-                      platform: selectedUserPlatform,
-                  }
-                : undefined,
+            selectedUser: parseStoredUserFilter(parsed.selectedUser),
         };
     } catch {
         return undefined;
@@ -596,20 +577,6 @@ const getStoredChatFilters = (
         return undefined;
     }
     return parseStoredChatFilters(stored);
-};
-
-const getStoredSelectedUser = (
-    value: StoredChatFilters["selectedUser"] | undefined,
-): ChatUserOption | undefined => {
-    if (value?.email === undefined || value.email === "") {
-        return undefined;
-    }
-    return {
-        email: value.email,
-        name: value.name,
-        ownerGroup: value.ownerGroup,
-        platform: value.platform,
-    };
 };
 
 const DetailFeedbackInitializer = ({
@@ -633,6 +600,21 @@ const DetailFeedbackInitializer = ({
     return undefined;
 };
 
+interface ReviewConversationTreeResult {
+    context: string;
+    tree?: ConversationTreeState;
+    error?: string;
+}
+
+interface PendingBranchNavigation {
+    context: string;
+}
+
+interface ReviewBranchFocus extends PendingBranchNavigation {
+    detail: ChatDetailResponse;
+    messageId: string;
+}
+
 interface ChatDetailContentProps {
     canViewDurationTooltip: boolean;
     canViewResponseCost: boolean;
@@ -646,9 +628,11 @@ interface ChatDetailContentProps {
     highlightPhrase: boolean;
     highlightQuery: string;
     loading: boolean;
+    onDetailChange: (detail: ChatDetailResponse) => void;
     onFeedbackChange: (change: FeedbackChange) => void;
     onOpenTrace: (messageId: string) => void;
     responseLinkTarget?: ResponseLinkTarget;
+    source: ReviewConversationDetailSource;
     showFeedback?: boolean;
     showInvestigations?: boolean;
     showSummary: boolean;
@@ -667,13 +651,56 @@ export const ChatDetailContent = ({
     highlightPhrase,
     highlightQuery,
     loading,
+    onDetailChange,
     onFeedbackChange,
     onOpenTrace,
     responseLinkTarget = "chat",
+    source,
     showFeedback = true,
     showInvestigations = true,
     showSummary,
 }: ChatDetailContentProps): JSX.Element => {
+    const api = useAuthenticatedApi();
+    const detailRequests = useMemo(() => createLatestRequestCoordinator(), []);
+    const conversationId = detail?.id;
+    const treeContext =
+        conversationId === undefined
+            ? undefined
+            : `${source}:${conversationId}`;
+    const branchNavigationContext =
+        treeContext === undefined
+            ? undefined
+            : `${treeContext}:${focusMessageId ?? ""}`;
+    const [conversationTreeResult, setConversationTreeResult] =
+        useState<ReviewConversationTreeResult>();
+    const activeConversationTreeResult =
+        conversationTreeResult?.context === treeContext
+            ? conversationTreeResult
+            : undefined;
+    const conversationTree = activeConversationTreeResult?.tree;
+    const conversationTreeError = activeConversationTreeResult?.error;
+    const [branchFocus, setBranchFocus] = useState<ReviewBranchFocus>();
+    const branchFocusMessageId =
+        branchFocus !== undefined &&
+        branchFocus.context === branchNavigationContext &&
+        branchFocus.detail === detail
+            ? branchFocus.messageId
+            : focusMessageId;
+    const [pendingBranchNavigation, setPendingBranchNavigation] =
+        useState<PendingBranchNavigation>();
+    const branchNavigationLoading =
+        pendingBranchNavigation?.context === branchNavigationContext;
+    const conversationTreeRequests = useMemo(
+        () => createLatestRequestCoordinator(),
+        [],
+    );
+
+    useEffect(
+        () => (): void => {
+            detailRequests.invalidate();
+        },
+        [branchNavigationContext, detailRequests, loading],
+    );
     const messages = useMemo(
         (): ChatMessage[] => (detail ? toChatMessages(detail) : []),
         [detail],
@@ -702,6 +729,108 @@ export const ChatDetailContent = ({
         [detail, responseLinkTarget],
     );
     const sourcePanelState = useMessageSourcePanelState();
+    const viewedPath = useMemo(
+        () => detail?.messages.map((message) => message.id) ?? [],
+        [detail],
+    );
+
+    const loadReviewConversationTree = useCallback((): void => {
+        if (conversationId === undefined || treeContext === undefined) {
+            return;
+        }
+        void conversationTreeRequests
+            .run(async () =>
+                convertConversationTree(
+                    await fetchConversationTree(api, conversationId, {
+                        source,
+                    }),
+                ),
+            )
+            .then(
+                (result) => {
+                    if (result.status === "current") {
+                        setConversationTreeResult({
+                            context: treeContext,
+                            tree: result.value,
+                        });
+                    }
+                },
+                () => {
+                    setConversationTreeResult({
+                        context: treeContext,
+                        error: CONVERSATION_BRANCH_LOAD_ERROR,
+                    });
+                },
+            );
+    }, [api, conversationId, conversationTreeRequests, source, treeContext]);
+
+    useEffect(() => {
+        loadReviewConversationTree();
+        return (): void => {
+            conversationTreeRequests.invalidate();
+        };
+    }, [conversationTreeRequests, loadReviewConversationTree]);
+
+    const handleSelectReviewMessage = useCallback(
+        async (messageId: string): Promise<boolean> => {
+            if (
+                detail === undefined ||
+                branchNavigationContext === undefined ||
+                branchNavigationLoading
+            ) {
+                return false;
+            }
+            const requestContext = branchNavigationContext;
+            if (viewedPath.includes(messageId)) {
+                setBranchFocus({
+                    context: requestContext,
+                    detail,
+                    messageId,
+                });
+                return true;
+            }
+
+            const pendingRequest: PendingBranchNavigation = {
+                context: requestContext,
+            };
+            setPendingBranchNavigation(pendingRequest);
+            try {
+                const result = await detailRequests.run(async () =>
+                    fetchChatDetail(api, detail.id, {
+                        source,
+                        targetMessageId: messageId,
+                    }),
+                );
+                if (result.status === "stale") {
+                    return false;
+                }
+                onDetailChange(result.value);
+                setBranchFocus({
+                    context: requestContext,
+                    detail: result.value,
+                    messageId,
+                });
+                return true;
+            } catch {
+                toast.error("Failed to switch branch");
+                return false;
+            } finally {
+                setPendingBranchNavigation((pending) =>
+                    pending === pendingRequest ? undefined : pending,
+                );
+            }
+        },
+        [
+            api,
+            branchNavigationContext,
+            branchNavigationLoading,
+            detail,
+            detailRequests,
+            onDetailChange,
+            source,
+            viewedPath,
+        ],
+    );
 
     if (loading) {
         return <LoadingState />;
@@ -723,6 +852,36 @@ export const ChatDetailContent = ({
         );
     }
 
+    const renderBranchHeader = (): JSX.Element | undefined => {
+        if (conversationTreeError !== undefined) {
+            return (
+                <div className="px-3 pt-3">
+                    <InlineError
+                        className="mb-0"
+                        message={conversationTreeError}
+                        onRetry={loadReviewConversationTree}
+                    />
+                </div>
+            );
+        }
+        if (hasConversationBranches(conversationTree)) {
+            return (
+                <div className="flex justify-end px-3 py-2">
+                    <ConversationBranchNavigator
+                        disabled={branchNavigationLoading}
+                        loading={branchNavigationLoading}
+                        mode="review"
+                        onSelectMessage={handleSelectReviewMessage}
+                        tree={conversationTree}
+                        viewedPath={viewedPath}
+                    />
+                </div>
+            );
+        }
+        return undefined;
+    };
+    const branchHeader = renderBranchHeader();
+
     const chatPanel = (
         <ChatStoreProvider>
             {showFeedback && <DetailFeedbackInitializer detail={detail} />}
@@ -731,7 +890,8 @@ export const ChatDetailContent = ({
                 canSendMessages={false}
                 contentWidthMode="standard"
                 disableVoiceFeatures
-                focusMessageId={focusMessageId}
+                focusMessageId={branchFocusMessageId}
+                headerContent={branchHeader}
                 highlightPhrase={highlightPhrase}
                 highlightQuery={highlightQuery}
                 isLoading={false}
@@ -770,6 +930,17 @@ export const ChatDetailContent = ({
                     const isEligibleAssistantMessage =
                         message.role === "assistant" &&
                         !message.id.startsWith("error-");
+                    const branchSwitcher = hasMessageBranchAlternatives(
+                        conversationTree,
+                        message.id,
+                    ) ? (
+                        <ConversationBranchSwitcher
+                            currentMessageId={message.id}
+                            disabled={branchNavigationLoading}
+                            onSelectMessage={handleSelectReviewMessage}
+                            tree={conversationTree}
+                        />
+                    ) : undefined;
                     const sourceButtons = isEligibleAssistantMessage ? (
                         <MessageSourceButtons
                             canViewSources={canViewSources}
@@ -781,7 +952,8 @@ export const ChatDetailContent = ({
 
                     if (
                         !isEligibleAssistantMessage &&
-                        sourceButtons === undefined
+                        sourceButtons === undefined &&
+                        branchSwitcher === undefined
                     ) {
                         return undefined;
                     }
@@ -797,6 +969,7 @@ export const ChatDetailContent = ({
                                 />
                             ) : undefined}
                             {sourceButtons}
+                            {branchSwitcher}
                         </div>
                     );
                 }}
@@ -1034,9 +1207,10 @@ const ChatReviewListPage = ({
     const [userOptions, setUserOptions] = useState<ChatUserOption[]>([]);
     const [userPopoverOpen, setUserPopoverOpen] = useState(false);
     const [userLoading, setUserLoading] = useState(false);
-    const [selectedUser, setSelectedUser] = useState<
+    const [selectedUserState, setSelectedUserState] = useState<
         ChatUserOption | undefined
-    >(() => getStoredSelectedUser(storedFilters?.selectedUser));
+    >(storedFilters?.selectedUser);
+    const selectedUser = canFilterUsers ? selectedUserState : undefined;
     const currentUserOption = useMemo<ChatUserOption | undefined>(
         () =>
             canViewCurrentUserChats &&
@@ -1048,7 +1222,7 @@ const ChatReviewListPage = ({
                       platform: "internal",
                   }
                 : undefined,
-        [canViewCurrentUserChats, user?.email, user?.name],
+        [canViewCurrentUserChats, user],
     );
     const [showSummary, setShowSummary] = usePersistentChatSummary(
         "internal-chat-summary-open",
@@ -1083,11 +1257,8 @@ const ChatReviewListPage = ({
     const [page, setPage] = useState<ChatListPageResponse | undefined>();
     const [refreshToken, setRefreshToken] = useState(0);
 
-    const [sheetOpen, setSheetOpen] = useState(false);
-    const [selectedChat, setSelectedChat] = useState<ChatListRow | undefined>();
-    const [detail, setDetail] = useState<ChatDetailResponse | undefined>();
-    const [detailLoading, setDetailLoading] = useState(false);
-    const [detailError, setDetailError] = useState<string | undefined>();
+    const [detailLoadState, setDetailLoadState] =
+        useState<ChatDetailLoadState>();
     const [tracePanelOpen, setTracePanelOpen] = useState(false);
     const [traceMessageId, setTraceMessageId] = useState<string | undefined>();
     const requestPlatform =
@@ -1096,6 +1267,20 @@ const ChatReviewListPage = ({
             : platform === "both"
               ? undefined
               : platform;
+    const tableData = useMemo(() => page?.items ?? [], [page]);
+    const selectedChat =
+        search.chat === undefined
+            ? undefined
+            : tableData.find((row) => row.id === search.chat);
+    const selectedChatId = selectedChat?.id;
+    const sheetOpen = selectedChat !== undefined;
+    const activeDetailLoadState =
+        detailLoadState?.chatId === selectedChatId
+            ? detailLoadState
+            : undefined;
+    const detail = activeDetailLoadState?.detail;
+    const detailError = activeDetailLoadState?.error;
+    const activeDetailLoading = sheetOpen && activeDetailLoadState === undefined;
 
     const applyFeedbackChange = useCallback(
         (change: FeedbackChange): void => {
@@ -1134,17 +1319,6 @@ const ChatReviewListPage = ({
                             ),
                         };
                     }),
-                };
-            });
-
-            setSelectedChat((prev) => {
-                if (prev?.id !== selectedChat.id) {
-                    return prev;
-                }
-                return {
-                    ...prev,
-                    feedbackUp: Math.max(0, prev.feedbackUp + deltaUp),
-                    feedbackDown: Math.max(0, prev.feedbackDown + deltaDown),
                 };
             });
         },
@@ -1206,38 +1380,6 @@ const ChatReviewListPage = ({
             clearTimeout(timeout);
         };
     }, [userSearchInput]);
-
-    useEffect(() => {
-        if (canFilterUsers || selectedUser === undefined) {
-            return (): void => undefined;
-        }
-
-        const timeout = setTimeout(() => {
-            setSelectedUser(undefined);
-        }, 0);
-
-        return (): void => {
-            clearTimeout(timeout);
-        };
-    }, [canFilterUsers, selectedUser]);
-
-    useEffect(() => {
-        const timeout = setTimeout(() => {
-            setPageIndex(0);
-        }, 0);
-
-        return (): void => {
-            clearTimeout(timeout);
-        };
-    }, [
-        customRange,
-        platform,
-        pageSize,
-        sorting,
-        timeRange,
-        selectedUser,
-        phraseSearch,
-    ]);
 
     useEffect((): (() => void) => {
         let isMounted = true;
@@ -1359,47 +1501,40 @@ const ChatReviewListPage = ({
         timeRange,
     ]);
 
-    const selectedChatId = selectedChat?.id;
-
     useEffect((): (() => void) | undefined => {
         if (!sheetOpen || selectedChatId === undefined) {
             return undefined;
         }
 
-        let isMounted = true;
-
+        let active = true;
         const loadDetail = async (): Promise<void> => {
-            setDetailLoading(true);
-            setDetailError(undefined);
             try {
                 const response = await fetchChatDetail(api, selectedChatId, {
                     source:
                         kind === "investigation" ? "investigations" : "chats",
                 });
-                if (!isMounted) {
-                    return;
+                if (active) {
+                    setDetailLoadState({
+                        chatId: selectedChatId,
+                        detail: response,
+                    });
                 }
-                setDetail(response);
             } catch (error_) {
-                if (!isMounted) {
-                    return;
-                }
-                setDetailError(
-                    error_ instanceof Error
-                        ? error_.message
-                        : "Failed to load chat",
-                );
-            } finally {
-                if (isMounted) {
-                    setDetailLoading(false);
+                if (active) {
+                    setDetailLoadState({
+                        chatId: selectedChatId,
+                        error:
+                            error_ instanceof Error && error_.message !== ""
+                                ? error_.message
+                                : "Failed to load chat",
+                    });
                 }
             }
         };
 
         void loadDetail();
-
         return (): void => {
-            isMounted = false;
+            active = false;
         };
     }, [api, kind, selectedChatId, sheetOpen]);
 
@@ -1424,7 +1559,6 @@ const ChatReviewListPage = ({
         ],
     );
 
-    const tableData = useMemo(() => page?.items ?? [], [page]);
     const pageCount = Math.max(1, Math.ceil((page?.total ?? 0) / pageSize));
 
     const selectedUserLabel =
@@ -1492,13 +1626,9 @@ const ChatReviewListPage = ({
     const canGoNext =
         selectedIndex >= 0 && selectedIndex < tableData.length - 1;
 
-    const openChat = (chat: ChatListRow): void => {
-        setSelectedChat(chat);
-        setDetail(undefined);
-        setDetailError(undefined);
-        setDetailLoading(true);
-        setSheetOpen(true);
-    };
+    const resetChatDetail = useCallback((): void => {
+        setDetailLoadState(undefined);
+    }, []);
 
     const openTracePanel = (messageId: string): void => {
         setTraceMessageId(messageId);
@@ -1531,37 +1661,6 @@ const ChatReviewListPage = ({
         });
     }, [kind, selectedChatId]);
 
-    useEffect(() => {
-        const timeout = setTimeout(() => {
-            if (search.chat === undefined) {
-                if (sheetOpen) {
-                    setSheetOpen(false);
-                }
-                setSelectedChat(undefined);
-                return;
-            }
-
-            if (selectedChat?.id === search.chat) {
-                if (!sheetOpen) {
-                    setSheetOpen(true);
-                }
-                return;
-            }
-
-            const match = tableData.find((row) => row.id === search.chat);
-            if (match) {
-                openChat(match);
-            } else {
-                setSelectedChat(undefined);
-                setSheetOpen(false);
-            }
-        }, 0);
-
-        return (): void => {
-            clearTimeout(timeout);
-        };
-    }, [search.chat, selectedChat, sheetOpen, tableData]);
-
     const detailContent = (
         <ChatDetailContent
             canViewDurationTooltip={canViewDurationTooltip}
@@ -1574,7 +1673,13 @@ const ChatReviewListPage = ({
             error={detailError}
             highlightPhrase={phraseSearch}
             highlightQuery={highlightQuery}
-            loading={detailLoading}
+            loading={activeDetailLoading}
+            onDetailChange={(nextDetail) => {
+                setDetailLoadState({
+                    chatId: nextDetail.id,
+                    detail: nextDetail,
+                });
+            }}
             onFeedbackChange={applyFeedbackChange}
             onOpenTrace={openTracePanel}
             responseLinkTarget={
@@ -1583,6 +1688,7 @@ const ChatReviewListPage = ({
             showFeedback={kind === "chat"}
             showInvestigations={kind === "chat"}
             showSummary={showSummary}
+            source={kind === "investigation" ? "investigations" : "chats"}
         />
     );
 
@@ -1602,6 +1708,7 @@ const ChatReviewListPage = ({
                                     ? nextValue
                                     : "both";
                                 setPlatform(next);
+                                setPageIndex(0);
                             }}
                             value={[platform]}
                             variant="outline"
@@ -1618,118 +1725,38 @@ const ChatReviewListPage = ({
                     </PageHeaderGroup>
                 )}
                 {canFilterUsers && (
-                    <PageHeaderGroup>
-                        <Popover
-                            onOpenChange={(open) => {
-                                setUserPopoverOpen(open);
-                                if (open) {
-                                    setUserSearchInput("");
-                                    setUserSearchQuery("");
-                                }
-                            }}
-                            open={userPopoverOpen}
-                        >
-                            <PopoverTrigger
-                                render={
-                                    <Button
-                                        className="w-[240px] justify-between gap-2"
-                                        variant="outline"
-                                    >
-                                        <span className="flex min-w-0 items-center gap-2">
-                                            <UserRound className="text-muted-foreground" />
-                                            <span className="truncate">
-                                                {selectedUserLabel}
-                                            </span>
-                                        </span>
-                                        <ChevronsUpDown className="text-muted-foreground" />
-                                    </Button>
-                                }
-                            />
-                            <PopoverContent
-                                align="start"
-                                className="w-[320px] p-0"
-                            >
-                                <Command shouldFilter={false}>
-                                    <CommandInput
-                                        onValueChange={setUserSearchInput}
-                                        placeholder="Search users..."
-                                        value={userSearchInput}
-                                    />
-                                    <CommandList>
-                                        <CommandEmpty>
-                                            {userLoading
-                                                ? "Loading users..."
-                                                : "No users found"}
-                                        </CommandEmpty>
-                                        <CommandGroup>
-                                            {userSearchInput === "" && (
-                                                <CommandItem
-                                                    onSelect={() => {
-                                                        setSelectedUser(
-                                                            undefined,
-                                                        );
-                                                        setUserPopoverOpen(
-                                                            false,
-                                                        );
-                                                    }}
-                                                >
-                                                    All users
-                                                </CommandItem>
-                                            )}
-                                            {orderedUserOptions.map((user) => (
-                                                <CommandItem
-                                                    key={`${user.platform}-${user.email}`}
-                                                    onSelect={() => {
-                                                        setSelectedUser(user);
-                                                        setUserPopoverOpen(
-                                                            false,
-                                                        );
-                                                    }}
-                                                    value={user.email}
-                                                >
-                                                    <div className="flex min-w-0 flex-1 flex-col">
-                                                        <span className="truncate text-sm">
-                                                            {getUserOptionPrimaryLabel(
-                                                                user,
-                                                            )}
-                                                        </span>
-                                                        {getUserOptionSecondaryLabel(
-                                                            user,
-                                                        ) !== undefined && (
-                                                            <span className="text-muted-foreground truncate text-xs">
-                                                                {getUserOptionSecondaryLabel(
-                                                                    user,
-                                                                )}
-                                                            </span>
-                                                        )}
-                                                    </div>
-                                                    <Badge
-                                                        variant={
-                                                            user.platform ===
-                                                            "public"
-                                                                ? "secondary"
-                                                                : "outline"
-                                                        }
-                                                    >
-                                                        {user.platform ===
-                                                        "public"
-                                                            ? "Public"
-                                                            : "Internal"}
-                                                    </Badge>
-                                                </CommandItem>
-                                            ))}
-                                        </CommandGroup>
-                                    </CommandList>
-                                </Command>
-                            </PopoverContent>
-                        </Popover>
-                    </PageHeaderGroup>
+                    <UserFilterPopover
+                        label={selectedUserLabel}
+                        loading={userLoading}
+                        onChange={(option) => {
+                            setSelectedUserState(option);
+                            setPageIndex(0);
+                            setUserPopoverOpen(false);
+                        }}
+                        onOpenChange={(open) => {
+                            setUserPopoverOpen(open);
+                            if (open) {
+                                setUserSearchInput("");
+                                setUserSearchQuery("");
+                            }
+                        }}
+                        onSearchInputChange={setUserSearchInput}
+                        open={userPopoverOpen}
+                        options={orderedUserOptions}
+                        searchInput={userSearchInput}
+                    />
                 )}
                 <PageHeaderGroup>
                     <TimeRangeFilter
                         customRange={customRange}
-                        onChange={setTimeRange}
-                        onCustomRangeChange={setCustomRange}
+                        onChange={(value) => {
+                            setTimeRange(value);
+                            setPageIndex(0);
+                        }}
+                        onCustomRangeChange={(value) => {
+                            setCustomRange(value);
+                            setPageIndex(0);
+                        }}
                         value={timeRange}
                     />
                 </PageHeaderGroup>
@@ -1746,7 +1773,10 @@ const ChatReviewListPage = ({
                         <Switch
                             checked={phraseSearch}
                             id="phrase-search-toggle"
-                            onCheckedChange={setPhraseSearch}
+                            onCheckedChange={(checked) => {
+                                setPhraseSearch(checked);
+                                setPageIndex(0);
+                            }}
                         />
                         <Label
                             className="text-muted-foreground"
@@ -1774,7 +1804,7 @@ const ChatReviewListPage = ({
                             setSearchQuery("");
                             setUserSearchInput("");
                             setUserSearchQuery("");
-                            setSelectedUser(undefined);
+                            setSelectedUserState(undefined);
                             setPhraseSearch(true);
                             setHighlightMatches(true);
                             setPlatform("both");
@@ -1818,15 +1848,21 @@ const ChatReviewListPage = ({
                                 pageIndex,
                                 pageSize,
                             });
-                            setPageIndex(next.pageIndex);
+                            setPageIndex(
+                                next.pageSize === pageSize ? next.pageIndex : 0,
+                            );
                             setPageSize(next.pageSize);
                         } else {
-                            setPageIndex(updater.pageIndex);
+                            setPageIndex(
+                                updater.pageSize === pageSize
+                                    ? updater.pageIndex
+                                    : 0,
+                            );
                             setPageSize(updater.pageSize);
                         }
                     }}
                     onRowClick={(chat) => {
-                        openChat(chat);
+                        resetChatDetail();
                         void navigate({
                             search: (prev) => ({
                                 ...prev,
@@ -1835,7 +1871,10 @@ const ChatReviewListPage = ({
                             to: routePath,
                         });
                     }}
-                    onSortingChange={setSorting}
+                    onSortingChange={(updater) => {
+                        setSorting(updater);
+                        setPageIndex(0);
+                    }}
                     pageCount={pageCount}
                     pagination={{ pageIndex, pageSize }}
                     rowCount={page?.total ?? 0}
@@ -1845,11 +1884,8 @@ const ChatReviewListPage = ({
 
             <Sheet
                 onOpenChange={(open) => {
-                    setSheetOpen(open);
                     if (!open) {
-                        setDetail(undefined);
-                        setDetailError(undefined);
-                        setSelectedChat(undefined);
+                        setDetailLoadState(undefined);
                         setTracePanelOpen(false);
                         setTraceMessageId(undefined);
                         void navigate({
@@ -1910,7 +1946,7 @@ const ChatReviewListPage = ({
                                         }
                                         const next =
                                             tableData[selectedIndex + 1];
-                                        openChat(next);
+                                        resetChatDetail();
                                         void navigate({
                                             search: (prev) => ({
                                                 ...prev,
@@ -1925,7 +1961,7 @@ const ChatReviewListPage = ({
                                         }
                                         const previous =
                                             tableData[selectedIndex - 1];
-                                        openChat(previous);
+                                        resetChatDetail();
                                         void navigate({
                                             search: (prev) => ({
                                                 ...prev,
@@ -1960,6 +1996,11 @@ const ChatReviewListPage = ({
                                     >
                                         {detailPlatformLabel}
                                     </Badge>
+                                    {selectedChat.promptSource === "draft" && (
+                                        <Badge variant="secondary">
+                                            Draft instructions
+                                        </Badge>
+                                    )}
                                     <span>
                                         Updated{" "}
                                         {formatTimestamp(detailUpdatedAt)}
@@ -2025,6 +2066,7 @@ const StandaloneChatDetailPage = ({
     kind,
 }: StandaloneChatDetailPageProps): JSX.Element => {
     const api = useAuthenticatedApi();
+    const detailRequests = useMemo(() => createLatestRequestCoordinator(), []);
     const { user } = useAuth();
     const canViewTrace = hasPermission(user, "chats_view_trace");
     const canViewDurationTooltip = hasPermission(user, "chat_duration_tooltip");
@@ -2048,29 +2090,47 @@ const StandaloneChatDetailPage = ({
     const responseLinkTarget: ResponseLinkTarget =
         kind === "investigation" ? "investigation" : "chat";
 
-    const loadDetail = useCallback(async (): Promise<void> => {
+    const requestDetail = useCallback(
+        async () =>
+            detailRequests.run(async () =>
+                fetchChatDetail(api, chatId, {
+                    source:
+                        kind === "investigation" ? "investigations" : "chats",
+                    targetMessageId: focusMessageId,
+                }),
+            ),
+        [api, chatId, detailRequests, focusMessageId, kind],
+    );
+    const startDetailRequest = useCallback((): void => {
+        void requestDetail().then(
+            (result) => {
+                if (result.status === "current") {
+                    setDetail(result.value);
+                    setDetailLoading(false);
+                }
+            },
+            (error: unknown) => {
+                setDetailError(
+                    error instanceof Error
+                        ? error.message
+                        : `Failed to load ${itemLabel}`,
+                );
+                setDetailLoading(false);
+            },
+        );
+    }, [itemLabel, requestDetail]);
+    const loadDetail = useCallback((): void => {
         setDetailLoading(true);
         setDetailError(undefined);
-        try {
-            const response = await fetchChatDetail(api, chatId, {
-                source: kind === "investigation" ? "investigations" : "chats",
-                targetMessageId: focusMessageId,
-            });
-            setDetail(response);
-        } catch (error_) {
-            setDetailError(
-                error_ instanceof Error
-                    ? error_.message
-                    : `Failed to load ${itemLabel}`,
-            );
-        } finally {
-            setDetailLoading(false);
-        }
-    }, [api, chatId, focusMessageId, itemLabel, kind]);
+        startDetailRequest();
+    }, [startDetailRequest]);
 
     useEffect(() => {
-        void loadDetail();
-    }, [loadDetail]);
+        startDetailRequest();
+        return (): void => {
+            detailRequests.invalidate();
+        };
+    }, [detailRequests, startDetailRequest]);
 
     const title =
         detail?.title ??
@@ -2163,7 +2223,7 @@ const StandaloneChatDetailPage = ({
                     Copy transcript
                 </Button>
                 <Button
-                    onClick={() => void loadDetail()}
+                    onClick={loadDetail}
                     variant="outline"
                 >
                     <RefreshCw data-icon="inline-start" />
@@ -2192,6 +2252,11 @@ const StandaloneChatDetailPage = ({
                             >
                                 {detail.is_public ? "Public" : "Internal"}
                             </Badge>
+                            {detail.prompt_source === "draft" && (
+                                <Badge variant="secondary">
+                                    Draft instructions
+                                </Badge>
+                            )}
                         </>
                     )}
                 </div>
@@ -2209,12 +2274,18 @@ const StandaloneChatDetailPage = ({
                         highlightPhrase={false}
                         highlightQuery=""
                         loading={detailLoading}
+                        onDetailChange={setDetail}
                         onFeedbackChange={ignoreFeedbackChange}
                         onOpenTrace={openTracePanel}
                         responseLinkTarget={responseLinkTarget}
                         showFeedback={kind === "chat"}
                         showInvestigations={kind === "chat"}
                         showSummary={showSummary}
+                        source={
+                            kind === "investigation"
+                                ? "investigations"
+                                : "chats"
+                        }
                     />
                 </div>
             </PageSection>
@@ -2242,6 +2313,7 @@ export const ChatDetailPage = (): JSX.Element => {
         <StandaloneChatDetailPage
             chatId={chatId}
             focusMessageId={focusMessageId}
+            key={`${chatId}:${focusMessageId ?? ""}`}
             kind="chat"
         />
     );
@@ -2257,6 +2329,7 @@ export const InvestigationDetailPage = (): JSX.Element => {
         <StandaloneChatDetailPage
             chatId={chatId}
             focusMessageId={focusMessageId}
+            key={`${chatId}:${focusMessageId ?? ""}`}
             kind="investigation"
         />
     );

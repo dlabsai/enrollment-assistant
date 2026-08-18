@@ -13,6 +13,9 @@ export const fetchChatAnalyticsSummary = async (
     platform: ChatAnalyticsPlatform,
     timeRange: TimeRangeValue,
     customRange: CustomTimeRange,
+    userEmail?: string,
+    userGroup?: "staff" | "devs",
+    signal?: AbortSignal,
 ): Promise<ChatAnalyticsSummary> => {
     const params = new URLSearchParams(
         getTimeRangeQueryParams(timeRange, new Date(), customRange),
@@ -20,7 +23,14 @@ export const fetchChatAnalyticsSummary = async (
     if (platform !== "both") {
         params.set("platform", platform);
     }
+    if (userEmail !== undefined && userEmail !== "") {
+        params.set("user_email", userEmail);
+    }
+    if (userGroup !== undefined) {
+        params.set("user_group", userGroup);
+    }
     return api.get<ChatAnalyticsSummary>(
         `/analytics/conversations?${params.toString()}`,
+        { signal },
     );
 };

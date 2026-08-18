@@ -7,15 +7,18 @@ from unittest.mock import MagicMock
 import pytest
 from jinja2 import Template
 from sqlalchemy import delete, select
+from sqlalchemy.engine import URL, make_url
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.chat import engine as chat_engine
+from app.chat import url_guardrails
 from app.chat.agents import GuardrailsResult
 from app.chat.engine import ModelSettings
 from app.chat.url_guardrails import (
     build_allowed_url_registry,
     build_blog_url_feedback,
     build_unknown_url_feedback,
+    clear_guardrail_url_registry_cache,
     collect_normalized_urls,
     extract_urls,
     find_blog_urls,
@@ -36,6 +39,13 @@ from app.rag.source_keys import document_source_key
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Generator
+
+
+@pytest.fixture(autouse=True)
+def reset_guardrail_url_registry_cache() -> Generator[None]:
+    clear_guardrail_url_registry_cache()
+    yield
+    clear_guardrail_url_registry_cache()
 
 
 @pytest.fixture
@@ -61,6 +71,41 @@ def test_extract_urls_finds_http_relative_mailto_domain_and_email_variants() -> 
         "mailto:career@demo-university.example.edu",
         "career@demo-university.example.edu",
     ]
+
+
+@pytest.mark.parametrize(
+    ("opening_quote", "closing_quote"),
+    [
+        ("\u2018", "\u2019"),
+        ("\u201a", "\u201b"),
+        ("\u201c", "\u201d"),
+        ("\u201e", "\u201f"),
+        ("\u00ab", "\u00bb"),
+        ("\u2039", "\u203a"),
+    ],
+)
+def test_extract_urls_treats_unicode_quotes_as_boundaries(
+    opening_quote: str, closing_quote: str
+) -> None:
+    url = "https://demo-university.example.edu/about/accreditation/"
+
+    assert extract_urls(f"{opening_quote}{url}{closing_quote}follow-up") == [url]
+
+
+def test_find_unknown_urls_allows_smart_quoted_known_url() -> None:
+    url = "https://demo-university.example.edu/about/accreditation/"
+    normalized_url = "https://demo-university.example.edu/about/accreditation"
+    allowed_urls = frozenset(collect_normalized_urls(f"Approved URL: “{url}”"))
+    response = (
+        "You can tell the prospective student: “Demo University is accredited. "
+        "You can find comprehensive accreditation information at "
+        f"{url}”"
+    )
+
+    assert allowed_urls == {normalized_url}
+    assert normalize_url(f"{url}&rdquo;") == normalized_url
+    assert extract_urls(response) == [url]
+    assert find_unknown_urls(response, allowed_urls=allowed_urls) == []
 
 
 def test_normalize_url_strips_fragment_slash_and_punctuation() -> None:
@@ -91,6 +136,57 @@ def test_normalize_url_normalizes_www_demo_hosts() -> None:
         )
         == "https://catalog.demo-university.example.edu/content.php?catoid=7&navoid=274"
     )
+
+
+def test_normalize_url_strips_tracking_query_params() -> None:
+    url = (
+        "https://partner-learning.example.org/?_gl=1*abc*def"
+        "&_gcl_au=859214558&FPAU=859214558&_ga=1600137034"
+        "&_ga_DEMO123=1733402985&_fplc=encoded"
+    )
+
+    assert normalize_url(url) == "https://partner-learning.example.org/"
+
+
+def test_normalize_url_preserves_semantic_params_while_stripping_tracking_params() -> None:
+    assert (
+        normalize_url(
+            "https://example.edu/file?id=123&utm_source=email&_ga=abc&download=1&hsa_acc=ad"
+        )
+        == "https://example.edu/file?id=123&download=1"
+    )
+
+
+def test_find_unknown_urls_allows_clean_response_for_tracking_only_source_url() -> None:
+    allowed_urls = frozenset(
+        collect_normalized_urls(
+            "[Partner Learning](https://partner-learning.example.org/"
+            "?_gl=1*abc&_gcl_au=abc&FPAU=abc&_ga=abc&_ga_DEMO=abc&_fplc=abc)"
+        )
+    )
+
+    assert allowed_urls == {"https://partner-learning.example.org/"}
+    assert (
+        find_unknown_urls("Use https://partner-learning.example.org/.", allowed_urls=allowed_urls)
+        == []
+    )
+
+
+def test_find_unknown_urls_still_requires_preserved_semantic_params() -> None:
+    allowed_urls = frozenset(
+        collect_normalized_urls("See https://example.edu/file?id=123&utm_source=email.")
+    )
+
+    assert allowed_urls == {"https://example.edu/file?id=123"}
+    assert (
+        find_unknown_urls("Use https://example.edu/file?id=123.", allowed_urls=allowed_urls) == []
+    )
+    assert find_unknown_urls("Use https://example.edu/file.", allowed_urls=allowed_urls) == [
+        "https://example.edu/file"
+    ]
+    assert find_unknown_urls("Use https://example.edu/file?id=456.", allowed_urls=allowed_urls) == [
+        "https://example.edu/file?id=456"
+    ]
 
 
 def test_normalize_url_supports_scheme_less_relative_mailto_and_bare_email() -> None:
@@ -211,8 +307,8 @@ def test_build_blog_url_feedback_lists_all_blog_urls() -> None:
 
 
 def test_get_guardrail_url_registry_key_uses_va_scope() -> None:
-    assert get_guardrail_url_registry_key(is_internal=True) == "internal_v7"
-    assert get_guardrail_url_registry_key(is_internal=False) == "public_v7"
+    assert get_guardrail_url_registry_key(is_internal=True) == "internal_v9"
+    assert get_guardrail_url_registry_key(is_internal=False) == "public_v9"
 
 
 @pytest.mark.asyncio
@@ -535,8 +631,108 @@ async def test_get_allowed_url_registry_for_va_uses_persisted_registry(
     await session.flush()
 
     registry = await get_allowed_url_registry_for_va(session, is_internal=True)
+    cached_registry = await get_allowed_url_registry_for_va(session, is_internal=True)
 
     assert registry == frozenset({"https://demo-university.example.edu/custom-persisted-url"})
+    assert cached_registry is registry
+
+
+@pytest.mark.asyncio
+async def test_guardrail_cache_clear_discards_in_flight_load(
+    session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    load_count = 0
+
+    async def clear_during_first_load(_session: AsyncSession, *, key: str) -> frozenset[str]:
+        nonlocal load_count
+        del key
+        load_count += 1
+        if load_count == 1:
+            clear_guardrail_url_registry_cache()
+        return frozenset({f"https://demo-university.example.edu/load-{load_count}"})
+
+    monkeypatch.setattr(url_guardrails, "load_guardrail_url_registry", clear_during_first_load)
+
+    registry = await get_allowed_url_registry_for_va(session, is_internal=True)
+    cached_registry = await get_allowed_url_registry_for_va(session, is_internal=True)
+
+    assert registry == frozenset({"https://demo-university.example.edu/load-2"})
+    assert cached_registry is registry
+    assert load_count == 2
+
+
+@pytest.mark.asyncio
+async def test_get_allowed_url_registry_for_va_cache_is_namespaced_by_database(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    load_count = 0
+
+    class DummyBind:
+        def __init__(self, database: str) -> None:
+            self.url: URL = make_url(f"postgresql+psycopg://cache-test@localhost/{database}")
+
+    class DummySession:
+        def __init__(self, database: str) -> None:
+            self.bind = DummyBind(database)
+
+        def get_bind(self) -> DummyBind:
+            return self.bind
+
+    async def fake_load_guardrail_url_registry(
+        session: AsyncSession, *, key: str
+    ) -> frozenset[str]:
+        nonlocal load_count
+        del key
+        load_count += 1
+        database = cast(Any, session).get_bind().url.database
+        return frozenset({f"https://demo-university.example.edu/{database}"})
+
+    monkeypatch.setattr(
+        url_guardrails, "load_guardrail_url_registry", fake_load_guardrail_url_registry
+    )
+    runtime_session = cast(AsyncSession, DummySession("runtime"))
+    eval_session = cast(AsyncSession, DummySession("eval"))
+
+    runtime_registry = await get_allowed_url_registry_for_va(runtime_session, is_internal=True)
+    eval_registry = await get_allowed_url_registry_for_va(eval_session, is_internal=True)
+    runtime_registry_again = await get_allowed_url_registry_for_va(
+        runtime_session, is_internal=True
+    )
+
+    assert runtime_registry == frozenset({"https://demo-university.example.edu/runtime"})
+    assert eval_registry == frozenset({"https://demo-university.example.edu/eval"})
+    assert runtime_registry_again is runtime_registry
+    assert load_count == 2
+
+
+@pytest.mark.asyncio
+async def test_get_allowed_url_registry_for_va_reloads_after_cache_ttl(
+    session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    key = get_guardrail_url_registry_key(is_internal=True)
+    existing = (
+        await session.execute(select(GuardrailUrlRegistry).where(GuardrailUrlRegistry.key == key))
+    ).scalar_one_or_none()
+    if existing is not None:
+        await session.delete(existing)
+        await session.flush()
+
+    persisted = GuardrailUrlRegistry(key=key, urls=["https://demo-university.example.edu/first"])
+    session.add(persisted)
+    await session.flush()
+
+    first = await get_allowed_url_registry_for_va(session, is_internal=True)
+    persisted.urls = ["https://demo-university.example.edu/second"]
+    await session.flush()
+
+    still_cached = await get_allowed_url_registry_for_va(session, is_internal=True)
+    monkeypatch.setattr(url_guardrails, "_URL_REGISTRY_CACHE_TTL_SECONDS", 0.0)
+    refreshed = await get_allowed_url_registry_for_va(session, is_internal=True)
+
+    assert first == frozenset({"https://demo-university.example.edu/first"})
+    assert still_cached is first
+    assert refreshed == frozenset({"https://demo-university.example.edu/second"})
+    assert refreshed is not first
 
 
 @pytest.mark.asyncio
@@ -545,6 +741,7 @@ async def test_get_allowed_url_registry_for_va_concurrent_cold_start_is_idempote
 ) -> None:
     key = "test_concurrent_guardrail_registry"
     expected_urls = frozenset({"https://demo-university.example.edu/concurrency-test"})
+    build_count = 0
 
     async def cleanup() -> None:
         async with async_session_factory() as session:
@@ -556,7 +753,9 @@ async def test_get_allowed_url_registry_for_va_concurrent_cold_start_is_idempote
     async def fake_build_allowed_url_registry(
         session: AsyncSession, *, extra_urls: Any = (), is_internal: bool = True
     ) -> frozenset[str]:
+        nonlocal build_count
         del session, extra_urls, is_internal
+        build_count += 1
         await asyncio.sleep(0.05)
         return expected_urls
 
@@ -582,9 +781,11 @@ async def test_get_allowed_url_registry_for_va_concurrent_cold_start_is_idempote
                 await session.commit()
                 return registry
 
-        registries = await asyncio.gather(load_registry_once(), load_registry_once())
+        registries = await asyncio.gather(*(load_registry_once() for _ in range(25)))
 
-        assert registries == [expected_urls, expected_urls]
+        assert registries == [expected_urls] * 25
+        assert build_count == 1
+        assert all(registry is registries[0] for registry in registries)
 
         async with async_session_factory() as session:
             rows = (
@@ -619,7 +820,7 @@ async def test_refresh_guardrail_url_registries_populates_all_variants(
     ).all()
     keys = {row[0] for row in rows}
 
-    assert keys == {"internal_v7", "public_v7"}
+    assert keys == {"internal_v9", "public_v9"}
 
 
 @pytest.mark.asyncio
@@ -675,15 +876,21 @@ async def test_build_search_db_refreshes_guardrail_registries_for_direct_call(
         assert isinstance(session, DummySession)
         events.append("refresh")
 
+    def fake_clear_guardrail_url_registry_cache() -> None:
+        events.append("clear")
+
     monkeypatch.setattr(rag_build, "get_session", fake_get_session)
     monkeypatch.setattr(rag_build, "_get_document_sources", list)
     monkeypatch.setattr(
         rag_build, "refresh_guardrail_url_registries", fake_refresh_guardrail_url_registries
     )
+    monkeypatch.setattr(
+        rag_build, "clear_guardrail_url_registry_cache", fake_clear_guardrail_url_registry_cache
+    )
 
     await rag_build.build_search_db(MagicMock(), cast(Any, DummySession()), dry_run=False)
 
-    assert events == ["refresh", "commit"]
+    assert events == ["refresh", "commit", "clear"]
 
 
 @pytest.mark.asyncio

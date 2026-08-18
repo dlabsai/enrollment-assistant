@@ -4,6 +4,7 @@ from contextlib import contextmanager
 from typing import TYPE_CHECKING
 
 import pytest
+from opentelemetry.trace import Status, StatusCode
 
 from app.evals.dataset import Dataset
 from app.evals.evaluator import EvaluationReason, Evaluator, EvaluatorContext, EvaluatorOutput
@@ -17,9 +18,17 @@ class FakeSpan:
     def __init__(self, name: str, attributes: dict[str, object] | None = None) -> None:
         self.name = name
         self.attributes: dict[str, object] = dict(attributes or {})
+        self.exceptions: list[BaseException] = []
+        self.status = Status(StatusCode.UNSET)
 
     def set_attribute(self, key: str, value: object) -> None:
         self.attributes[key] = value
+
+    def record_exception(self, error: BaseException) -> None:
+        self.exceptions.append(error)
+
+    def set_status(self, status: Status) -> None:
+        self.status = status
 
 
 class SpanRecorder:
@@ -88,6 +97,7 @@ async def test_evaluate_records_genai_evaluation_result_spans(
     assert passed_span.attributes["app.eval.run_index"] == 1
     assert passed_span.attributes["app.eval.evaluator.name"] == "mixed_judge"
     assert passed_span.attributes["app.eval.result.kind"] == "assertion"
+    assert passed_span.status.status_code is StatusCode.UNSET
 
     confidence_span = next(
         span for span in result_spans if span.attributes["gen_ai.evaluation.name"] == "confidence"
@@ -120,8 +130,11 @@ async def test_evaluate_records_genai_span_for_evaluator_errors(
     report = await evaluate(dataset, task, [ErrorEvaluator()], repeats=1, max_concurrency=1)
 
     run_result = report.cases[0].run_results[0]
-    assert run_result.assertions["broken_judge_error"].value is False
-    assert run_result.assertions["broken_judge_error"].reason == "judge failed"
+    error_result = run_result.assertions["broken_judge_error"]
+    assert error_result.value is False
+    assert error_result.reason is not None
+    assert "Traceback (most recent call last):" in error_result.reason
+    assert error_result.reason.endswith("RuntimeError: judge failed")
 
     result_spans = [span for span in recorder.spans if span.name == "gen_ai.evaluation.result"]
     assert len(result_spans) == 1
@@ -129,6 +142,36 @@ async def test_evaluate_records_genai_span_for_evaluator_errors(
     assert error_span.attributes["gen_ai.evaluation.name"] == "broken_judge_error"
     assert error_span.attributes["gen_ai.evaluation.score.label"] == "fail"
     assert error_span.attributes["gen_ai.evaluation.score.value"] == 0.0
-    assert error_span.attributes["gen_ai.evaluation.explanation"] == "judge failed"
+    assert error_span.attributes["gen_ai.evaluation.explanation"] == error_result.reason
     assert error_span.attributes["app.eval.evaluator.name"] == "broken_judge"
     assert error_span.attributes["app.eval.result.kind"] == "assertion"
+    assert error_span.status.status_code is StatusCode.ERROR
+    assert error_span.status.description == "RuntimeError: judge failed"
+    assert len(error_span.exceptions) == 1
+    assert isinstance(error_span.exceptions[0], RuntimeError)
+
+
+@pytest.mark.asyncio
+async def test_evaluate_marks_task_exception_span_as_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    recorder = SpanRecorder()
+    monkeypatch.setattr("app.evals.runner.telemetry.span", recorder.span)
+
+    dataset: Dataset[str, str, None] = Dataset(name="unit_eval")
+    dataset.add_case("case_a", "hello")
+
+    async def task(_: str) -> str:
+        raise ValueError("task failed")
+
+    report = await evaluate(dataset, task, [], repeats=1, max_concurrency=1)
+
+    run_result = report.cases[0].run_results[0]
+    assert run_result.error is not None
+    assert run_result.error.endswith("ValueError: task failed")
+
+    case_span = next(
+        span for span in recorder.spans if span.name == "eval_run {case_name} #{run_index}"
+    )
+    assert case_span.status.status_code is StatusCode.ERROR
+    assert case_span.status.description == "ValueError: task failed"
+    assert len(case_span.exceptions) == 1
+    assert isinstance(case_span.exceptions[0], ValueError)

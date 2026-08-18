@@ -13,7 +13,10 @@ interface UsageOverviewParams {
     timeRange: TimeRangeValue;
     customRange: CustomTimeRange;
     modelFilters?: string[];
+    userEmail?: string;
+    userGroup?: "staff" | "devs";
     referenceDate?: Date;
+    signal?: AbortSignal;
 }
 
 export const fetchUsageOverview = async (
@@ -23,7 +26,10 @@ export const fetchUsageOverview = async (
         timeRange,
         customRange,
         modelFilters,
+        userEmail,
+        userGroup,
         referenceDate,
+        signal,
     }: UsageOverviewParams,
 ): Promise<UsageOverviewApi> => {
     const params = new URLSearchParams(
@@ -39,9 +45,16 @@ export const fetchUsageOverview = async (
             params.append("models", modelFilter);
         }
     }
+    if (userEmail !== undefined && userEmail !== "") {
+        params.set("user_email", userEmail);
+    }
+    if (userGroup !== undefined) {
+        params.set("user_group", userGroup);
+    }
 
     const query = params.toString();
     return api.get<UsageOverviewApi>(
         query ? `/usage/summary?${query}` : "/usage/summary",
+        { signal },
     );
 };

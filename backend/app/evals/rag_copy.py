@@ -9,6 +9,7 @@ from typing import Any, Literal
 from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.chat.url_guardrails import clear_guardrail_url_registry_cache
 from app.evals.storage import eval_report_session
 from app.models import Document, DocumentContentChunk, GuardrailUrlRegistry, RagDocumentExclusion
 
@@ -239,6 +240,7 @@ async def copy_runtime_rag_to_eval_db(
                 "rebuild_vector_indexes", lambda: _create_vector_indexes(destination_session)
             )
             await run_step("commit", destination_session.commit)
+            clear_guardrail_url_registry_cache()
         except BaseException:
             await destination_session.rollback()
             raise

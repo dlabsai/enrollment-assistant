@@ -1,20 +1,19 @@
-import {
-    ResizableHandle,
-    ResizablePanel,
-    ResizablePanelGroup,
-} from "@va/shared/components/ui/resizable";
 import { Toggle } from "@va/shared/components/ui/toggle";
-import { Fragment, type JSX, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, type JSX, useMemo, useState } from "react";
 
 import {
-    formatEstimatedUsdCost,
     formatLocaleNumber,
+    formatUsdCost,
 } from "../../lib/number-format";
+import type { TraceCollapseControls } from "../hooks/use-trace-collapse";
+import type { TraceLayoutScope } from "../lib/trace-layout";
+import { getAggregateFailedResultCount } from "../lib/trace-outcomes";
 import {
     getReadableProjectedDataEntries,
     type ProjectedDataValueType,
     sortProjectedOverviewItemsForDisplay,
 } from "../lib/trace-projection-utils";
+import { buildVisibleTraceTimelineRows } from "../lib/trace-timeline";
 import {
     formatDurationMs,
     isRecord,
@@ -23,7 +22,14 @@ import {
     type TraceMessagePart,
 } from "../lib/trace-utils";
 import type { TraceOverviewItem, TraceSpan } from "../types";
-import { ContentValue } from "./trace-turn-content";
+import { TraceCollapseAllButton } from "./trace-collapse-all-button";
+import { TraceOutcomeBadge } from "./trace-outcome-badge";
+import { TraceSplitLayout } from "./trace-split-layout";
+import { TraceTimeline, type TraceTimelineRow } from "./trace-timeline";
+import {
+    ContentValue,
+    ExpandableMarkdownValue,
+} from "./trace-turn-content";
 import {
     renderMarkdownValue,
     renderPlainTextValue,
@@ -40,8 +46,11 @@ import { formatOffsetMs } from "./trace-turn-metrics-utils";
 import { buildSpanOverviewModel } from "./trace-turn-summary-model";
 
 interface TraceTurnSummaryProps {
+    collapseControls: TraceCollapseControls;
     overview: TraceOverviewItem[];
     selectedSpanId?: string;
+    onSelectSpan: (spanId: string) => void;
+    layoutScope?: TraceLayoutScope;
     spans: TraceSpan[];
     traceStart: number | undefined;
     traceEnd: number | undefined;
@@ -78,7 +87,7 @@ const getNumberField = (
     return getNumberValue(value[key]);
 };
 
-const formatTokenWithCost = (
+const formatTokenUsage = (
     tokens: string | number,
     cost: number | undefined,
 ): string => {
@@ -86,7 +95,7 @@ const formatTokenWithCost = (
         typeof tokens === "number" ? formatLocaleNumber(tokens) : tokens;
     return cost === undefined
         ? tokenText
-        : `${tokenText} · ${formatEstimatedUsdCost(cost)}`;
+        : `${tokenText} · ${formatUsdCost(cost)}`;
 };
 
 const renderProjectedScalarValue = (key: string, value: unknown): JSX.Element => (
@@ -112,7 +121,10 @@ const renderProjectedMarkdownCard = (
     formatted: boolean,
 ): JSX.Element => (
     <div className="border-muted min-w-0 rounded-md border px-3 py-2 text-sm">
-        {formatted ? renderMarkdownValue(value) : renderPlainTextValue(value)}
+        <ExpandableMarkdownValue
+            content={value}
+            formatted={formatted}
+        />
     </div>
 );
 
@@ -161,12 +173,11 @@ const ProjectedDetailsGrid = ({
 
 interface BackendOverviewRow {
     item: TraceOverviewItem;
-    offsetPct: number;
-    widthPct: number;
+    offsetMs: number;
+    durationMs: number;
     start: number;
     depth: number;
     value: string;
-    barClass: string;
 }
 
 const overviewStartMs = (item: TraceOverviewItem): number | undefined => {
@@ -187,50 +198,6 @@ const getStandardModelValue = (item: TraceOverviewItem): string | undefined => {
     return typeof model === "string" && model.trim() !== ""
         ? model
         : undefined;
-};
-
-const overviewBarClass = (item: TraceOverviewItem): string => {
-    switch (item.type) {
-        case "agent":
-        case "llm": {
-            return "bg-chart-1";
-        }
-        case "tool": {
-            return "bg-chart-2";
-        }
-        case "retrieval":
-        case "embedding": {
-            return "bg-chart-3";
-        }
-        case "url_guardrails": {
-            return "bg-chart-4";
-        }
-        case "conversation_turn": {
-            return "bg-chart-5";
-        }
-        case "evaluation": {
-            return "bg-chart-5";
-        }
-        case "evaluation_case": {
-            return "bg-chart-2";
-        }
-        case "evaluation_result": {
-            const scoreLabel = item.data.score_label;
-            if (scoreLabel === "fail") {
-                return "bg-destructive";
-            }
-            if (scoreLabel === "pass") {
-                return "bg-chart-3";
-            }
-            return "bg-chart-4";
-        }
-        case "other": {
-            return "bg-muted-foreground";
-        }
-        default: {
-            return "bg-muted-foreground";
-        }
-    }
 };
 
 const buildOverviewDepth = (
@@ -257,47 +224,25 @@ const buildOverviewDepth = (
 
 const buildBackendOverviewRows = ({
     overview,
-    traceEnd,
     traceStart,
 }: {
     overview: TraceOverviewItem[];
     traceStart: number | undefined;
-    traceEnd: number | undefined;
 }): BackendOverviewRow[] => {
-    const rangeDuration =
-        traceStart !== undefined && traceEnd !== undefined
-            ? Math.max(traceEnd - traceStart, 1)
-            : undefined;
     const orderedOverview = sortProjectedOverviewItemsForDisplay(overview);
     const itemBySpanId = new Map(overview.map((item) => [item.span_id, item]));
-    return orderedOverview
-        .map((item) => {
-            const start = overviewStartMs(item) ?? traceStart ?? 0;
-            const duration = item.duration_ms ?? 0;
-            const offsetPct =
-                rangeDuration === undefined || traceStart === undefined
-                    ? 0
-                    : Math.max(
-                          0,
-                          Math.min(
-                              100,
-                              ((start - traceStart) / rangeDuration) * 100,
-                          ),
-                      );
-            const widthPct =
-                rangeDuration === undefined
-                    ? 100
-                    : Math.max(0.5, Math.min(100, (duration / rangeDuration) * 100));
-            return {
-                item,
-                offsetPct,
-                widthPct,
-                start,
-                depth: buildOverviewDepth(item, itemBySpanId),
-                value: formatOverviewDuration(item.duration_ms),
-                barClass: overviewBarClass(item),
-            };
-        });
+    return orderedOverview.map((item) => {
+        const start = overviewStartMs(item) ?? traceStart ?? 0;
+        return {
+            item,
+            offsetMs:
+                traceStart === undefined ? 0 : Math.max(start - traceStart, 0),
+            durationMs: Math.max(item.duration_ms ?? 0, 0),
+            start,
+            depth: buildOverviewDepth(item, itemBySpanId),
+            value: formatOverviewDuration(item.duration_ms),
+        };
+    });
 };
 
 const resolveToolName = (raw: Record<string, unknown> | undefined): string => {
@@ -546,57 +491,57 @@ const renderSummaryMessageContent = (
 };
 
 export const TraceTurnSummary = ({
+    collapseControls,
     overview,
     selectedSpanId,
+    onSelectSpan,
+    layoutScope = "page",
     spans,
     traceStart,
     traceEnd,
 }: TraceTurnSummaryProps): JSX.Element => {
     const [summaryFormatted, setSummaryFormatted] = useState(true);
-    const [selectedTimingSpanId, setSelectedTimingSpanId] = useState(selectedSpanId);
-    const resolvedSelectedTimingSpanId = selectedTimingSpanId ?? selectedSpanId;
-    const timelineScrollRef = useRef<HTMLDivElement | null>(null);
+    const { collapsedSpanIds, toggleSpan } = collapseControls;
 
     const backendOverviewRows = useMemo(
-        () => buildBackendOverviewRows({ overview, traceEnd, traceStart }),
-        [overview, traceEnd, traceStart],
+        () => buildBackendOverviewRows({ overview, traceStart }),
+        [overview, traceStart],
+    );
+    const backendOverviewRowsBySpanId = useMemo(
+        () =>
+            new Map(
+                backendOverviewRows.map((entry) => [
+                    entry.item.span_id,
+                    entry,
+                ]),
+            ),
+        [backendOverviewRows],
     );
     const selectedBackendOverviewRow =
-        resolvedSelectedTimingSpanId === undefined
+        selectedSpanId === undefined
             ? undefined
-            : backendOverviewRows.find(
-                  (entry) => entry.item.span_id === resolvedSelectedTimingSpanId,
-              );
+            : backendOverviewRowsBySpanId.get(selectedSpanId);
     const useBackendOverview = backendOverviewRows.length > 0;
-
-    useEffect(() => {
-        if (selectedSpanId === undefined) {
-            return;
-        }
-        const container = timelineScrollRef.current;
-        if (container === null) {
-            return;
-        }
-        const element = container.querySelector(
-            `[data-overview-span-id="${selectedSpanId}"]`,
-        );
-        if (element instanceof HTMLElement) {
-            element.scrollIntoView({ block: "center" });
-        }
-    }, [selectedSpanId, useBackendOverview]);
 
     const overviewModel = useMemo(
         () =>
-            buildSpanOverviewModel({
-                spans,
-                traceStart,
-                traceEnd,
-                selectedSpanId: resolvedSelectedTimingSpanId,
-            }),
-        [resolvedSelectedTimingSpanId, spans, traceEnd, traceStart],
+            useBackendOverview
+                ? undefined
+                : buildSpanOverviewModel({
+                      spans,
+                      traceStart,
+                      traceEnd,
+                      selectedSpanId,
+                  }),
+        [
+            selectedSpanId,
+            spans,
+            traceEnd,
+            traceStart,
+            useBackendOverview,
+        ],
     );
-    const { timingRows } = overviewModel;
-    const { selection } = overviewModel;
+    const selection = overviewModel?.selection;
     const hasSelectedSpan = selection !== undefined;
     const systemInstructions = selection?.systemInstructions;
     const requestMessages = selection?.requestMessages ?? [];
@@ -645,91 +590,55 @@ export const TraceTurnSummary = ({
         </div>
     );
 
-    const timingList = useBackendOverview ? (
-        <div className="text-xs">
-            {backendOverviewRows.map((entry) => {
-                const spanId = entry.item.span_id;
-                const isSelected = spanId === resolvedSelectedTimingSpanId;
-                return (
-                    <button
-                        className={`hover:border-primary/50 hover:bg-primary/10 grid w-full grid-cols-[minmax(220px,1fr)_70px_minmax(160px,1.2fr)] items-center gap-x-3 rounded-none border border-transparent px-1 py-0.5 text-left transition-none ${
-                            isSelected
-                                ? "border-primary bg-primary/15 ring-primary/30 shadow-sm ring-1"
-                                : ""
-                        }`}
-                        data-overview-span-id={spanId}
-                        key={spanId}
-                        onClick={() => {
-                            setSelectedTimingSpanId(spanId);
-                        }}
-                        type="button"
-                    >
-                        <div
-                            className="font-semibold"
-                            style={{
-                                paddingLeft: `${entry.depth * 16}px`,
-                            }}
-                        >
-                            {entry.item.title}
-                        </div>
-                        <div className="text-muted-foreground tabular-nums">
-                            {entry.value}
-                        </div>
-                        <div className="bg-muted relative h-2 overflow-hidden rounded">
-                            <div
-                                className={`absolute inset-y-0 rounded ${entry.barClass}`}
-                                style={{
-                                    left: `${entry.offsetPct}%`,
-                                    width: `${entry.widthPct}%`,
-                                }}
-                            />
-                        </div>
-                    </button>
-                );
-            })}
-        </div>
-    ) : (
-        <div className="text-xs">
-            {timingRows.map((entry) => {
-                const isSelected = entry.spanId === resolvedSelectedTimingSpanId;
-                return (
-                    <button
-                        className={`hover:border-primary/50 hover:bg-primary/10 grid w-full grid-cols-[minmax(220px,1fr)_70px_minmax(160px,1.2fr)] items-center gap-x-3 rounded-none border border-transparent px-1 py-0.5 text-left transition-none ${
-                            isSelected
-                                ? "border-primary bg-primary/15 ring-primary/30 shadow-sm ring-1"
-                                : ""
-                        }`}
-                        data-overview-span-id={entry.spanId}
-                        key={entry.spanId}
-                        onClick={() => {
-                            setSelectedTimingSpanId(entry.spanId);
-                        }}
-                        type="button"
-                    >
-                        <div
-                            className="font-semibold"
-                            style={{
-                                paddingLeft: `${entry.depth * 16}px`,
-                            }}
-                        >
-                            {entry.label}
-                        </div>
-                        <div className="text-muted-foreground tabular-nums">
-                            {entry.value}
-                        </div>
-                        <div className="bg-muted relative h-2 overflow-hidden rounded">
-                            <div
-                                className={`absolute inset-y-0 rounded ${entry.barClass}`}
-                                style={{
-                                    left: `${entry.offsetPct}%`,
-                                    width: `${entry.widthPct}%`,
-                                }}
-                            />
-                        </div>
-                    </button>
-                );
-            })}
-        </div>
+    const timelineRows = useMemo<TraceTimelineRow[]>(
+        () =>
+            useBackendOverview
+                ? backendOverviewRows.map((entry) => ({
+                      id: entry.item.span_id,
+                      parentId: entry.item.parent_span_id,
+                      label: entry.item.title,
+                      depth: entry.depth,
+                      durationLabel: entry.value,
+                      offsetMs: entry.offsetMs,
+                      durationMs: entry.durationMs,
+                      outcome: entry.item.outcome,
+                      failedResultCount: getAggregateFailedResultCount(
+                          entry.item,
+                      ),
+                  }))
+                : (overviewModel?.timingRows ?? []).map((entry) => ({
+                      id: entry.spanId,
+                      label: entry.label,
+                      depth: entry.depth,
+                      durationLabel: entry.value,
+                      offsetMs: entry.offsetMs,
+                      durationMs: entry.durationMs,
+                  })),
+        [backendOverviewRows, overviewModel, useBackendOverview],
+    );
+    const expandableSpanIds = useMemo(
+        () =>
+            new Set(
+                buildVisibleTraceTimelineRows(timelineRows, new Set())
+                    .filter((row) => row.hasChildren)
+                    .map((row) => row.id),
+            ),
+        [timelineRows],
+    );
+    const traceDurationMs =
+        traceStart === undefined || traceEnd === undefined
+            ? undefined
+            : Math.max(traceEnd - traceStart, 0);
+    const timingList = (
+        <TraceTimeline
+            collapsedSpanIds={collapsedSpanIds}
+            layoutScope={layoutScope}
+            onSelectSpan={onSelectSpan}
+            onToggleSpan={toggleSpan}
+            rows={timelineRows}
+            selectedSpanId={selectedSpanId}
+            traceDurationMs={traceDurationMs}
+        />
     );
 
     const selectedBackendOutputText =
@@ -763,6 +672,9 @@ export const TraceTurnSummary = ({
         selectedBackendOverviewRow?.item.data.output_tokens;
     const selectedBackendCostBreakdown =
         selectedBackendOverviewRow?.item.data.cost_breakdown;
+    const selectedBackendTotalCost = getNumberValue(
+        selectedBackendOverviewRow?.item.data.total_cost,
+    );
     const selectedBackendTokenRows = [
         [
             "Uncached input",
@@ -786,7 +698,7 @@ export const TraceTurnSummary = ({
         )
         .map(([label, value, cost]) => [
             label,
-            formatTokenWithCost(value, cost),
+            formatTokenUsage(value, cost),
         ] as const);
 
     const renderSummarySection = (
@@ -825,6 +737,14 @@ export const TraceTurnSummary = ({
                             },
                         ]),
                   { label: "Duration", value: selectedBackendOverviewRow.value },
+                  ...(selectedBackendTotalCost === undefined
+                      ? []
+                      : [
+                            {
+                                label: "Cost",
+                                value: formatUsdCost(selectedBackendTotalCost),
+                            },
+                        ]),
                   {
                       label: "Offset",
                       value: formatOffsetMs(
@@ -901,13 +821,21 @@ export const TraceTurnSummary = ({
                 Select a trace step to view projected details.
             </div>
         ) : (
-            <ProjectedDetailsGrid
-                formatted={summaryFormatted}
-                rows={selectedBackendDetailRows}
-            />
+            <div className="space-y-3">
+                <TraceOutcomeBadge
+                    failedResultCount={getAggregateFailedResultCount(
+                        selectedBackendOverviewRow.item,
+                    )}
+                    outcome={selectedBackendOverviewRow.item.outcome}
+                />
+                <ProjectedDetailsGrid
+                    formatted={summaryFormatted}
+                    rows={selectedBackendDetailRows}
+                />
+            </div>
         );
 
-    const legacySummaryDetails = (
+    const fallbackSummaryDetails = (
         <div className="space-y-4">
             {hasSelectedSpan ? (
                 <div className="space-y-1 text-xs">
@@ -968,39 +896,11 @@ export const TraceTurnSummary = ({
 
     const summaryDetails = useBackendOverview
         ? backendSummaryDetails
-        : legacySummaryDetails;
+        : fallbackSummaryDetails;
 
     return (
-        <ResizablePanelGroup
-            className="h-full min-h-0 min-w-0"
-            id="trace-turn-summary-layout"
-            orientation="horizontal"
-        >
-            <ResizablePanel
-                className="min-h-0 min-w-0"
-                defaultSize="45%"
-                id="trace-turn-summary-timeline-panel"
-                minSize="38%"
-            >
-                <div
-                    className="h-full min-h-0 min-w-0 overflow-auto"
-                    ref={timelineScrollRef}
-                >
-                    <div className="space-y-3 px-4 py-4">
-                        <div className="text-muted-foreground text-xs uppercase">
-                            Timeline
-                        </div>
-                        {timingList}
-                    </div>
-                </div>
-            </ResizablePanel>
-            <ResizableHandle withHandle />
-            <ResizablePanel
-                className="min-h-0 min-w-0"
-                defaultSize="55%"
-                id="trace-turn-summary-details-panel"
-                minSize="40%"
-            >
+        <TraceSplitLayout
+            detail={
                 <div className="h-full min-h-0 min-w-0 overflow-auto">
                     <div className="px-4 py-4">
                         <div className="mb-2 flex items-center justify-end gap-3">
@@ -1016,7 +916,19 @@ export const TraceTurnSummary = ({
                         {summaryDetails}
                     </div>
                 </div>
-            </ResizablePanel>
-        </ResizablePanelGroup>
+            }
+            navigation={
+                <div className="flex h-full min-h-0 min-w-0 flex-col">
+                    <div className="border-border flex items-center justify-end border-b px-3 py-2">
+                        <TraceCollapseAllButton
+                            collapseControls={collapseControls}
+                            expandableSpanIds={expandableSpanIds}
+                        />
+                    </div>
+                    <div className="min-h-0 flex-1">{timingList}</div>
+                </div>
+            }
+            scope={layoutScope}
+        />
     );
 };

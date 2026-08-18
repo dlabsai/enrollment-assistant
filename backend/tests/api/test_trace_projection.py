@@ -20,6 +20,8 @@ def _span(
     is_ai: bool = False,
     is_embedding: bool | None = False,
     duration_ms: float = 123.0,
+    total_cost: float | None = None,
+    status_code: str = "OK",
 ) -> OtelSpan:
     started_at = datetime(2026, 4, 27, 12, 0, tzinfo=UTC)
     return cast(
@@ -29,7 +31,7 @@ def _span(
             parent_span_id=parent_span_id,
             name=name,
             kind="INTERNAL",
-            status_code="OK",
+            status_code=status_code,
             start_time=started_at,
             span_time=started_at,
             created_at=started_at,
@@ -40,7 +42,7 @@ def _span(
             server_address=None,
             input_tokens=None,
             output_tokens=None,
-            total_cost=None,
+            total_cost=total_cost,
             is_ai=is_ai,
             is_embedding=is_embedding,
             total_time=None,
@@ -263,6 +265,11 @@ def test_trace_projection_projects_agent_output_messages() -> None:
                     ),
                     "gen_ai.system_instructions": "Use approved Demo University facts.",
                     "app.llm_response_metrics": '[{"request_index":1,"output_tokens":9}]',
+                    "openai.request.service_tier": "priority",
+                    "openai.response.service_tier": "priority",
+                    "app.openai.response.service_tier.counts": '{"priority":1}',
+                    "app.openai.response.service_tier.missing_count": 0,
+                    "app.openai.response.service_tier.fallback_count": 0,
                 },
             )
         ]
@@ -279,6 +286,11 @@ def test_trace_projection_projects_agent_output_messages() -> None:
         {"role": "assistant", "content": "Tell them Demo University is accredited."}
     ]
     assert item.data["llm_response_metrics"] == [{"request_index": 1, "output_tokens": 9}]
+    assert item.data["service_tier_requested"] == "priority"
+    assert item.data["service_tier_applied"] == "priority"
+    assert item.data["service_tier_applied_counts"] == {"priority": 1}
+    assert item.data["service_tier_missing_count"] == 0
+    assert item.data["service_tier_fallback_count"] == 0
 
 
 def test_trace_projection_projects_grounding_agent_output_messages() -> None:
@@ -331,6 +343,69 @@ def test_trace_projection_projects_agent_cache_read_tokens() -> None:
     assert item.data["uncached_input_tokens"] == 60
     assert item.data["cache_read_input_tokens"] == 40
     assert item.data["output_tokens"] == 20
+
+
+def test_trace_projection_rolls_descendant_costs_to_parents_without_own_cost() -> None:
+    overview = build_trace_overview(
+        [
+            _span(
+                span_id="turn",
+                name="Calling app.chat.engine.handle_conversation_turn",
+                attributes={"app.conversation_id": "conversation-id"},
+            ),
+            _span(
+                span_id="chatbot",
+                parent_span_id="turn",
+                name="invoke_agent chatbot",
+                is_ai=True,
+                attributes={"gen_ai.agent.name": "chatbot", "gen_ai.request.model": "azure/gpt-4o"},
+            ),
+            _span(
+                span_id="chatbot-llm",
+                parent_span_id="chatbot",
+                name="chat azure/gpt-4o",
+                is_ai=True,
+                attributes={
+                    "gen_ai.operation.name": "chat",
+                    "gen_ai.request.model": "azure/gpt-4o",
+                },
+                total_cost=0.02,
+            ),
+            _span(
+                span_id="guardrails",
+                parent_span_id="turn",
+                name="invoke_agent guardrails",
+                is_ai=True,
+                attributes={
+                    "gen_ai.agent.name": "guardrails",
+                    "gen_ai.request.model": "azure/gpt-4o-mini",
+                },
+                total_cost=0.1,
+            ),
+            _span(
+                span_id="guardrails-llm",
+                parent_span_id="guardrails",
+                name="chat azure/gpt-4o-mini",
+                is_ai=True,
+                attributes={
+                    "gen_ai.operation.name": "chat",
+                    "gen_ai.request.model": "azure/gpt-4o-mini",
+                },
+                total_cost=0.04,
+            ),
+        ]
+    )
+
+    item_by_span_id = {item.span_id: item for item in overview}
+
+    def displayed_cost(span_id: str) -> float:
+        return cast(float, item_by_span_id[span_id].data["total_cost"])
+
+    assert abs(displayed_cost("turn") - 0.16) < 0.000001
+    assert abs(displayed_cost("chatbot") - 0.02) < 0.000001
+    assert abs(displayed_cost("chatbot-llm") - 0.02) < 0.000001
+    assert abs(displayed_cost("guardrails") - 0.1) < 0.000001
+    assert abs(displayed_cost("guardrails-llm") - 0.04) < 0.000001
 
 
 def test_trace_projection_projects_reasoning_effort_for_agents_and_llms() -> None:
@@ -507,14 +582,20 @@ def test_trace_projection_projects_eval_trace_rows() -> None:
         "total_runs": 2,
         "max_concurrency": 1,
     }
+    assert root_item.outcome == "fail"
+    assert root_item.failed_result_count == 1
 
     case_item = overview[1]
     assert case_item.title == "Case Run: internal_valid_accreditation_response #1"
     assert case_item.data == {"case_name": "internal_valid_accreditation_response", "run_index": 1}
+    assert case_item.outcome == "fail"
+    assert case_item.failed_result_count == 1
 
     result_item = overview[2]
     assert result_item.title == "Evaluation Result: passed"
     assert result_item.subtitle == "fail"
+    assert result_item.outcome == "fail"
+    assert result_item.failed_result_count == 1
     assert result_item.data == {
         "evaluation_name": "passed",
         "score_label": "fail",
@@ -525,6 +606,84 @@ def test_trace_projection_projects_eval_trace_rows() -> None:
         "case_name": "internal_valid_accreditation_response",
         "run_index": 1,
     }
+
+
+def test_trace_projection_uses_assertion_labels_for_semantic_outcomes() -> None:
+    overview = build_trace_overview(
+        [
+            _span(
+                span_id="eval-root",
+                name="Evaluation: chatbot_eval",
+                attributes={"dataset_name": "chatbot_eval"},
+            ),
+            _span(
+                span_id="case-run",
+                parent_span_id="eval-root",
+                name="eval_run case_a #1",
+                attributes={"app.eval.case_name": "case_a", "app.eval.run_index": 1},
+            ),
+            _span(
+                span_id="assertion-result",
+                parent_span_id="case-run",
+                name="gen_ai.evaluation.result",
+                attributes={
+                    "gen_ai.evaluation.name": "passed",
+                    "gen_ai.evaluation.score.label": "pass",
+                    "gen_ai.evaluation.score.value": 1.0,
+                    "app.eval.result.kind": "assertion",
+                },
+            ),
+            _span(
+                span_id="label-result",
+                parent_span_id="case-run",
+                name="gen_ai.evaluation.result",
+                attributes={
+                    "gen_ai.evaluation.name": "category",
+                    "gen_ai.evaluation.score.label": "fail",
+                    "app.eval.result.kind": "label",
+                },
+            ),
+        ]
+    )
+
+    assert overview[0].outcome == "pass"
+    assert overview[1].outcome == "pass"
+    assert overview[2].outcome == "pass"
+    assert overview[3].outcome is None
+    assert all(item.failed_result_count == 0 for item in overview)
+
+
+def test_trace_projection_prioritizes_span_errors_over_eval_failures() -> None:
+    overview = build_trace_overview(
+        [
+            _span(
+                span_id="eval-root",
+                name="Evaluation: chatbot_eval",
+                attributes={"dataset_name": "chatbot_eval"},
+            ),
+            _span(
+                span_id="case-run",
+                parent_span_id="eval-root",
+                name="eval_run case_a #1",
+                attributes={"app.eval.case_name": "case_a", "app.eval.run_index": 1},
+            ),
+            _span(
+                span_id="error-result",
+                parent_span_id="case-run",
+                name="gen_ai.evaluation.result",
+                status_code="ERROR",
+                attributes={
+                    "gen_ai.evaluation.name": "judge_error",
+                    "gen_ai.evaluation.score.label": "fail",
+                    "gen_ai.evaluation.score.value": 0.0,
+                    "app.eval.result.kind": "assertion",
+                },
+            ),
+        ]
+    )
+
+    assert [item.outcome for item in overview] == ["error", "error", "error"]
+    assert [item.failed_result_count for item in overview] == [1, 1, 1]
 
 
 def test_trace_projection_preserves_plain_text_tool_results() -> None:

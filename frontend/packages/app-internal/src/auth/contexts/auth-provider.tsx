@@ -1,3 +1,4 @@
+import { isApiError } from "@va/shared/lib/api-client";
 import { logger } from "@va/shared/lib/logger";
 import {
     type JSX,
@@ -42,6 +43,12 @@ interface AuthProviderProps {
 const getErrorMessage = (error: unknown, fallback: string): string =>
     error instanceof Error && error.message !== "" ? error.message : fallback;
 
+const isUnauthorizedError = (error: unknown): boolean =>
+    isApiError(error) && error.status === 401;
+
+const TEMPORARY_AUTH_ERROR =
+    "Authentication is temporarily unavailable. Please try again.";
+
 export const AuthProvider = ({ children }: AuthProviderProps): JSX.Element => {
     const [user, setUser] = useState<UserProfile | undefined>();
     const [loading, setLoading] = useState(true);
@@ -71,34 +78,6 @@ export const AuthProvider = ({ children }: AuthProviderProps): JSX.Element => {
         setAuthError(undefined);
     }, []);
 
-    const detectTeamsAuthMode =
-        useCallback(async (): Promise<TeamsAuthMode> => {
-            if (!teamsSsoEnabled) {
-                setTeamsAuthMode("outside");
-                return "outside";
-            }
-
-            try {
-                const runningInTeams = await isRunningInTeams();
-                const nextMode = runningInTeams ? "inside" : "outside";
-                setTeamsAuthMode(nextMode);
-                return nextMode;
-            } catch (error) {
-                logger.warn(
-                    "Failed to detect Microsoft Teams environment",
-                    error,
-                );
-                setTeamsAuthMode("error");
-                setAuthError(
-                    getErrorMessage(
-                        error,
-                        "Failed to initialize Microsoft Teams authentication.",
-                    ),
-                );
-                return "error";
-            }
-        }, [teamsSsoEnabled]);
-
     const runTeamsSsoLogin = useCallback(async () => {
         setAuthError(undefined);
         setTeamsSsoLoading(true);
@@ -119,6 +98,9 @@ export const AuthProvider = ({ children }: AuthProviderProps): JSX.Element => {
             return true;
         } catch (error) {
             logger.warn("Failed to refresh session", error);
+            if (!isUnauthorizedError(error)) {
+                throw error;
+            }
             clearAuthState({ sessionExpired: false });
             return false;
         }
@@ -130,8 +112,17 @@ export const AuthProvider = ({ children }: AuthProviderProps): JSX.Element => {
                 await completeAuthentication();
             } catch (error) {
                 logger.warn("Failed to restore session", error);
+                if (!isUnauthorizedError(error)) {
+                    setAuthError(TEMPORARY_AUTH_ERROR);
+                    return;
+                }
 
-                if (await refreshSessionToken()) {
+                try {
+                    if (await refreshSessionToken()) {
+                        return;
+                    }
+                } catch {
+                    setAuthError(TEMPORARY_AUTH_ERROR);
                     return;
                 }
 
@@ -167,19 +158,42 @@ export const AuthProvider = ({ children }: AuthProviderProps): JSX.Element => {
         void initialize();
     }, [
         completeAuthentication,
-        detectTeamsAuthMode,
         refreshSessionToken,
         runTeamsSsoLogin,
         teamsForceModeEnabled,
     ]);
 
     useEffect(() => {
-        if (!teamsSsoEnabled || user === undefined) {
-            return;
+        let active = true;
+        if (teamsSsoEnabled && user !== undefined) {
+            void isRunningInTeams().then(
+                (runningInTeams) => {
+                    if (active) {
+                        setTeamsAuthMode(runningInTeams ? "inside" : "outside");
+                    }
+                },
+                (error: unknown) => {
+                    if (active) {
+                        logger.warn(
+                            "Failed to detect Microsoft Teams environment",
+                            error,
+                        );
+                        setTeamsAuthMode("error");
+                        setAuthError(
+                            getErrorMessage(
+                                error,
+                                "Failed to initialize Microsoft Teams authentication.",
+                            ),
+                        );
+                    }
+                },
+            );
         }
 
-        void detectTeamsAuthMode();
-    }, [detectTeamsAuthMode, teamsSsoEnabled, user]);
+        return (): void => {
+            active = false;
+        };
+    }, [teamsSsoEnabled, user]);
 
     const markSessionExpired = useCallback(() => {
         clearAuthState({ sessionExpired: true });

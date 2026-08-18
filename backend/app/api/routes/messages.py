@@ -1,19 +1,27 @@
 import asyncio
 import json
 from contextlib import suppress
+from dataclasses import dataclass
 from datetime import datetime
-from typing import TYPE_CHECKING, Annotated, Any, Literal, cast
-from uuid import UUID  # noqa: TC003
+from hashlib import sha256
+from typing import TYPE_CHECKING, Annotated, Any, Literal, NoReturn, cast
+from uuid import UUID, uuid4
 
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-from sqlalchemy import case, false, func, literal_column, or_, select
+from sqlalchemy import BigInteger, case, false, func, literal_column, or_, select
+from sqlalchemy.dialects.postgresql import insert as postgres_insert
+from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
 from app.api.deps import CurrentUser, SessionDep
 from app.api.grounding_agent import (
+    GROUNDING_SOURCE_STATUS_FAILED,
     GROUNDING_SOURCE_STATUS_PENDING,
+    GroundingSourceResultStatus,
+    effective_grounding_source_status,
+    mark_grounding_sources_failed,
     mark_grounding_sources_pending,
     select_and_store_grounding_sources,
 )
@@ -40,7 +48,12 @@ from app.api.routes.owner_group_filter import (
     build_owner_group_filter,
     validate_exclusive_user_filters,
 )
-from app.chat.engine import ModelSettings, handle_conversation_turn, handle_investigation_turn
+from app.chat.engine import (
+    MessageOut,
+    ModelSettings,
+    handle_conversation_turn,
+    handle_investigation_turn,
+)
 from app.chat.engine_utils import ReasoningEffort
 from app.chat.internal_summary import summarize_internal_conversation
 from app.chat.title import (
@@ -56,9 +69,24 @@ from app.core.rbac import (
     get_allowed_chat_owner_group_slugs,
     get_effective_permission_map,
 )
-from app.models import AssistantMessageMetadata, Conversation, Message, OtelSpan, RbacGroup, User
-from app.otel import mark_current_span_for_otel_export, otel_export_scope, wait_for_pending_spans
-from app.utils import logger
+from app.models import (
+    AssistantMessageMetadata,
+    ChatGenerationAttempt,
+    Conversation,
+    Message,
+    OtelSpan,
+    PromptSetScope,
+    RbacGroup,
+    User,
+)
+from app.otel import (
+    mark_current_span_for_otel_export,
+    otel_export_scope,
+    span_persistence_scope,
+    wait_for_pending_spans,
+)
+from app.prompt_sets import get_template_filenames_for_scope, hash_prompt_templates
+from app.utils import current_time_utc, logger
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable
@@ -85,17 +113,142 @@ def _handle_background_task_done(task: asyncio.Task[Any]) -> None:
 router = APIRouter(tags=["messages"])
 
 _PREVIEW_MAX_LENGTH = 220
+_MESSAGE_GENERATION_FAILED_MESSAGE = "The response could not be completed."
+_GENERATION_ATTEMPT_PENDING = "pending"
+_GENERATION_ATTEMPT_COMPLETED = "completed"
+_GENERATION_ATTEMPT_FAILED = "failed"
+GenerationAttemptStatus = Literal["pending", "completed", "failed"]
 
 
 def _format_sse_event(event: str, payload: dict[str, Any]) -> str:
     return f"event: {event}\ndata: {json.dumps(payload)}\n\n"
 
 
+def generation_request_fingerprint(request: ChatRequest) -> str:
+    payload = request.model_dump(mode="json", exclude={"generation_attempt_id"}, exclude_unset=True)
+    serialized = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return sha256(serialized.encode()).hexdigest()
+
+
+def _visible_assistant_content(message: Message | MessageOut) -> str:
+    if message.guardrails_blocked:
+        return message.guardrails_blocked_message or settings.GUARDRAILS_BLOCKED_MESSAGE
+    return message.content
+
+
+def _minimal_assistant_payload(
+    *, user_message_id: UUID, assistant_message: Message | MessageOut
+) -> dict[str, Any]:
+    assert assistant_message.conversation_id is not None
+    return {
+        "conversation_id": str(assistant_message.conversation_id),
+        "user_message_id": str(user_message_id),
+        "assistant_message_id": str(assistant_message.id),
+        "assistant_message": _visible_assistant_content(assistant_message),
+        "guardrails_blocked": assistant_message.guardrails_blocked,
+        "guardrails_blocked_message": assistant_message.guardrails_blocked_message,
+        "guardrails_failures": [],
+        "parent_message_id": (
+            str(assistant_message.parent_id) if assistant_message.parent_id is not None else None
+        ),
+        "generation_time_ms": None,
+        "generation_timing": None,
+        "response_cost": None,
+        "response_usage": None,
+        "response_cost_breakdown": None,
+        "tool_sources_used": [],
+        "grounding_sources_used": [],
+        "grounding_source_status": None,
+    }
+
+
+async def _finalize_failed_generation_attempt(
+    session: AsyncSession, *, generation_attempt_id: UUID
+) -> ChatGenerationAttempt | None:
+    try:
+        attempt = await session.get(
+            ChatGenerationAttempt, generation_attempt_id, populate_existing=True
+        )
+        if attempt is None:
+            return None
+        if attempt.status == _GENERATION_ATTEMPT_PENDING:
+            attempt.status = _GENERATION_ATTEMPT_FAILED
+            await session.commit()
+    except Exception:
+        logger.exception("Failed to finalize generation attempt %s", generation_attempt_id)
+        with suppress(Exception):
+            await session.rollback()
+        return None
+    else:
+        return attempt
+
+
+def _require_generation_attempt(attempt: ChatGenerationAttempt | None) -> ChatGenerationAttempt:
+    if attempt is None:
+        raise RuntimeError("Generation attempt disappeared before completion")
+    return attempt
+
+
+async def _ensure_generation_attempt_access(
+    session: AsyncSession,
+    attempt: ChatGenerationAttempt,
+    current_user: CurrentUser,
+    permission_map: dict[PermissionKey, bool],
+) -> Conversation:
+    if attempt.user_id != current_user.id:
+        raise HTTPException(status_code=404, detail="Generation attempt not found")
+    conversation = await session.get(Conversation, attempt.conversation_id)
+    if conversation is None:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    _ensure_conversation_author_access(conversation, current_user)
+    if conversation.kind == "investigation":
+        _ensure_investigation_access(permission_map)
+    return conversation
+
+
+async def _get_generation_attempt_if_exists(
+    session: AsyncSession,
+    *,
+    generation_attempt_id: UUID,
+    current_user: CurrentUser,
+    request_fingerprint: str,
+    permission_map: dict[PermissionKey, bool],
+) -> ChatGenerationAttempt | None:
+    attempt = await session.get(ChatGenerationAttempt, generation_attempt_id)
+    if attempt is None:
+        return None
+    await _ensure_generation_attempt_access(session, attempt, current_user, permission_map)
+    if attempt.request_fingerprint != request_fingerprint:
+        raise HTTPException(
+            status_code=409, detail="Generation attempt payload does not match the original request"
+        )
+    return attempt
+
+
+def _raise_existing_generation_attempt(attempt: ChatGenerationAttempt) -> NoReturn:
+    if attempt.status == _GENERATION_ATTEMPT_PENDING:
+        detail = "Generation attempt is still pending"
+    elif attempt.status == _GENERATION_ATTEMPT_COMPLETED:
+        detail = "Generation attempt is already completed"
+    elif attempt.status == _GENERATION_ATTEMPT_FAILED:
+        detail = "Generation attempt has already failed"
+    else:
+        raise HTTPException(status_code=500, detail="Invalid generation attempt status")
+    raise HTTPException(status_code=409, detail=detail)
+
+
+class DraftPromptTemplateIn(BaseModel):
+    filename: str
+    content: str
+
+
 class ChatRequest(BaseModel):
     user_prompt: str
+    generation_attempt_id: UUID | None = None
     conversation_id: UUID | None = None
     parent_message_id: UUID | None = None
     prompt_set_version_id: UUID | None = None
+    draft_prompt_templates: list[DraftPromptTemplateIn] | None = None
     chatbot_model: str | None = None
     guardrail_model: str | None = None
     chatbot_reasoning_effort: ReasoningEffort | None = None
@@ -116,6 +269,20 @@ class ChatResponse(BaseModel):
     grounding_source_status: str | None = None
 
 
+class GroundingSourcesResponse(BaseModel):
+    assistant_message_id: UUID
+    grounding_sources_used: list[MessageSourceUsed] = []
+    grounding_source_status: GroundingSourceResultStatus
+
+
+class GenerationAttemptResponse(BaseModel):
+    generation_attempt_id: UUID
+    status: GenerationAttemptStatus
+    conversation_id: UUID
+    user_message_id: UUID | None = None
+    assistant_message_id: UUID | None = None
+
+
 class MessageListItem(BaseModel):
     id: UUID
     conversation_id: UUID
@@ -130,7 +297,10 @@ class MessageListItem(BaseModel):
     conversation_user_email: str | None = None
     generation_time_ms: int | None = None
     input_tokens: int | None = None
+    uncached_input_tokens: int | None = None
+    cache_read_input_tokens: int | None = None
     output_tokens: int | None = None
+    response_cost: float | None = None
     tool_call_count: int = 0
     guardrail_failure_count: int = 0
     guardrails_blocked: bool = False
@@ -143,6 +313,96 @@ class MessageListItem(BaseModel):
 class MessageListPage(BaseModel):
     items: list[MessageListItem]
     total: int
+
+
+@dataclass(frozen=True, slots=True)
+class _MessageTraceSummary:
+    input_tokens: int | None = None
+    cache_read_input_tokens: int | None = None
+    output_tokens: int | None = None
+    response_cost: float | None = None
+    guardrail_failure_count: int = 0
+    trace_id: str | None = None
+    span_id: str | None = None
+
+
+async def _get_message_trace_summaries(
+    session: AsyncSession, message_ids: list[UUID]
+) -> dict[UUID, _MessageTraceSummary]:
+    if not message_ids:
+        return {}
+
+    latest_span = (
+        select(OtelSpan.message_id, OtelSpan.trace_id, OtelSpan.span_id)
+        .where(OtelSpan.message_id.in_(message_ids))
+        .order_by(
+            OtelSpan.message_id, OtelSpan.start_time.desc().nullslast(), OtelSpan.created_at.desc()
+        )
+        .distinct(OtelSpan.message_id)
+        .subquery()
+    )
+    trace_span = aliased(OtelSpan)
+    cost_span_condition = (
+        trace_span.is_ai.is_(True)
+        & trace_span.is_embedding.is_not(True)
+        & response_cost_span_condition(trace_span)
+    )
+    cache_read_tokens = func.coalesce(
+        func.jsonb_extract_path_text(
+            trace_span.attributes, "gen_ai.usage.cache_read.input_tokens"
+        ).cast(BigInteger),
+        0,
+    )
+    rows = (
+        await session.execute(
+            select(
+                latest_span.c.message_id,
+                latest_span.c.trace_id,
+                latest_span.c.span_id,
+                func.sum(trace_span.input_tokens).filter(cost_span_condition).label("input_tokens"),
+                func.sum(cache_read_tokens)
+                .filter(cost_span_condition)
+                .label("cache_read_input_tokens"),
+                func.sum(trace_span.output_tokens)
+                .filter(cost_span_condition)
+                .label("output_tokens"),
+                func.sum(trace_span.total_cost).filter(cost_span_condition).label("response_cost"),
+                func.count()
+                .filter(
+                    func.jsonb_extract_path_text(
+                        trace_span.attributes, "app.guardrails.result.is_valid"
+                    )
+                    == "false"
+                )
+                .label("guardrail_failure_count"),
+            )
+            .outerjoin(trace_span, trace_span.trace_id == latest_span.c.trace_id)
+            .group_by(latest_span.c.message_id, latest_span.c.trace_id, latest_span.c.span_id)
+        )
+    ).all()
+    return {
+        message_id: _MessageTraceSummary(
+            input_tokens=int(input_tokens) if input_tokens is not None else None,
+            cache_read_input_tokens=(
+                int(cache_read_input_tokens) if cache_read_input_tokens is not None else None
+            ),
+            output_tokens=int(output_tokens) if output_tokens is not None else None,
+            response_cost=float(response_cost) if response_cost is not None else None,
+            guardrail_failure_count=int(guardrail_failure_count),
+            trace_id=trace_id,
+            span_id=span_id,
+        )
+        for (
+            message_id,
+            trace_id,
+            span_id,
+            input_tokens,
+            cache_read_input_tokens,
+            output_tokens,
+            response_cost,
+            guardrail_failure_count,
+        ) in rows
+    }
 
 
 def _format_message_preview(content: str) -> str:
@@ -236,14 +496,11 @@ def _ensure_investigation_access(permission_map: dict[PermissionKey, bool]) -> N
         raise HTTPException(status_code=403, detail="Access denied")
 
 
-def _ensure_internal_access(conversation: Conversation, current_user: CurrentUser) -> None:
-    if conversation.is_public:
+def _ensure_conversation_author_access(
+    conversation: Conversation, current_user: CurrentUser
+) -> None:
+    if conversation.is_public or conversation.user_id != current_user.id:
         raise HTTPException(status_code=403, detail="Access denied")
-
-    if conversation.user_id == current_user.id or current_user.group.slug in {"admin", "dev"}:
-        return
-
-    raise HTTPException(status_code=403, detail="Access denied")
 
 
 async def _get_stream_conversation_or_404(
@@ -255,8 +512,10 @@ async def _get_stream_conversation_or_404(
     return conversation
 
 
-def _get_model_settings(request: ChatRequest) -> tuple[ModelSettings, ModelSettings]:
-    is_investigation = request.conversation_kind == "investigation"
+def _get_model_settings(
+    request: ChatRequest, *, conversation_kind: Literal["chat", "investigation"]
+) -> tuple[ModelSettings, ModelSettings]:
+    is_investigation = conversation_kind == "investigation"
     investigation_reasoning_effort: ReasoningEffort = settings.INVESTIGATION_REASONING_EFFORT
     chatbot = ModelSettings(
         model=request.chatbot_model
@@ -265,14 +524,82 @@ def _get_model_settings(request: ChatRequest) -> tuple[ModelSettings, ModelSetti
         max_tokens=settings.CHATBOT_MODEL_MAX_TOKENS or None,
         reasoning_effort=request.chatbot_reasoning_effort
         or (investigation_reasoning_effort if is_investigation else None),
+        azure_service_tier=(None if is_investigation else settings.CHATBOT_AZURE_SERVICE_TIER),
     )
     guardrail = ModelSettings(
         model=request.guardrail_model or settings.GUARDRAIL_MODEL,
         temperature=settings.GUARDRAIL_MODEL_TEMPERATURE or None,
         max_tokens=settings.GUARDRAIL_MODEL_MAX_TOKENS or None,
         reasoning_effort=request.guardrail_reasoning_effort,
+        azure_service_tier=settings.GUARDRAIL_AZURE_SERVICE_TIER,
     )
     return chatbot, guardrail
+
+
+def _normalize_draft_prompt_templates(
+    request: ChatRequest,
+) -> tuple[dict[str, str] | None, dict[str, Any] | None]:
+    if request.draft_prompt_templates is None:
+        return None, None
+
+    if request.conversation_kind != "chat":
+        raise HTTPException(
+            status_code=400, detail="Draft instruction testing is only supported for chat"
+        )
+    if request.prompt_set_version_id is not None:
+        raise HTTPException(
+            status_code=400,
+            detail="Use either draft instructions or a saved version of the instructions, not both",
+        )
+
+    expected_templates = set(
+        get_template_filenames_for_scope(PromptSetScope.ASSISTANT, is_internal=True)
+    )
+    submitted: dict[str, str] = {}
+    for template in request.draft_prompt_templates:
+        filename = template.filename.strip()
+        if filename in submitted:
+            raise HTTPException(status_code=400, detail="Duplicate draft templates provided")
+        submitted[filename] = template.content
+
+    submitted_templates = set(submitted)
+    missing = sorted(expected_templates - submitted_templates)
+    extra = sorted(submitted_templates - expected_templates)
+    if missing:
+        raise HTTPException(
+            status_code=400, detail=f"Missing draft templates: {', '.join(missing)}"
+        )
+    if extra:
+        raise HTTPException(
+            status_code=400, detail=f"Unexpected draft templates: {', '.join(extra)}"
+        )
+
+    prompt_hash = hash_prompt_templates(submitted)
+    prompt_context: dict[str, Any] = {
+        "source": "draft",
+        "scope": PromptSetScope.ASSISTANT.value,
+        "is_internal": True,
+        "hash": prompt_hash,
+        "template_filenames": sorted(submitted),
+    }
+    return submitted, prompt_context
+
+
+def _ensure_draft_context_is_allowed(
+    conversation: Conversation, prompt_context: dict[str, Any] | None
+) -> None:
+    if conversation.prompt_source == "draft":
+        if prompt_context is None:
+            raise HTTPException(
+                status_code=400,
+                detail="Draft instruction chats must be continued from the Instructions page",
+            )
+        return
+
+    if prompt_context is not None:
+        raise HTTPException(
+            status_code=400, detail="Draft instructions can only start or continue draft test chats"
+        )
 
 
 @router.get("/messages", response_model=MessageListPage)
@@ -296,6 +623,7 @@ async def list_messages(
         raise HTTPException(status_code=403, detail="Access denied")
 
     include_internal, include_public = _get_platform_scope(current_user, platform)
+    can_view_response_cost = permission_map.get(PermissionKey.CHAT_VIEW_RESPONSE_COST, False)
     internal_visibility_condition = _internal_visibility_condition(
         current_user, permission_map=permission_map
     )
@@ -306,7 +634,6 @@ async def list_messages(
     content_length = func.char_length(Message.content).label("content_length")
     generation_time_ms = (AssistantMessageMetadata.total_time * 1000).label("generation_time_ms")
     latest_trace_span_alias = aliased(OtelSpan)
-    latest_span_alias = aliased(OtelSpan)
     token_span_alias = aliased(OtelSpan)
     guardrail_span_alias = aliased(OtelSpan)
     latest_trace_id = (
@@ -331,6 +658,41 @@ async def list_messages(
         .correlate(Message)
         .scalar_subquery()
     ).label("input_tokens")
+    cache_read_input_tokens = (
+        select(
+            func.sum(
+                func.coalesce(
+                    func.jsonb_extract_path_text(
+                        token_span_alias.attributes, "gen_ai.usage.cache_read.input_tokens"
+                    ).cast(BigInteger),
+                    0,
+                )
+            )
+        )
+        .where(
+            token_span_alias.trace_id == latest_trace_id,
+            token_span_alias.is_ai.is_(True),
+            token_span_alias.is_embedding.is_not(True),
+            response_cost_span_condition(token_span_alias),
+        )
+        .correlate(Message)
+        .scalar_subquery()
+    ).label("cache_read_input_tokens")
+    uncached_input_token_count = case(
+        (input_tokens.is_(None), None),
+        else_=func.greatest(input_tokens - func.coalesce(cache_read_input_tokens, 0), 0),
+    ).label("uncached_input_tokens")
+    response_cost = (
+        select(func.sum(token_span_alias.total_cost))
+        .where(
+            token_span_alias.trace_id == latest_trace_id,
+            token_span_alias.is_ai.is_(True),
+            token_span_alias.is_embedding.is_not(True),
+            response_cost_span_condition(token_span_alias),
+        )
+        .correlate(Message)
+        .scalar_subquery()
+    ).label("response_cost")
     output_tokens = (
         select(func.sum(token_span_alias.output_tokens))
         .where(
@@ -366,27 +728,6 @@ async def list_messages(
         .correlate(Message)
         .scalar_subquery()
     ).label("guardrail_failure_count")
-    trace_id = (
-        select(latest_span_alias.trace_id)
-        .where(latest_span_alias.message_id == Message.id)
-        .order_by(
-            latest_span_alias.start_time.desc().nullslast(), latest_span_alias.created_at.desc()
-        )
-        .limit(1)
-        .correlate(Message)
-        .scalar_subquery()
-    ).label("trace_id")
-    span_id = (
-        select(latest_span_alias.span_id)
-        .where(latest_span_alias.message_id == Message.id)
-        .order_by(
-            latest_span_alias.start_time.desc().nullslast(), latest_span_alias.created_at.desc()
-        )
-        .limit(1)
-        .correlate(Message)
-        .scalar_subquery()
-    ).label("span_id")
-
     base_stmt = (
         select(
             Message,
@@ -396,11 +737,12 @@ async def list_messages(
             conversation_user_email,
             generation_time_ms,
             input_tokens,
+            uncached_input_token_count,
+            cache_read_input_tokens,
             output_tokens,
+            response_cost,
             tool_call_count,
             guardrail_failure_count,
-            trace_id,
-            span_id,
         )
         .join(Conversation, Message.conversation_id == Conversation.id)
         .outerjoin(owner_user_alias, Conversation.user_id == owner_user_alias.id)
@@ -453,8 +795,8 @@ async def list_messages(
         permission_map=permission_map,
     )
 
-    total_stmt = select(func.count()).select_from(base_stmt.subquery())
-    total = (await session.execute(total_stmt)).scalar() or 0
+    # Trace diagnostics do not affect the number of visible messages.
+    filtered_ids_stmt = base_stmt.with_only_columns(Message.id, maintain_column_froms=True)
 
     sort_map: dict[str, Any] = {
         "content_length": content_length,
@@ -464,21 +806,75 @@ async def list_messages(
         "conversation_title": Conversation.title,
         "generation_time_ms": generation_time_ms,
         "input_tokens": input_tokens,
+        "uncached_input_tokens": uncached_input_token_count,
+        "cache_read_input_tokens": cache_read_input_tokens,
         "output_tokens": output_tokens,
         "tool_call_count": tool_call_count,
         "guardrail_failure_count": guardrail_failure_count,
         "guardrails_blocked": Message.guardrails_blocked,
     }
+    if can_view_response_cost:
+        sort_map["response_cost"] = response_cost
     sort_column = sort_map.get(sort_by, Message.created_at)
     sort_expression = sort_column.desc() if descending else sort_column.asc()
-    if sort_by in {"input_tokens", "output_tokens"}:
+    if sort_by in {
+        "input_tokens",
+        "uncached_input_tokens",
+        "cache_read_input_tokens",
+        "output_tokens",
+        "response_cost",
+    }:
         sort_expression = sort_expression.nullslast()
-    stmt = base_stmt.order_by(sort_expression).offset(offset).limit(limit)
+    # Select the page before loading details. Trace sorts add only their requested
+    # scalar expression to this query; all returned diagnostics are page-scoped.
+    page_rows = (
+        await session.execute(
+            filtered_ids_stmt.add_columns(func.count().over().label("page_total"))
+            .order_by(sort_expression)
+            .offset(offset)
+            .limit(limit)
+        )
+    ).all()
+    if page_rows:
+        total = int(page_rows[0].page_total)
+        page_ids = [row[0] for row in page_rows]
+    else:
+        total_stmt = select(func.count()).select_from(filtered_ids_stmt.subquery())
+        total = (await session.execute(total_stmt)).scalar() or 0
+        response = MessageListPage(total=total, items=[])
+        # Preserve the total while releasing the reserved connection before serialization.
+        await session.commit()
+        return response
 
-    rows = (await session.execute(stmt)).all()
-    return MessageListPage(
-        total=total,
-        items=[
+    page_details_stmt = base_stmt.with_only_columns(
+        Message,
+        Conversation,
+        content_length,
+        conversation_user_name,
+        conversation_user_email,
+        generation_time_ms,
+        tool_call_count,
+        maintain_column_froms=True,
+    ).where(Message.id.in_(page_ids))
+    page_rows = (await session.execute(page_details_stmt)).all()
+    page_rows_by_id = {row[0].id: row for row in page_rows}
+    ordered_page_rows = [
+        page_rows_by_id[message_id] for message_id in page_ids if message_id in page_rows_by_id
+    ]
+    trace_summaries = await _get_message_trace_summaries(session, page_ids)
+
+    items: list[MessageListItem] = []
+    for (
+        message,
+        conversation,
+        content_length_value,
+        conversation_user_name_value,
+        conversation_user_email_value,
+        generation_time_ms_value,
+        tool_call_count_value,
+    ) in ordered_page_rows:
+        trace_summary = trace_summaries.get(message.id, _MessageTraceSummary())
+        items.append(
             MessageListItem(
                 id=message.id,
                 conversation_id=conversation.id,
@@ -491,35 +887,31 @@ async def list_messages(
                 is_public=conversation.is_public,
                 conversation_user_name=conversation_user_name_value,
                 conversation_user_email=conversation_user_email_value,
-                generation_time_ms=round(generation_time_ms_value)
-                if generation_time_ms_value is not None
-                else None,
-                input_tokens=input_tokens_value,
-                output_tokens=output_tokens_value,
+                generation_time_ms=(
+                    round(generation_time_ms_value)
+                    if generation_time_ms_value is not None
+                    else None
+                ),
+                input_tokens=trace_summary.input_tokens,
+                uncached_input_tokens=uncached_input_tokens(
+                    trace_summary.input_tokens, trace_summary.cache_read_input_tokens
+                ),
+                cache_read_input_tokens=trace_summary.cache_read_input_tokens,
+                output_tokens=trace_summary.output_tokens,
+                response_cost=trace_summary.response_cost if can_view_response_cost else None,
                 tool_call_count=tool_call_count_value,
-                guardrail_failure_count=guardrail_failure_count_value,
+                guardrail_failure_count=trace_summary.guardrail_failure_count,
                 guardrails_blocked=message.guardrails_blocked,
-                trace_id=trace_id_value,
-                span_id=span_id_value,
+                trace_id=trace_summary.trace_id,
+                span_id=trace_summary.span_id,
                 created_at=message.created_at,
                 updated_at=message.updated_at,
             )
-            for (
-                message,
-                conversation,
-                content_length_value,
-                conversation_user_name_value,
-                conversation_user_email_value,
-                generation_time_ms_value,
-                input_tokens_value,
-                output_tokens_value,
-                tool_call_count_value,
-                guardrail_failure_count_value,
-                trace_id_value,
-                span_id_value,
-            ) in rows
-        ],
-    )
+        )
+    response = MessageListPage(total=total, items=items)
+    # Release the reserved connection before FastAPI validates and serializes the response.
+    await session.commit()
+    return response
 
 
 def _guardrails_trace_span_condition() -> Any:
@@ -679,6 +1071,7 @@ async def _generate_transcript_title(
     user_prompt: str,
     assistant_message: str,
     *,
+    assistant_message_id: UUID,
     is_internal: bool,
     on_title: Callable[[str], Awaitable[None]] | None = None,
 ) -> None:
@@ -686,11 +1079,28 @@ async def _generate_transcript_title(
     transcript = f"{role_label}: {user_prompt}\n\nAssistant: {assistant_message}"
     fallback = build_fallback_title(user_prompt)
     title = await generate_conversation_title_from_transcript(
-        transcript, conversation_id=conversation_id, is_internal=is_internal, fallback=fallback
+        transcript,
+        conversation_id=conversation_id,
+        trigger_message_id=assistant_message_id,
+        is_internal=is_internal,
+        fallback=fallback,
     )
     await _persist_conversation_title(conversation_id, title)
     if on_title is not None:
         await on_title(title)
+
+
+async def _persist_grounding_source_failure(assistant_message_id: UUID) -> None:
+    try:
+        async with get_session() as grounding_session:
+            await mark_grounding_sources_failed(
+                grounding_session, assistant_message_id=assistant_message_id
+            )
+    except Exception:
+        logger.exception(
+            "Failed to persist grounding source failure for assistant message %s",
+            assistant_message_id,
+        )
 
 
 async def _select_and_store_grounding_sources_in_background(
@@ -699,16 +1109,118 @@ async def _select_and_store_grounding_sources_in_background(
     user_message_id: UUID,
     assistant_answer: str,
     sources: list[MessageSourceUsed],
-) -> tuple[list[MessageSourceUsed], str]:
-    async with get_session() as grounding_session:
-        selected_keys, status = await select_and_store_grounding_sources(
-            grounding_session,
-            assistant_message_id=assistant_message_id,
-            user_message_id=user_message_id,
-            assistant_answer=assistant_answer,
-            sources=sources,
+) -> tuple[list[MessageSourceUsed], GroundingSourceResultStatus]:
+    try:
+        async with get_session() as grounding_session:
+            selected_keys, status = await select_and_store_grounding_sources(
+                grounding_session,
+                assistant_message_id=assistant_message_id,
+                user_message_id=user_message_id,
+                assistant_answer=assistant_answer,
+                sources=sources,
+            )
+        return filter_sources_by_keys(sources, selected_keys), status
+    except asyncio.CancelledError:
+        await _persist_grounding_source_failure(assistant_message_id)
+        raise
+    except Exception:
+        logger.exception(
+            "Grounding source processing failed for assistant message %s", assistant_message_id
         )
-    return filter_sources_by_keys(sources, selected_keys), status
+        await _persist_grounding_source_failure(assistant_message_id)
+        return [], GROUNDING_SOURCE_STATUS_FAILED
+
+
+@router.get(
+    "/messages/internal/generation-attempts/{generation_attempt_id}",
+    response_model=GenerationAttemptResponse,
+)
+async def get_internal_generation_attempt(
+    generation_attempt_id: UUID, session: SessionDep, current_user: CurrentUser
+) -> GenerationAttemptResponse:
+    attempt = await session.get(ChatGenerationAttempt, generation_attempt_id)
+    if attempt is None or attempt.user_id != current_user.id:
+        raise HTTPException(status_code=404, detail="Generation attempt not found")
+    permission_map = await get_effective_permission_map(session, current_user)
+    await _ensure_generation_attempt_access(session, attempt, current_user, permission_map)
+    return GenerationAttemptResponse(
+        generation_attempt_id=attempt.id,
+        status=cast("GenerationAttemptStatus", attempt.status),
+        conversation_id=attempt.conversation_id,
+        user_message_id=attempt.user_message_id,
+        assistant_message_id=attempt.assistant_message_id,
+    )
+
+
+@router.post(
+    "/messages/internal/{message_id}/grounding/retry", response_model=GroundingSourcesResponse
+)
+async def retry_internal_message_grounding(
+    message_id: UUID, session: SessionDep, current_user: CurrentUser
+) -> GroundingSourcesResponse:
+    mark_current_span_for_otel_export()
+    permission_map = await get_effective_permission_map(session, current_user)
+    if not permission_map.get(PermissionKey.CHAT_VIEW_SOURCES, False):
+        raise HTTPException(status_code=403, detail="Access denied")
+
+    assistant_message = await session.get(Message, message_id)
+    if assistant_message is None or assistant_message.role != "assistant":
+        raise HTTPException(status_code=404, detail="Assistant message not found")
+
+    conversation = await _get_stream_conversation_or_404(session, assistant_message.conversation_id)
+    _ensure_conversation_author_access(conversation, current_user)
+    if conversation.kind != "chat":
+        raise HTTPException(
+            status_code=400,
+            detail="Source grounding retry is supported only for chat conversations",
+        )
+
+    metadata = await session.scalar(
+        select(AssistantMessageMetadata).where(
+            AssistantMessageMetadata.message_id == assistant_message.id
+        )
+    )
+    if metadata is None:
+        raise HTTPException(status_code=404, detail="Assistant message metadata not found")
+    if effective_grounding_source_status(metadata) != GROUNDING_SOURCE_STATUS_FAILED:
+        raise HTTPException(status_code=409, detail="Source grounding is not retryable")
+    if assistant_message.parent_id is None:
+        raise HTTPException(status_code=400, detail="Assistant message has no user parent")
+    user_message = await session.get(Message, assistant_message.parent_id)
+    if user_message is None or user_message.role != "user":
+        raise HTTPException(status_code=400, detail="Assistant message has no user parent")
+
+    tool_sources_used = await get_tool_sources_used_for_message(session, assistant_message.id)
+    grounding_source_candidates = with_canned_response_source_candidate(tool_sources_used)
+
+    await session.refresh(metadata, with_for_update=True)
+    if effective_grounding_source_status(metadata) != GROUNDING_SOURCE_STATUS_FAILED:
+        raise HTTPException(status_code=409, detail="Source grounding is not retryable")
+    metadata.grounding_source_keys = None
+    metadata.grounding_source_status = GROUNDING_SOURCE_STATUS_PENDING
+    await session.commit()
+
+    assistant_answer = (
+        assistant_message.guardrails_blocked_message or settings.GUARDRAILS_BLOCKED_MESSAGE
+        if assistant_message.guardrails_blocked
+        else assistant_message.content
+    )
+    with otel_export_scope(enabled=True):
+        grounding_task = asyncio.create_task(
+            _select_and_store_grounding_sources_in_background(
+                assistant_message_id=assistant_message.id,
+                user_message_id=user_message.id,
+                assistant_answer=assistant_answer,
+                sources=grounding_source_candidates,
+            )
+        )
+    _track_background_task(grounding_task)
+    grounding_sources_used, grounding_source_status = await asyncio.shield(grounding_task)
+    return GroundingSourcesResponse(
+        assistant_message_id=assistant_message.id,
+        grounding_sources_used=grounding_sources_used,
+        grounding_source_status=grounding_source_status,
+    )
 
 
 @router.post("/messages/internal/stream", response_class=StreamingResponse)
@@ -723,8 +1235,24 @@ async def send_internal_message_stream(
     )
     can_view_sources = permission_map.get(PermissionKey.CHAT_VIEW_SOURCES, False)
     can_view_tools = permission_map.get(PermissionKey.CHAT_VIEW_TOOLS, False)
+    conversation_kind = request.conversation_kind
+    parent_message_id = request.parent_message_id
+    parent_message_was_provided = "parent_message_id" in request.model_fields_set
+    draft_prompt_templates, prompt_context = _normalize_draft_prompt_templates(request)
+    generation_attempt_id = request.generation_attempt_id or uuid4()
+    request_fingerprint = generation_request_fingerprint(request)
 
-    if request.conversation_kind == "investigation":
+    existing_attempt = await _get_generation_attempt_if_exists(
+        session,
+        generation_attempt_id=generation_attempt_id,
+        current_user=current_user,
+        request_fingerprint=request_fingerprint,
+        permission_map=permission_map,
+    )
+    if existing_attempt is not None:
+        _raise_existing_generation_attempt(existing_attempt)
+
+    if conversation_kind == "investigation":
         _ensure_investigation_access(permission_map)
         if request.conversation_id is None:
             raise HTTPException(
@@ -732,20 +1260,95 @@ async def send_internal_message_stream(
                 detail="Investigation messages require an existing investigation conversation",
             )
 
-    if request.conversation_id is not None:
+    is_new_conversation = request.conversation_id is None
+    if is_new_conversation:
+        if request.is_regeneration:
+            raise HTTPException(
+                status_code=400, detail="Regeneration requires an explicit parent message"
+            )
+        if parent_message_id is not None:
+            raise HTTPException(
+                status_code=400, detail="A new conversation cannot have a parent message"
+            )
+        conversation = Conversation(
+            title=build_fallback_title(request.user_prompt),
+            user=False,
+            project="demo",
+            user_id=current_user.id,
+            is_public=False,
+            kind=conversation_kind,
+            prompt_source=(prompt_context.get("source") if prompt_context is not None else None),
+            prompt_context=prompt_context,
+        )
+        session.add(conversation)
+        await session.flush()
+    else:
+        assert request.conversation_id is not None
         conversation = await _get_stream_conversation_or_404(session, request.conversation_id)
-        _ensure_internal_access(conversation, current_user)
+        _ensure_conversation_author_access(conversation, current_user)
+        _ensure_draft_context_is_allowed(conversation, prompt_context)
         if conversation.kind == "investigation":
             _ensure_investigation_access(permission_map)
-            if conversation.user_id != current_user.id:
-                raise HTTPException(status_code=403, detail="Access denied")
-            request.conversation_kind = "investigation"
-        elif request.conversation_kind == "investigation":
+            conversation_kind = "investigation"
+        elif conversation_kind == "investigation":
             raise HTTPException(status_code=400, detail="Conversation is not an investigation")
-        if request.parent_message_id is None:
-            path = await get_current_branch_path(session, request.conversation_id)
-            if path:
-                request.parent_message_id = path[-1]
+        if request.is_regeneration and (
+            not parent_message_was_provided or parent_message_id is None
+        ):
+            raise HTTPException(
+                status_code=400, detail="Regeneration requires an explicit parent message"
+            )
+        if parent_message_id is None:
+            if not parent_message_was_provided:
+                path = await get_current_branch_path(session, request.conversation_id)
+                if path:
+                    parent_message_id = path[-1]
+        else:
+            parent_message = await session.get(Message, parent_message_id)
+            if parent_message is None:
+                raise HTTPException(status_code=404, detail="Parent message not found")
+            if parent_message.conversation_id != request.conversation_id:
+                raise HTTPException(
+                    status_code=400, detail="Parent message is not in this conversation"
+                )
+            if request.is_regeneration and parent_message.role != "user":
+                raise HTTPException(
+                    status_code=400, detail="Regeneration parent must be a user message"
+                )
+
+    conversation_id = conversation.id
+    conversation_title = conversation.title
+    now = current_time_utc()
+    inserted_attempt_id = await session.scalar(
+        postgres_insert(ChatGenerationAttempt)
+        .values(
+            id=generation_attempt_id,
+            user_id=current_user.id,
+            conversation_id=conversation_id,
+            request_fingerprint=request_fingerprint,
+            status=_GENERATION_ATTEMPT_PENDING,
+            created_at=now,
+            updated_at=now,
+        )
+        .on_conflict_do_nothing(index_elements=[ChatGenerationAttempt.id])
+        .returning(ChatGenerationAttempt.id)
+    )
+    if inserted_attempt_id is None:
+        await session.rollback()
+        existing_attempt = await _get_generation_attempt_if_exists(
+            session,
+            generation_attempt_id=generation_attempt_id,
+            current_user=current_user,
+            request_fingerprint=request_fingerprint,
+            permission_map=permission_map,
+        )
+        if existing_attempt is None:
+            raise HTTPException(status_code=409, detail="Generation attempt conflict")
+        _raise_existing_generation_attempt(existing_attempt)
+
+    # The durable pending attempt and any new conversation shell commit before
+    # provider waits, making an unknown stream outcome queryable.
+    await session.commit()
 
     queue: asyncio.Queue[str | None] = asyncio.Queue()
 
@@ -755,39 +1358,27 @@ async def send_internal_message_stream(
     async def worker() -> None:
         initial_title_task: asyncio.Task[None] | None = None
         transcript_title_task: asyncio.Task[None] | None = None
-        grounding_task: asyncio.Task[tuple[list[MessageSourceUsed], str]] | None = None
+        grounding_task: (
+            asyncio.Task[tuple[list[MessageSourceUsed], GroundingSourceResultStatus]] | None
+        ) = None
+        persisted_user_message_id: UUID | None = None
+        persisted_assistant_message: Message | MessageOut | None = None
+        assistant_message_emitted = False
         try:
             with otel_export_scope(enabled=True):
-                chatbot_settings, guardrail_settings = _get_model_settings(request)
-
-                conversation_id = request.conversation_id
-                is_new_conversation = conversation_id is None
+                chatbot_settings, guardrail_settings = _get_model_settings(
+                    request, conversation_kind=conversation_kind
+                )
 
                 if is_new_conversation:
-                    title = build_fallback_title(request.user_prompt)
-                    conversation = Conversation(
-                        title=title,
-                        user=False,
-                        project="demo",
-                        user_id=current_user.id,
-                        is_public=False,
-                        kind=request.conversation_kind,
-                    )
-                    session.add(conversation)
-                    await session.flush()
-                    conversation_id = conversation.id
-                    await session.commit()
-                    await session.refresh(conversation)
-
                     await emit(
                         "conversation",
                         {
                             "conversation_id": str(conversation_id),
-                            "conversation_title": conversation.title,
+                            "conversation_title": conversation_title,
                         },
                     )
                 else:
-                    assert conversation_id is not None
                     await emit("conversation", {"conversation_id": str(conversation_id)})
 
                 async def emit_title_update(title: str, stage: str) -> None:
@@ -797,7 +1388,6 @@ async def send_internal_message_stream(
                     )
 
                 if is_new_conversation:
-                    assert conversation_id is not None
                     with otel_export_scope(enabled=False):
                         initial_title_task = asyncio.create_task(
                             _generate_initial_title(
@@ -808,71 +1398,77 @@ async def send_internal_message_stream(
                             )
                         )
 
-                assert conversation_id is not None
-
                 async def emit_agent_event(event: str, payload: dict[str, Any]) -> None:
                     await emit(event, {"conversation_id": str(conversation_id), **payload})
 
-                if request.conversation_kind == "investigation":
-                    user_message_id, assistant_message_out = await handle_investigation_turn(
-                        project_name="demo",
-                        conversation_id=conversation_id,
-                        parent_message_id=request.parent_message_id,
-                        user_prompt=request.user_prompt,
-                        chatbot_model_settings=chatbot_settings,
-                        is_regeneration=request.is_regeneration,
-                        user_id=current_user.id,
-                        session=session,
-                        tool_session_factory=async_session_factory,
-                        prompt_set_version_id=request.prompt_set_version_id,
-                        event_emitter=emit_agent_event,
-                    )
-                else:
-                    user_message_id, assistant_message_out = await handle_conversation_turn(
-                        project_name="demo",
-                        conversation_id=conversation_id,
-                        parent_message_id=request.parent_message_id,
-                        user_prompt=request.user_prompt,
-                        chatbot_model_settings=chatbot_settings,
-                        guardrail_model_settings=guardrail_settings,
-                        is_regeneration=request.is_regeneration,
-                        is_internal=True,
-                        enable_guardrails=settings.ENABLE_GUARDRAILS,
-                        max_guardrails_retries=settings.MAX_GUARDRAILS_RETRIES,
-                        user_id=current_user.id,
-                        session=session,
-                        tool_session_factory=async_session_factory,
-                        prompt_set_version_id=request.prompt_set_version_id,
-                        event_emitter=emit_agent_event,
-                    )
+                with span_persistence_scope() as response_span_scope:
+                    if conversation_kind == "investigation":
+                        user_message_id, assistant_message_out = await handle_investigation_turn(
+                            project_name="demo",
+                            conversation_id=conversation_id,
+                            parent_message_id=parent_message_id,
+                            user_prompt=request.user_prompt,
+                            chatbot_model_settings=chatbot_settings,
+                            is_regeneration=request.is_regeneration,
+                            user_id=current_user.id,
+                            session=session,
+                            tool_session_factory=async_session_factory,
+                            prompt_set_version_id=request.prompt_set_version_id,
+                            event_emitter=emit_agent_event,
+                        )
+                    else:
+                        user_message_id, assistant_message_out = await handle_conversation_turn(
+                            project_name="demo",
+                            conversation_id=conversation_id,
+                            parent_message_id=parent_message_id,
+                            user_prompt=request.user_prompt,
+                            chatbot_model_settings=chatbot_settings,
+                            guardrail_model_settings=guardrail_settings,
+                            is_regeneration=request.is_regeneration,
+                            is_internal=True,
+                            enable_guardrails=settings.ENABLE_GUARDRAILS,
+                            max_guardrails_retries=settings.MAX_GUARDRAILS_RETRIES,
+                            user_id=current_user.id,
+                            session=session,
+                            tool_session_factory=async_session_factory,
+                            prompt_set_version_id=request.prompt_set_version_id,
+                            prompt_template_overrides=draft_prompt_templates,
+                            prompt_context=prompt_context,
+                            event_emitter=emit_agent_event,
+                        )
 
                 assert assistant_message_out.conversation_id is not None
 
                 conversation = await _get_stream_conversation_or_404(
                     session, assistant_message_out.conversation_id
                 )
+                if prompt_context is not None and conversation.prompt_source == "draft":
+                    conversation.prompt_context = prompt_context
 
-                assistant_message = (
-                    assistant_message_out.guardrails_blocked_message
-                    or settings.GUARDRAILS_BLOCKED_MESSAGE
-                    if assistant_message_out.guardrails_blocked
-                    else assistant_message_out.content
+                assistant_message = _visible_assistant_content(assistant_message_out)
+
+                generation_attempt = _require_generation_attempt(
+                    await session.get(ChatGenerationAttempt, generation_attempt_id)
                 )
-
+                generation_attempt.status = _GENERATION_ATTEMPT_COMPLETED
+                generation_attempt.user_message_id = user_message_id
+                generation_attempt.assistant_message_id = assistant_message_out.id
                 await session.commit()
-                await session.refresh(conversation)
-                await wait_for_pending_spans()
+                persisted_user_message_id = user_message_id
+                persisted_assistant_message = assistant_message_out
+                await wait_for_pending_spans(scope=response_span_scope)
                 response_metrics = await _get_message_response_diagnostics(
                     assistant_message_out.id,
                     include_cost=can_view_response_cost,
                     include_guardrails_failures=can_view_guardrails_failures,
                 )
+                await session.refresh(conversation)
                 tool_sources_used = await get_tool_sources_used_for_message(
                     session, assistant_message_out.id
                 )
                 grounding_source_status = None
                 grounding_sources_used: list[MessageSourceUsed] = []
-                if request.conversation_kind != "investigation":
+                if conversation_kind != "investigation":
                     grounding_source_candidates = with_canned_response_source_candidate(
                         tool_sources_used
                     )
@@ -935,6 +1531,7 @@ async def send_internal_message_stream(
                         ),
                     },
                 )
+                assistant_message_emitted = True
 
                 with otel_export_scope(enabled=False):
                     summary_task = asyncio.create_task(
@@ -949,6 +1546,7 @@ async def send_internal_message_stream(
                                 conversation.id,
                                 request.user_prompt,
                                 assistant_message,
+                                assistant_message_id=assistant_message_out.id,
                                 is_internal=True,
                                 on_title=lambda title: emit_title_update(title, "post_assistant"),
                             )
@@ -976,9 +1574,69 @@ async def send_internal_message_stream(
                     await initial_title_task
                 if transcript_title_task is not None:
                     await transcript_title_task
-        except Exception as exc:
-            logger.exception("Failed to stream internal message")
-            await emit("error", {"message": str(exc)})
+        except asyncio.CancelledError:
+            await session.rollback()
+            await _finalize_failed_generation_attempt(
+                session, generation_attempt_id=generation_attempt_id
+            )
+            raise
+        except Exception:
+            failure_retryable = False
+            if persisted_assistant_message is None:
+                with suppress(Exception):
+                    await session.rollback()
+                generation_attempt = await _finalize_failed_generation_attempt(
+                    session, generation_attempt_id=generation_attempt_id
+                )
+                failure_retryable = (
+                    generation_attempt is not None
+                    and generation_attempt.status == _GENERATION_ATTEMPT_FAILED
+                )
+                if (
+                    generation_attempt is not None
+                    and generation_attempt.status == _GENERATION_ATTEMPT_COMPLETED
+                    and generation_attempt.user_message_id is not None
+                    and generation_attempt.assistant_message_id is not None
+                ):
+                    recovered_message = await session.get(
+                        Message, generation_attempt.assistant_message_id
+                    )
+                    if recovered_message is not None:
+                        persisted_user_message_id = generation_attempt.user_message_id
+                        persisted_assistant_message = recovered_message
+            else:
+                with suppress(Exception):
+                    await session.commit()
+
+            if persisted_assistant_message is None:
+                logger.exception(
+                    "Internal message generation failed for attempt %s", generation_attempt_id
+                )
+            else:
+                logger.exception(
+                    "Internal message post-processing failed for completed attempt %s",
+                    generation_attempt_id,
+                )
+
+            if persisted_assistant_message is not None and not assistant_message_emitted:
+                assert persisted_user_message_id is not None
+                await emit(
+                    "assistant_message",
+                    _minimal_assistant_payload(
+                        user_message_id=persisted_user_message_id,
+                        assistant_message=persisted_assistant_message,
+                    ),
+                )
+                assistant_message_emitted = True
+            elif not assistant_message_emitted:
+                await emit(
+                    "error",
+                    {
+                        "code": "message_generation_failed",
+                        "message": _MESSAGE_GENERATION_FAILED_MESSAGE,
+                        "retryable": failure_retryable,
+                    },
+                )
         finally:
             await queue.put(None)
 

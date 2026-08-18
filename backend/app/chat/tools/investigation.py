@@ -149,6 +149,8 @@ def _empty_sources_diagnosis(
         findings.append("grounding source selection has no stored status")
     elif metadata.grounding_source_status == "no_selection":
         findings.append("grounding source selection ran but selected no display sources")
+    elif metadata.grounding_source_status == "failed":
+        findings.append("grounding source selection failed")
     if metadata.grounding_source_keys == []:
         findings.append("grounding_source_keys is an empty list")
     if tool_sources_count > 0 and selected_sources_count == 0:
@@ -442,7 +444,7 @@ async def inspect_investigated_conversation_branches(ctx: RunContext[Deps]) -> s
                     Message.created_at,
                 )
                 .where(Message.conversation_id == source.id)
-                .order_by(Message.created_at.asc())
+                .order_by(Message.created_at.asc(), Message.id.asc())
             )
         ).all()
 
@@ -450,6 +452,11 @@ async def inspect_investigated_conversation_branches(ctx: RunContext[Deps]) -> s
         "source_conversation_id": str(source.id),
         "source_title": source.title,
         "focused_message_id": str(focused_id) if focused_id is not None else None,
+        "active_root_message_id": (
+            str(source.active_root_message_id)
+            if source.active_root_message_id is not None
+            else None
+        ),
         "messages": [
             {
                 "id": str(message_id),

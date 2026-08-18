@@ -10,6 +10,7 @@ export const fetchPublicUsageSummary = async (
     api: AuthenticatedApi,
     timeRange: TimeRangeValue,
     customRange: CustomTimeRange,
+    signal?: AbortSignal,
 ): Promise<PublicUsageSummary> => {
     const params = new URLSearchParams(
         getTimeRangeQueryParams(timeRange, new Date(), customRange),
@@ -17,5 +18,6 @@ export const fetchPublicUsageSummary = async (
     const query = params.toString();
     return api.get<PublicUsageSummary>(
         query ? `/analytics/public-usage?${query}` : "/analytics/public-usage",
+        { signal },
     );
 };

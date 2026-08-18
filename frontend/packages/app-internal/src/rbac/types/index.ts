@@ -5,7 +5,7 @@ export interface RbacPermissionDefinition {
     category: string;
 }
 
-export interface RbacGroupPermission {
+interface RbacGroupPermission {
     key: string;
     enabled: boolean;
 }

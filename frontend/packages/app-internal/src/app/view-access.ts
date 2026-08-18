@@ -48,6 +48,9 @@ export const canAccessView = (
         case "analytics": {
             return hasPermission(user, "access_analytics");
         }
+        case "adoption": {
+            return hasPermission(user, "access_adoption");
+        }
         case "public-analytics": {
             return hasPermission(user, "access_public_analytics");
         }

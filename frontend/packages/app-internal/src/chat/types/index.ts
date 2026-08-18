@@ -5,7 +5,7 @@ import type {
     MessageSourceUsed,
 } from "@va/shared/types";
 
-export interface AssistantToolCallMessage {
+interface AssistantToolCallMessage {
     role: string;
     tool_calls?: {
         id?: string;
@@ -32,6 +32,11 @@ export interface MessageResponseCostBreakdown {
     outputCost?: number;
 }
 
+export interface DraftPromptTemplate {
+    filename: string;
+    content: string;
+}
+
 export interface MessageGuardrailsFailure {
     assistantMessage: string;
     llmGuardrailsFeedback?: string;
@@ -46,6 +51,19 @@ export interface MessageGenerationTiming {
     guardrailTimesMs?: number[];
     chatbotModel?: string;
     guardrailModel?: string;
+}
+
+export interface MessageSendOptions {
+    parentMessageId?: string | null;
+    isRegeneration?: boolean;
+    trimToMessageId?: string | null;
+    draftPromptTemplates?: DraftPromptTemplate[];
+}
+
+export interface MessageRetryRequest {
+    content: string;
+    modelOverrides?: ModelOverrides;
+    options: MessageSendOptions;
 }
 
 export interface Message {
@@ -67,6 +85,7 @@ export interface Message {
     toolSourcesUsed?: MessageSourceUsed[];
     groundingSourcesUsed?: MessageSourceUsed[];
     groundingSourceStatus?: GroundingSourceStatus | null;
+    retryRequest?: MessageRetryRequest;
 }
 
 export type Rating = "thumbs_up" | "thumbs_down";
@@ -94,12 +113,14 @@ export interface Chat {
     investigationSourceConversationId?: string;
     investigationSourceMessageId?: string;
     investigationSourceFeedbackId?: string;
+    promptSource?: string;
     messages: Message[];
     isLoading: boolean;
     hasUnread: boolean;
     loadingActivity?: LoadingActivityItem[];
     loadingActivityLog?: LoadingActivityLogEntry[];
     parentMessageId?: string;
+    hasPendingGeneration?: boolean;
 }
 
 export interface ChatListItem {
@@ -111,6 +132,7 @@ export interface ChatListItem {
     created_at: string;
     updated_at: string;
     is_public: boolean;
+    prompt_source?: string | null;
     user_name?: string;
     user_email?: string;
 }
@@ -120,18 +142,20 @@ export interface ChatDetailResponse {
     title?: string;
     summary?: string;
     is_public: boolean;
+    prompt_source?: string | null;
     user_name?: string;
     user_email?: string;
     investigation_source_conversation_id?: string | null;
     investigation_source_message_id?: string | null;
     investigation_source_feedback_id?: string | null;
+    has_pending_generation_attempt?: boolean;
     messages: {
         id: string;
         role: "user" | "assistant";
         content: string;
         guardrails_blocked?: boolean;
         guardrails_blocked_message?: string | null;
-        parent_id?: string;
+        parent_id?: string | null;
         created_at: string;
         assistant_tool_calls?: AssistantToolCallMessage[];
         generation_time_ms?: number;
@@ -156,11 +180,13 @@ export interface ChatDetailResponse {
             cache_read_input_cost?: number | null;
             output_cost?: number | null;
         } | null;
-        guardrails_failures?: {
-            assistant_message: string;
-            llm_guardrails_feedback?: string | null;
-            invalid_urls?: string[] | null;
-        }[] | null;
+        guardrails_failures?:
+            | {
+                  assistant_message: string;
+                  llm_guardrails_feedback?: string | null;
+                  invalid_urls?: string[] | null;
+              }[]
+            | null;
         tool_sources_used?: MessageSourceUsed[];
         grounding_sources_used?: MessageSourceUsed[];
         grounding_source_status?: GroundingSourceStatus | null;
@@ -170,35 +196,14 @@ export interface ChatDetailResponse {
     updated_at: string;
 }
 
-interface ConversationTreeMessageResponse {
-    id: string;
-    role: "user" | "assistant";
-    content: string;
-    created_at: string;
-    parent_id: string | null;
-    guardrails_blocked?: boolean;
-    guardrails_blocked_message?: string | null;
-    feedback?: MessageFeedback[];
-}
-
-interface ConversationTreeNodeResponse {
-    message: ConversationTreeMessageResponse;
-    message_tree_nodes: ConversationTreeNodeResponse[];
-}
-
 export interface ConversationTreeResponse {
-    message_tree_nodes: Record<string, ConversationTreeNodeResponse>;
+    messages: {
+        id: string;
+        role: "user" | "assistant";
+        content: string;
+        parent_id: string | null;
+    }[];
     current_branch_path: string[];
-    subtree_active_paths: Record<string, string[]>;
-}
-
-export interface ConversationDetailTreeResponse {
-    id: string;
-    title?: string;
-    user: boolean;
-    conversation_tree: ConversationTreeResponse;
-    created_at: string;
-    updated_at: string;
 }
 
 export interface ChatSearchResult {

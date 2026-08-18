@@ -1,6 +1,7 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback } from "react";
 
 import { useAuthenticatedApi } from "../../auth/hooks/use-authenticated-api";
+import { useAsyncData } from "../../lib/hooks/use-async-data";
 import type { CustomTimeRange, TimeRangeValue } from "../../lib/time-range";
 import type { ChatAnalyticsSummary } from "../../usage/types";
 import {
@@ -13,46 +14,37 @@ interface UseChatAnalyticsDataResult {
     loading: boolean;
     hasLoaded: boolean;
     error: string | undefined;
-    refresh: () => Promise<void>;
+    refresh: () => void;
 }
 
 export const useChatAnalyticsData = (
     platform: ChatAnalyticsPlatform,
     timeRange: TimeRangeValue,
     customRange: CustomTimeRange,
+    userEmail?: string,
+    userGroup?: "staff" | "devs",
 ): UseChatAnalyticsDataResult => {
     const api = useAuthenticatedApi();
-    const [summary, setSummary] = useState<ChatAnalyticsSummary | undefined>();
-    const [loading, setLoading] = useState(true);
-    const [hasLoaded, setHasLoaded] = useState(false);
-    const [error, setError] = useState<string | undefined>();
-
-    const refresh = useCallback(async () => {
-        setLoading(true);
-        setError(undefined);
-        try {
-            const data = await fetchChatAnalyticsSummary(
+    const load = useCallback(
+        async (signal: AbortSignal) =>
+            fetchChatAnalyticsSummary(
                 api,
                 platform,
                 timeRange,
                 customRange,
-            );
-            setSummary(data);
-        } catch (error_) {
-            setError(
-                error_ instanceof Error
-                    ? error_.message
-                    : "Failed to fetch analytics data",
-            );
-        } finally {
-            setLoading(false);
-            setHasLoaded(true);
-        }
-    }, [api, customRange, platform, timeRange]);
+                userEmail,
+                userGroup,
+                signal,
+            ),
+        [api, customRange, platform, timeRange, userEmail, userGroup],
+    );
+    const { data, loading, hasLoaded, error, refresh } = useAsyncData<
+        ChatAnalyticsSummary | undefined
+    >({
+        errorMessage: "Failed to fetch analytics data",
+        initialData: undefined,
+        load,
+    });
 
-    useEffect(() => {
-        void refresh();
-    }, [refresh]);
-
-    return { summary, loading, hasLoaded, error, refresh };
+    return { summary: data, loading, hasLoaded, error, refresh };
 };

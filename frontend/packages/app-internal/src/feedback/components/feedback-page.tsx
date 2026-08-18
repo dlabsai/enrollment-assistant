@@ -226,10 +226,9 @@ export const FeedbackPage = (): JSX.Element => {
     const [error, setError] = useState<string | undefined>();
     const [page, setPage] = useState<FeedbackListPageResponse | undefined>();
     const [refreshToken, setRefreshToken] = useState(0);
-    const [selectedFeedback, setSelectedFeedback] = useState<
+    const [selectedFeedbackState, setSelectedFeedbackState] = useState<
         FeedbackListRow | undefined
     >();
-    const [sheetOpen, setSheetOpen] = useState(false);
     const [detail, setDetail] = useState<ChatDetailResponse | undefined>();
     const [detailLoading, setDetailLoading] = useState(false);
     const [detailError, setDetailError] = useState<string | undefined>();
@@ -257,23 +256,6 @@ export const FeedbackPage = (): JSX.Element => {
             clearTimeout(timeout);
         };
     }, [userSearchInput]);
-
-    useEffect((): (() => void) => {
-        const timeout = setTimeout(() => {
-            setPageIndex(0);
-        }, 0);
-        return (): void => {
-            clearTimeout(timeout);
-        };
-    }, [
-        customRange,
-        pageSize,
-        rating,
-        selectedUser?.email,
-        selectedUser?.ownerGroup,
-        sorting,
-        timeRange,
-    ]);
 
     useEffect(() => {
         let isMounted = true;
@@ -365,15 +347,22 @@ export const FeedbackPage = (): JSX.Element => {
         };
     }, [api, buildFeedbackBaseParams, pageIndex, pageSize, refreshToken]);
 
-    const selectedConversationId =
-        selectedFeedback?.conversationId ?? search.chat;
-    const selectedMessageId = selectedFeedback?.messageId ?? search.message;
+    const selectedFeedback =
+        selectedFeedbackState !== undefined &&
+        selectedFeedbackState.conversationId === search.chat &&
+        selectedFeedbackState.messageId === search.message
+            ? selectedFeedbackState
+            : undefined;
+    const selectedConversationId = search.chat;
+    const selectedMessageId = search.message;
+    const sheetOpen =
+        selectedConversationId !== undefined && selectedMessageId !== undefined;
 
     useEffect((): (() => void) => {
         if (!sheetOpen || selectedConversationId === undefined) {
             return (): void => undefined;
         }
-        let isMounted = true;
+        let active = true;
         const loadDetail = async (): Promise<void> => {
             setDetailLoading(true);
             setDetailError(undefined);
@@ -386,11 +375,11 @@ export const FeedbackPage = (): JSX.Element => {
                         targetMessageId: selectedMessageId,
                     },
                 );
-                if (isMounted) {
+                if (active) {
                     setDetail(response);
                 }
             } catch (error_) {
-                if (isMounted) {
+                if (active) {
                     setDetailError(
                         error_ instanceof Error
                             ? error_.message
@@ -398,14 +387,14 @@ export const FeedbackPage = (): JSX.Element => {
                     );
                 }
             } finally {
-                if (isMounted) {
+                if (active) {
                     setDetailLoading(false);
                 }
             }
         };
         void loadDetail();
         return (): void => {
-            isMounted = false;
+            active = false;
         };
     }, [
         api,
@@ -414,17 +403,6 @@ export const FeedbackPage = (): JSX.Element => {
         selectedMessageId,
         sheetOpen,
     ]);
-
-    useEffect((): (() => void) => {
-        const timeout = setTimeout(() => {
-            if (search.chat !== undefined && search.message !== undefined) {
-                setSheetOpen(true);
-            }
-        }, 0);
-        return (): void => {
-            clearTimeout(timeout);
-        };
-    }, [search.chat, search.message]);
 
     useEffect(() => {
         const baseTitle = `${UNIVERSITY_NAME} Enrollment Assistant`;
@@ -456,6 +434,7 @@ export const FeedbackPage = (): JSX.Element => {
         selectedIndex >= 0 && selectedIndex < tableData.length - 1;
     const handleRatingChange = (value: FeedbackRatingFilter | null): void => {
         setRating(value ?? "all");
+        setPageIndex(0);
     };
     const handleOverlayFeedbackChange = useCallback((): void => {
         setRefreshToken((value) => value + 1);
@@ -501,11 +480,10 @@ export const FeedbackPage = (): JSX.Element => {
         setTracePanelOpen(true);
     }, []);
     const openFeedback = (row: FeedbackListRow): void => {
-        setSelectedFeedback(row);
+        setSelectedFeedbackState(row);
         setDetailError(undefined);
         setDetailLoading(true);
         setDetail(undefined);
-        setSheetOpen(true);
         void navigate({
             to: "/feedback",
             search: {
@@ -529,9 +507,11 @@ export const FeedbackPage = (): JSX.Element => {
             highlightPhrase={false}
             highlightQuery=""
             loading={detailLoading}
+            onDetailChange={setDetail}
             onFeedbackChange={handleOverlayFeedbackChange}
             onOpenTrace={openTracePanel}
             showSummary={showSummary}
+            source="chats"
         />
     );
 
@@ -584,7 +564,10 @@ export const FeedbackPage = (): JSX.Element => {
                         setCustomRange({});
                         setPageIndex(0);
                     }}
-                    onCustomRangeChange={setCustomRange}
+                    onCustomRangeChange={(value) => {
+                        setCustomRange(value);
+                        setPageIndex(0);
+                    }}
                     onRefresh={() => {
                         setRefreshToken((value) => value + 1);
                     }}
@@ -592,8 +575,12 @@ export const FeedbackPage = (): JSX.Element => {
                     onSelectedUserChange={(next) => {
                         setSelectedUser(next);
                         setUserPopoverOpen(false);
+                        setPageIndex(0);
                     }}
-                    onTimeRangeChange={setTimeRange}
+                    onTimeRangeChange={(value) => {
+                        setTimeRange(value);
+                        setPageIndex(0);
+                    }}
                     onUserPopoverOpenChange={setUserPopoverOpen}
                     onUserSearchInputChange={setUserSearchInput}
                     searchInput={searchInput}
@@ -630,13 +617,18 @@ export const FeedbackPage = (): JSX.Element => {
                             typeof updater === "function"
                                 ? updater({ pageIndex, pageSize })
                                 : updater;
-                        setPageIndex(next.pageIndex);
+                        setPageIndex(
+                            next.pageSize === pageSize ? next.pageIndex : 0,
+                        );
                         setPageSize(next.pageSize);
                     }}
                     onRowClick={(row) => {
                         openFeedback(row);
                     }}
-                    onSortingChange={setSorting}
+                    onSortingChange={(updater) => {
+                        setSorting(updater);
+                        setPageIndex(0);
+                    }}
                     pageCount={pageCount}
                     pagination={{ pageIndex, pageSize }}
                     rowCount={page?.total ?? 0}
@@ -645,11 +637,10 @@ export const FeedbackPage = (): JSX.Element => {
             </PageSection>
             <Sheet
                 onOpenChange={(open) => {
-                    setSheetOpen(open);
                     if (!open) {
                         setDetail(undefined);
                         setDetailError(undefined);
-                        setSelectedFeedback(undefined);
+                        setSelectedFeedbackState(undefined);
                         setTracePanelOpen(false);
                         setTraceMessageId(undefined);
                         void navigate({

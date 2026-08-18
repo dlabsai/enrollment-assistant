@@ -31,6 +31,7 @@ const appViewTitle: Record<AppView, string> = {
     usage: "Usage",
     traces: "Traces",
     analytics: "Chat Analytics",
+    adoption: "Adoption",
     "public-analytics": "Public Analytics",
     evals: "Eval Runner",
     "eval-cases": "Eval Cases",

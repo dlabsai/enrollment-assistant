@@ -10,6 +10,8 @@ import type {
     EvalCaseRunResultApi,
     EvalEvaluationResult,
     EvalEvaluationResultApi,
+    EvalInstructionVersion,
+    EvalInstructionVersionApi,
     EvalReportDetail,
     EvalReportDetailApi,
     EvalReportList,
@@ -100,12 +102,22 @@ const mapCaseDefinition = (
     active: caseDefinition.active,
     payload: caseDefinition.payload,
     payloadHash: caseDefinition.payload_hash,
+    verified: caseDefinition.verified,
     canonicalPayload: caseDefinition.canonical_payload,
     diskHash: caseDefinition.disk_hash,
     overlayBaseDiskHash: caseDefinition.overlay_base_disk_hash,
     hasDiskChanges: caseDefinition.has_disk_changes,
     createdAt: caseDefinition.created_at,
     updatedAt: caseDefinition.updated_at,
+});
+
+const mapInstructionVersion = (
+    version: EvalInstructionVersionApi,
+): EvalInstructionVersion => ({
+    id: version.id,
+    versionNumber: version.version_number,
+    name: version.name,
+    isDeployed: version.is_deployed,
 });
 
 const mapRunSnapshot = (snapshot: EvalRunSnapshotApi): EvalRunSnapshot => ({
@@ -159,6 +171,7 @@ const parseSsePayload = (data: string): Record<string, unknown> | undefined => {
 
 const isEvalStatus = (value: unknown): value is EvalRunStatusEvent["status"] =>
     value === "start" ||
+    value === "cancelling" ||
     value === "complete" ||
     value === "error" ||
     value === "cancelled";
@@ -200,11 +213,22 @@ export const fetchEvalReports = async (
 export const fetchEvalReport = async (
     api: AuthenticatedApi,
     reportId: string,
+    signal?: AbortSignal,
 ): Promise<EvalReportDetail> => {
     const response = await api.get<EvalReportDetailApi>(
         `/evals/reports/${encodeURIComponent(reportId)}`,
+        { signal },
     );
     return mapDetail(response);
+};
+
+export const fetchEvalInstructionVersions = async (
+    api: AuthenticatedApi,
+): Promise<EvalInstructionVersion[]> => {
+    const response = await api.get<EvalInstructionVersionApi[]>(
+        "/evals/instruction-versions",
+    );
+    return response.map((version) => mapInstructionVersion(version));
 };
 
 export const fetchEvalTestCases = async (
@@ -220,9 +244,11 @@ export const fetchEvalTestCases = async (
 export const fetchEvalCaseDefinitions = async (
     api: AuthenticatedApi,
     suite: EvalSuite,
+    signal?: AbortSignal,
 ): Promise<EvalCaseDefinition[]> => {
     const response = await api.get<EvalCaseDefinitionApi[]>(
         `/evals/cases?suite=${encodeURIComponent(suite)}`,
+        { signal },
     );
     return response.map((caseDefinition) => mapCaseDefinition(caseDefinition));
 };
@@ -410,6 +436,11 @@ export const runEvalStream = async (
             max_concurrency: request.maxConcurrency,
             pass_threshold: request.passThreshold,
             test_cases: request.testCases,
+            instructions_source: request.instructionsSource,
+            prompt_set_version_id: request.promptSetVersionId,
+            draft_base_prompt_set_version_id:
+                request.draftBasePromptSetVersionId,
+            draft_prompt_templates: request.draftPromptTemplates,
             chatbot_model: request.chatbotModel,
             guardrail_model: request.guardrailModel,
             evaluation_model: request.evaluationModel,

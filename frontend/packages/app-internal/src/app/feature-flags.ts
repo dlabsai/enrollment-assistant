@@ -8,6 +8,7 @@ export const APP_VIEWS = [
     "usage",
     "traces",
     "analytics",
+    "adoption",
     "public-analytics",
     "evals",
     "eval-cases",

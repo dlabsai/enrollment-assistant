@@ -3,6 +3,7 @@ import { type JSX, useCallback } from "react";
 
 import { PageHeader } from "../../components/page-header";
 import { PageSection, PageShell } from "../../components/page-shell";
+import { InstructionsStoreProvider } from "../../instructions/contexts/instructions-store-provider";
 import { DEFAULT_EVAL_REPORTS_SEARCH } from "../lib/reports-search-state";
 import { EvalsRunCard } from "./evals-run-card";
 
@@ -22,15 +23,17 @@ export const EvalsPage = (): JSX.Element => {
     );
 
     return (
-        <PageShell
-            className="min-h-0 overflow-hidden"
-            variant="dashboard"
-        >
-            <PageHeader title="Eval Runner" />
+        <InstructionsStoreProvider>
+            <PageShell
+                className="min-h-0 overflow-hidden"
+                variant="dashboard"
+            >
+                <PageHeader title="Eval Runner" />
 
-            <PageSection className="flex min-h-0 flex-1">
-                <EvalsRunCard onOpenReport={handleOpenReport} />
-            </PageSection>
-        </PageShell>
+                <PageSection className="flex min-h-0 flex-1">
+                    <EvalsRunCard onOpenReport={handleOpenReport} />
+                </PageSection>
+            </PageShell>
+        </InstructionsStoreProvider>
     );
 };

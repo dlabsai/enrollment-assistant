@@ -20,14 +20,6 @@ const tableTimestampFormatter = new Intl.DateTimeFormat(undefined, {
     minute: "2-digit",
 });
 
-const timestampWithSecondsFormatter = new Intl.DateTimeFormat(undefined, {
-    month: "short",
-    day: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-});
-
 const toDate = (value: number | string | Date): Date =>
     value instanceof Date ? value : new Date(value);
 
@@ -57,14 +49,4 @@ export const formatTableTimestamp = (
     }
     const date = toDate(value);
     return isValidDate(date) ? tableTimestampFormatter.format(date) : "-";
-};
-
-export const formatTimestampWithSeconds = (
-    value: number | string | Date | null | undefined,
-): string => {
-    if (value === null || value === undefined || value === "") {
-        return "-";
-    }
-    const date = toDate(value);
-    return isValidDate(date) ? timestampWithSecondsFormatter.format(date) : "-";
 };

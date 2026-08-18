@@ -29,7 +29,10 @@ from app.chat.models import (
     load_website_programs,
 )
 from app.chat.tools.utils import get_azure_openai_client
-from app.chat.url_guardrails import refresh_guardrail_url_registries
+from app.chat.url_guardrails import (
+    clear_guardrail_url_registry_cache,
+    refresh_guardrail_url_registries,
+)
 from app.core.db import get_session
 from app.models import Document, DocumentContentChunk, DocumentType
 from app.otel_genai import set_embedding_response_attributes
@@ -1052,6 +1055,7 @@ async def build_search_db(
         if not dry_run:
             await refresh_guardrail_url_registries(session)
             await session.commit()
+            clear_guardrail_url_registry_cache()
             telemetry.info("Database changes committed successfully")
         else:
             telemetry.info("DRY RUN complete - no changes committed")

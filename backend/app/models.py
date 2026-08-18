@@ -7,7 +7,18 @@ from typing import TYPE_CHECKING, Any
 from uuid import UUID, uuid4
 
 from pgvector.sqlalchemy import Vector
-from sqlalchemy import Boolean, DateTime, ForeignKey, Index, Integer, String, Text
+from sqlalchemy import (
+    BigInteger,
+    Boolean,
+    DateTime,
+    ForeignKey,
+    Identity,
+    Index,
+    Integer,
+    String,
+    Text,
+    text,
+)
 from sqlalchemy import Enum as SAEnum
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.asyncio import AsyncAttrs
@@ -106,6 +117,7 @@ class EvalTestCaseOverlay(Base):
     case_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
     case_data: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
     is_deleted: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    verified: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     base_disk_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
     created_by_user_id: Mapped[UUID | None] = mapped_column(
         ForeignKey("user.id", ondelete="SET NULL"), nullable=True, index=True
@@ -157,6 +169,23 @@ class OtelSpan(Base):
     conversation_id: Mapped[UUID | None] = mapped_column(nullable=True, index=True)
     message_id: Mapped[UUID | None] = mapped_column(nullable=True, index=True)
     total_time: Mapped[float | None] = mapped_column(nullable=True)
+
+    __table_args__ = (
+        Index(
+            "ix_otel_span_message_start_created_desc",
+            "message_id",
+            text("start_time DESC NULLS LAST"),
+            text("created_at DESC"),
+            postgresql_include=["trace_id", "span_id"],
+            postgresql_where=text("message_id IS NOT NULL"),
+        ),
+        Index(
+            "ix_otel_span_conversation_trace",
+            "conversation_id",
+            "trace_id",
+            postgresql_where=text("conversation_id IS NOT NULL"),
+        ),
+    )
 
 
 class Rating(StrEnum):
@@ -259,6 +288,8 @@ class Conversation(Base):
     user: Mapped[bool] = mapped_column(default=False)
     project: Mapped[str] = mapped_column(nullable=False)
     summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    prompt_source: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
+    prompt_context: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
     kind: Mapped[str] = mapped_column(String(32), default="chat", nullable=False, index=True)
     investigation_source_conversation_id: Mapped[UUID | None] = mapped_column(
         ForeignKey("conversation.id", ondelete="SET NULL"), nullable=True, index=True
@@ -268,6 +299,9 @@ class Conversation(Base):
     )
     investigation_source_feedback_id: Mapped[UUID | None] = mapped_column(
         ForeignKey("message_feedback.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    active_root_message_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("message.id", ondelete="SET NULL"), nullable=True, index=True
     )
     is_public: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False, index=True)
     user_id: Mapped[UUID | None] = mapped_column(
@@ -309,6 +343,23 @@ class PublicChatContact(Base):
     )
 
 
+class ChatGenerationAttempt(Base):
+    user_id: Mapped[UUID] = mapped_column(
+        ForeignKey("user.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    conversation_id: Mapped[UUID] = mapped_column(
+        ForeignKey("conversation.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    request_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    user_message_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("message.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    assistant_message_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("message.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+
+
 class AssistantMessageMetadata(Base):
     message_id: Mapped[UUID] = mapped_column(
         ForeignKey("message.id", ondelete="CASCADE"), nullable=False, unique=True, index=True
@@ -318,6 +369,8 @@ class AssistantMessageMetadata(Base):
     system_prompt_rendered: Mapped[str] = mapped_column(nullable=False)
     conversation_turn: Mapped[int] = mapped_column(nullable=False)
     total_time: Mapped[float | None] = mapped_column(nullable=True)
+    chatbot_model_settings: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    chatbot_time: Mapped[float | None] = mapped_column(nullable=True)
     guardrail_model_settings: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
     guardrail_time: Mapped[float | None] = mapped_column(nullable=True)
     chatbot_times: Mapped[list[float] | None] = mapped_column(JSONB, nullable=True)
@@ -368,6 +421,14 @@ class Message(Base):
     )
     assistant_message_metadata: Mapped[AssistantMessageMetadata | None] = relationship(
         back_populates="message", cascade="all, delete-orphan", uselist=False
+    )
+
+    __table_args__ = (
+        Index(
+            "ix_message_conversation_created_at_desc", "conversation_id", text("created_at DESC")
+        ),
+        Index("ix_message_created_at_desc_id", text("created_at DESC"), "id"),
+        Index("ix_message_role_created_at_desc_id", "role", text("created_at DESC"), "id"),
     )
 
 
@@ -500,6 +561,55 @@ class DocumentContentChunk(Base):
 class GuardrailUrlRegistry(Base):
     key: Mapped[str] = mapped_column(String, nullable=False, unique=True, index=True)
     urls: Mapped[list[str]] = mapped_column(JSONB, nullable=False)
+
+
+class EvalRunJob(Base):
+    run_id: Mapped[str] = mapped_column(String(32), nullable=False, unique=True, index=True)
+    started_by_user_id: Mapped[UUID] = mapped_column(
+        ForeignKey("user.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    suite: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    report_id: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=current_time_utc, nullable=False, index=True
+    )
+    heartbeat_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=current_time_utc, nullable=False, index=True
+    )
+    completed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, index=True
+    )
+
+    events: Mapped[list[EvalRunEvent]] = relationship(
+        back_populates="job", cascade="all, delete-orphan", order_by="EvalRunEvent.sequence"
+    )
+
+    __table_args__ = (
+        Index("ix_eval_run_job_user_started", "started_by_user_id", "started_at"),
+        Index(
+            "uq_eval_run_job_active_user",
+            "started_by_user_id",
+            unique=True,
+            postgresql_where=text("status IN ('start', 'cancelling')"),
+        ),
+    )
+
+
+class EvalRunEvent(Base):
+    sequence: Mapped[int] = mapped_column(
+        BigInteger, Identity(), nullable=False, unique=True, index=True
+    )
+    run_id: Mapped[str] = mapped_column(
+        ForeignKey("eval_run_job.run_id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    event_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+
+    job: Mapped[EvalRunJob] = relationship(back_populates="events")
+
+    __table_args__ = (Index("ix_eval_run_event_run_sequence", "run_id", "sequence", unique=True),)
 
 
 class RagBuildJob(Base):

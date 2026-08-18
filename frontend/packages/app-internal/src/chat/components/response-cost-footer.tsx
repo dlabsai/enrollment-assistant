@@ -8,8 +8,8 @@ import { CircleDollarSign } from "lucide-react";
 import type { JSX } from "react";
 
 import {
-    formatEstimatedUsdCost,
     formatLocaleNumber,
+    formatUsdCost,
 } from "../../lib/number-format";
 import type { Message } from "../types";
 
@@ -19,15 +19,15 @@ const formatTokenCount = (value: number | undefined): string =>
 const responseCostRows = (message: Message): { label: string; value: string }[] => [
     {
         label: "Uncached input",
-        value: `${formatTokenCount(message.responseUsage?.uncachedInputTokens)} · ${formatEstimatedUsdCost(message.responseCostBreakdown?.inputCost)}`,
+        value: `${formatTokenCount(message.responseUsage?.uncachedInputTokens)} · ${formatUsdCost(message.responseCostBreakdown?.inputCost)}`,
     },
     {
         label: "Cached input",
-        value: `${formatTokenCount(message.responseUsage?.cacheReadInputTokens)} · ${formatEstimatedUsdCost(message.responseCostBreakdown?.cacheReadInputCost)}`,
+        value: `${formatTokenCount(message.responseUsage?.cacheReadInputTokens)} · ${formatUsdCost(message.responseCostBreakdown?.cacheReadInputCost)}`,
     },
     {
         label: "Output",
-        value: `${formatTokenCount(message.responseUsage?.outputTokens)} · ${formatEstimatedUsdCost(message.responseCostBreakdown?.outputCost)}`,
+        value: `${formatTokenCount(message.responseUsage?.outputTokens)} · ${formatUsdCost(message.responseCostBreakdown?.outputCost)}`,
     },
 ];
 
@@ -46,7 +46,7 @@ export const renderResponseCostFooter = (
     const content = (
         <span className="inline-flex items-center gap-1">
             <CircleDollarSign className="size-3" />
-            {formatEstimatedUsdCost(message.responseCost)}
+            {formatUsdCost(message.responseCost)}
         </span>
     );
 

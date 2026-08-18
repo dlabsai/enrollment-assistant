@@ -5,7 +5,12 @@ import {
 } from "../../components/data-table-constants";
 import type { EvalSuite } from "../types";
 
-export type EvalCasesSortBy = "case_id" | "message" | "expected" | "criteria";
+export type EvalCasesSortBy =
+    | "case_id"
+    | "message"
+    | "verified"
+    | "expected"
+    | "criteria";
 
 export interface EvalCasesSearch {
     caseId: string | undefined;
@@ -60,6 +65,7 @@ const parsePageSize = (
 export const isEvalCasesSortBy = (value: unknown): value is EvalCasesSortBy =>
     value === "case_id" ||
     value === "message" ||
+    value === "verified" ||
     value === "expected" ||
     value === "criteria";
 

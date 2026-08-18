@@ -6,6 +6,7 @@ interface ImportMeta {
         readonly VITE_API_URL: string;
         readonly VITE_VISIBLE_BY_DEFAULT: string;
         readonly VITE_ENVIRONMENT: string;
+        readonly VITE_HELP_URL?: string;
         readonly VITE_UNIVERSITY_NAME: string;
         readonly VITE_UNIVERSITY_WEBSITE_URL: string;
         readonly VITE_ADMISSIONS_PHONE: string;

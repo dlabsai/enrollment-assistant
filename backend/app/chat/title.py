@@ -7,11 +7,16 @@ from pydantic_ai.messages import TextPart
 
 from app.chat.agents import get_pydantic_ai_model_name
 from app.chat.config import TEMPLATES_DIR
+from app.chat.engine_utils import (
+    build_max_tokens_settings,
+    set_direct_model_response_span_attributes,
+)
 from app.chat.template_utils import get_runtime_jinja_environment
 from app.core.config import settings
 from app.core.db import get_session
 from app.models import Conversation, PromptSetScope
-from app.otel_genai import genai_agent_name_scope
+from app.otel import otel_export_scope
+from app.otel_genai import genai_helper_trace_scope
 
 if TYPE_CHECKING:
     from uuid import UUID
@@ -62,12 +67,34 @@ async def _render_title_transcript_prompt(transcript: str, *, is_internal: bool)
     return template.render(transcript=transcript)
 
 
-async def _run_title_prompt(prompt: str, *, agent_name: str) -> str:
-    with genai_agent_name_scope(agent_name):
+async def _run_title_prompt(
+    prompt: str,
+    *,
+    agent_name: str,
+    conversation_id: UUID | None = None,
+    trigger_message_id: UUID | None = None,
+    is_internal: bool | None = None,
+) -> str:
+    configured_model = settings.TITLE_MODEL
+    with (
+        otel_export_scope(enabled=True),
+        genai_helper_trace_scope(
+            agent_name,
+            model=configured_model,
+            conversation_id=str(conversation_id) if conversation_id is not None else None,
+            trigger_message_id=(
+                str(trigger_message_id) if trigger_message_id is not None else None
+            ),
+            is_internal=is_internal,
+        ) as span,
+    ):
         response = await model_request(
-            get_pydantic_ai_model_name(settings.SUMMARIZER_MODEL),
+            get_pydantic_ai_model_name(configured_model),
             [ModelRequest.user_text_prompt(prompt)],
+            model_settings=build_max_tokens_settings(settings.TITLE_MODEL_MAX_TOKENS),
+            instrument=False,
         )
+        set_direct_model_response_span_attributes(span, response, configured_model=configured_model)
 
     first_part = response.parts[0]
     if isinstance(first_part, TextPart):
@@ -78,13 +105,23 @@ async def _run_title_prompt(prompt: str, *, agent_name: str) -> str:
 
 
 async def generate_conversation_title(
-    user_prompt: str, *, conversation_id: UUID | None = None, is_internal: bool = False
+    user_prompt: str,
+    *,
+    conversation_id: UUID | None = None,
+    trigger_message_id: UUID | None = None,
+    is_internal: bool = False,
 ) -> str:
     fallback = build_fallback_title(user_prompt)
     prompt = await _render_title_prompt(user_prompt.strip(), is_internal=is_internal)
 
     try:
-        output = await _run_title_prompt(prompt, agent_name="title")
+        output = await _run_title_prompt(
+            prompt,
+            agent_name="title",
+            conversation_id=conversation_id,
+            trigger_message_id=trigger_message_id,
+            is_internal=is_internal,
+        )
         return _normalize_title(output, fallback)
     except Exception:
         logger.exception(
@@ -98,6 +135,7 @@ async def generate_conversation_title_from_transcript(
     transcript: str,
     *,
     conversation_id: UUID | None = None,
+    trigger_message_id: UUID | None = None,
     is_internal: bool = False,
     fallback: str,
 ) -> str:
@@ -108,7 +146,13 @@ async def generate_conversation_title_from_transcript(
     prompt = await _render_title_transcript_prompt(normalized_transcript, is_internal=is_internal)
 
     try:
-        output = await _run_title_prompt(prompt, agent_name="title_transcript")
+        output = await _run_title_prompt(
+            prompt,
+            agent_name="title_transcript",
+            conversation_id=conversation_id,
+            trigger_message_id=trigger_message_id,
+            is_internal=is_internal,
+        )
         return _normalize_title(output, fallback)
     except Exception:
         logger.exception(

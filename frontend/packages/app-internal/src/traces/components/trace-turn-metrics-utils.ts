@@ -1,5 +1,4 @@
 import { formatLocaleNumber } from "../../lib/number-format";
-import { formatDurationMs } from "../lib/trace-utils";
 
 export const getNumericAttribute = (
     attributes: Record<string, unknown>,
@@ -38,15 +37,3 @@ export const formatOffsetMs = (value: number | undefined): string => {
         maximumFractionDigits: 2,
     })}s`;
 };
-
-export const formatOffset = (value: number | undefined): string => {
-    if (value === undefined) {
-        return "-";
-    }
-    if (value <= 0) {
-        return "0ms";
-    }
-    return formatDurationMs(value);
-};
-
-export { formatTimestampWithSeconds } from "../../lib/date-format";

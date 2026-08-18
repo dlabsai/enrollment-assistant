@@ -12,25 +12,36 @@ from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.routes import evals as evals_routes
-from app.core.rbac import SystemGroupSlug, get_group_for_slug
+from app.core.rbac import (
+    PermissionKey,
+    SystemGroupSlug,
+    get_group_for_slug,
+    replace_user_permission_overrides,
+)
 from app.core.security import get_password_hash
 from app.evals import rag_data, test_db
+from app.evals.run_tracking import EvalRunSnapshot, PersistedEvalRunEvent
 from app.evals.runtime import EvalRunRequestConfig, EvalSuite
-from app.evals.service import (
-    EvalRunEvent,
-    EvalRunJob,
-    EvalRunManager,
-    EvalRunPaths,
-    EvalRunSnapshot,
-    run_eval_in_process,
-)
+from app.evals.service import EvalRunJob, EvalRunPaths
 from app.main import app
-from app.models import EvalCaseResult, EvalCaseRunResult, EvalRunRecord, OtelSpan, User
+from app.models import (
+    EvalCaseResult,
+    EvalCaseRunResult,
+    EvalRunRecord,
+    OtelSpan,
+    PromptSetScope,
+    PromptSetVersion,
+    User,
+)
 from tests.api.auth_helpers import authenticate_client
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
     from pathlib import Path
+
+
+def _format_test_sse(event: str, payload: dict[str, object]) -> str:
+    return f"event: {event}\ndata: {json.dumps(payload)}\n\n"
 
 
 def _parse_sse_events(payload: str) -> list[tuple[str, dict[str, object]]]:
@@ -68,6 +79,54 @@ async def _create_user(
     await session.commit()
     await session.refresh(user)
     return user
+
+
+def _eval_trace_span(
+    *,
+    trace_id: str,
+    span_id: str,
+    name: str,
+    started_at: datetime,
+    parent_span_id: str | None = None,
+    kind: str = "INTERNAL",
+    duration_ms: float = 1000,
+    attributes: dict[str, object] | None = None,
+    request_model: str | None = None,
+    input_tokens: int | None = None,
+    output_tokens: int | None = None,
+    total_cost: float | None = None,
+    is_ai: bool = False,
+) -> OtelSpan:
+    return OtelSpan(
+        trace_id=trace_id,
+        span_id=span_id,
+        parent_span_id=parent_span_id,
+        name=name,
+        kind=kind,
+        status_code="OK",
+        status_message=None,
+        start_time=started_at,
+        end_time=started_at + timedelta(milliseconds=duration_ms),
+        span_time=started_at,
+        duration_ms=duration_ms,
+        attributes=attributes or {},
+        events=None,
+        links=None,
+        resource=None,
+        scope=None,
+        request_model=request_model,
+        provider_name=None,
+        server_address=None,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        total_cost=total_cost,
+        is_ai=is_ai,
+        is_embedding=False,
+        is_internal=True,
+        conversation_id=None,
+        message_id=None,
+        total_time=None,
+    )
 
 
 @pytest.mark.asyncio
@@ -123,6 +182,83 @@ async def test_evals_cases_include_public_chatbot_payloads(
     cases = {item["case_id"]: item for item in response.json()}
     assert cases["public_ai_program_grounded_search"]["payload"]["is_internal"] is False
     assert cases["internal_academic_policies_catalog_source"]["payload"]["is_internal"] is True
+
+
+@pytest.mark.asyncio
+async def test_evals_lists_internal_assistant_instruction_versions_for_eval_only_user(
+    transactional_session: AsyncSession,
+) -> None:
+    admin = await _create_user(
+        transactional_session, group_slug=SystemGroupSlug.ADMIN, email_prefix="eval-admin"
+    )
+    eval_user = await _create_user(
+        transactional_session, group_slug=SystemGroupSlug.USER, email_prefix="eval-only"
+    )
+    await replace_user_permission_overrides(
+        transactional_session, eval_user, {PermissionKey.ACCESS_EVALS: True}
+    )
+    await transactional_session.commit()
+    internal_version = PromptSetVersion(
+        version_number=2,
+        name="Internal candidate",
+        created_by_id=admin.id,
+        is_deployed=True,
+        is_internal=True,
+        scope=PromptSetScope.ASSISTANT,
+    )
+    older_internal_version = PromptSetVersion(
+        version_number=1,
+        name="Older internal candidate",
+        created_by_id=admin.id,
+        is_deployed=False,
+        is_internal=True,
+        scope=PromptSetScope.ASSISTANT,
+    )
+    transactional_session.add_all(
+        [
+            internal_version,
+            older_internal_version,
+            PromptSetVersion(
+                version_number=1,
+                name="Public candidate",
+                created_by_id=admin.id,
+                is_deployed=False,
+                is_internal=False,
+                scope=PromptSetScope.ASSISTANT,
+            ),
+            PromptSetVersion(
+                version_number=1,
+                name="Summary candidate",
+                created_by_id=admin.id,
+                is_deployed=False,
+                is_internal=True,
+                scope=PromptSetScope.SUMMARY,
+            ),
+        ]
+    )
+    await transactional_session.commit()
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://testserver"
+    ) as client:
+        authenticate_client(client, eval_user.id)
+        response = await client.get("/api/evals/instruction-versions")
+
+    assert response.status_code == 200
+    assert response.json() == [
+        {
+            "id": str(internal_version.id),
+            "version_number": 2,
+            "name": "Internal candidate",
+            "is_deployed": True,
+        },
+        {
+            "id": str(older_internal_version.id),
+            "version_number": 1,
+            "name": "Older internal candidate",
+            "is_deployed": False,
+        },
+    ]
 
 
 @pytest.mark.asyncio
@@ -261,8 +397,6 @@ async def test_evals_reports_list_and_detail(
     assert reports[0]["model_configs"] == {"chatbot": {"model": "gpt-test", "temperature": 0.1}}
     assert reports[0]["pass_rate_average"] == 0.0
     assert reports[0]["duration_median_average"] == 0.25
-    assert "filename" not in reports[0]
-    assert "content" not in reports[0]
 
     assert paged_response.status_code == 200
     paged_payload = paged_response.json()
@@ -282,8 +416,6 @@ async def test_evals_reports_list_and_detail(
         "value": False,
         "reason": "nope",
     }
-    assert "filename" not in detail
-    assert "content" not in detail
 
 
 @pytest.mark.asyncio
@@ -294,67 +426,70 @@ async def test_eval_trace_routes_read_test_database(
         transactional_session, group_slug=SystemGroupSlug.ADMIN, email_prefix="eval-trace-admin"
     )
     trace_id = "abcdef1234567890abcdef1234567890"
+    started_at = datetime(2026, 4, 17, 12, 0, tzinfo=UTC)
     transactional_session.add_all(
         [
-            OtelSpan(
+            _eval_trace_span(
                 trace_id=trace_id,
                 span_id="1111111111111111",
-                parent_span_id=None,
                 name="Evaluation: guardrails_eval",
-                kind="INTERNAL",
-                status_code="OK",
-                status_message=None,
-                start_time=datetime(2026, 4, 17, 12, 0, tzinfo=UTC),
-                end_time=datetime(2026, 4, 17, 12, 0, 1, tzinfo=UTC),
-                span_time=datetime(2026, 4, 17, 12, 0, tzinfo=UTC),
-                duration_ms=1000,
-                attributes={},
-                events=None,
-                links=None,
-                resource=None,
-                scope=None,
-                request_model=None,
-                provider_name=None,
-                server_address=None,
-                input_tokens=None,
-                output_tokens=None,
-                total_cost=None,
-                is_ai=False,
-                is_embedding=False,
-                is_internal=True,
-                conversation_id=None,
-                message_id=None,
-                total_time=None,
+                started_at=started_at,
+                total_cost=0.01,
             ),
-            OtelSpan(
+            _eval_trace_span(
+                trace_id=trace_id,
+                span_id="3333333333333333",
+                parent_span_id="1111111111111111",
+                name="eval_run case_a #1",
+                started_at=started_at,
+                attributes={"app.eval.case_name": "case_a", "app.eval.run_index": 1},
+            ),
+            _eval_trace_span(
+                trace_id=trace_id,
+                span_id="4444444444444444",
+                parent_span_id="3333333333333333",
+                name="gen_ai.evaluation.result",
+                started_at=started_at + timedelta(seconds=1),
+                duration_ms=1,
+                attributes={
+                    "gen_ai.evaluation.name": "passed",
+                    "gen_ai.evaluation.score.label": "fail",
+                    "gen_ai.evaluation.score.value": 0.0,
+                    "app.eval.case_name": "case_a",
+                    "app.eval.run_index": 1,
+                    "app.eval.evaluator.name": "judge",
+                    "app.eval.result.kind": "assertion",
+                },
+            ),
+            _eval_trace_span(
                 trace_id=trace_id,
                 span_id="2222222222222222",
-                parent_span_id="1111111111111111",
+                parent_span_id="3333333333333333",
                 name="Chat Completion with 'gpt-test'",
+                started_at=started_at,
                 kind="CLIENT",
-                status_code="OK",
-                status_message=None,
-                start_time=datetime(2026, 4, 17, 12, 0, tzinfo=UTC),
-                end_time=datetime(2026, 4, 17, 12, 0, 1, tzinfo=UTC),
-                span_time=datetime(2026, 4, 17, 12, 0, tzinfo=UTC),
                 duration_ms=500,
-                attributes={},
-                events=None,
-                links=None,
-                resource=None,
-                scope=None,
                 request_model="gpt-test",
-                provider_name=None,
-                server_address=None,
                 input_tokens=10,
                 output_tokens=20,
-                total_cost=None,
+                total_cost=0.02,
                 is_ai=True,
-                is_embedding=False,
-                is_internal=True,
-                conversation_id=None,
-                message_id=None,
-                total_time=None,
+            ),
+            _eval_trace_span(
+                trace_id="00000000000000000000000000000000",
+                span_id="5555555555555555",
+                name="Chat Completion with 'gpt-older'",
+                started_at=started_at - timedelta(seconds=30),
+                kind="CLIENT",
+                duration_ms=250,
+                request_model="gpt-older",
+                is_ai=True,
+            ),
+            _eval_trace_span(
+                trace_id="ffffffffffffffffffffffffffffffff",
+                span_id="6666666666666666",
+                name="Non-AI setup",
+                started_at=started_at + timedelta(seconds=30),
             ),
         ]
     )
@@ -365,38 +500,62 @@ async def test_eval_trace_routes_read_test_database(
         yield transactional_session
 
     monkeypatch.setattr(evals_routes, "eval_report_session", fake_eval_report_session)
+    index_params = {
+        "ai_only": "true",
+        "start": "2026-04-17T11:59:00Z",
+        "end": "2026-04-17T12:01:00Z",
+        "limit": 1,
+        "sort_by": "latest_start",
+        "descending": "true",
+    }
 
     async with AsyncClient(
         transport=ASGITransport(app=app), base_url="http://testserver"
     ) as client:
         authenticate_client(client, admin.id)
         index_response = await client.get(
-            "/api/evals/trace-index",
-            params={
-                "ai_only": "true",
-                "start": "2026-04-17T11:59:00Z",
-                "end": "2026-04-17T12:01:00Z",
-            },
+            "/api/evals/trace-index", params={**index_params, "offset": 0}
+        )
+        older_index_response = await client.get(
+            "/api/evals/trace-index", params={**index_params, "offset": 1}
+        )
+        empty_index_response = await client.get(
+            "/api/evals/trace-index", params={**index_params, "offset": 2}
         )
         detail_response = await client.get(f"/api/evals/trace/{trace_id}")
 
     assert index_response.status_code == 200
     index_payload = index_response.json()
-    assert index_payload["total"] == 1
+    assert index_payload["total"] == 2
     assert index_payload["items"][0]["trace_id"] == trace_id
     assert index_payload["items"][0]["model"] == "gpt-test"
+    assert index_payload["items"][0]["is_error"] is False
+    assert index_payload["items"][0]["failed_result_count"] == 1
+    assert older_index_response.status_code == 200
+    assert older_index_response.json()["total"] == 2
+    assert older_index_response.json()["items"][0]["trace_id"] == (
+        "00000000000000000000000000000000"
+    )
+    assert empty_index_response.status_code == 200
+    assert empty_index_response.json() == {"items": [], "total": 2}
 
     assert detail_response.status_code == 200
     detail_payload = detail_response.json()
     assert detail_payload["trace_id"] == trace_id
-    assert detail_payload["span_count"] == 2
-    assert detail_payload["overview"][0]["title"] == "Evaluation: guardrails_eval"
-    assert detail_payload["overview"][1]["type"] == "llm"
-    assert detail_payload["overview"][1]["data"]["model"] == "gpt-test"
+    assert detail_payload["span_count"] == 4
+    assert abs(detail_payload["total_cost"] - 0.03) < 0.000001
+    overview_by_span_id = {item["span_id"]: item for item in detail_payload["overview"]}
+    assert overview_by_span_id["1111111111111111"]["outcome"] == "fail"
+    assert overview_by_span_id["1111111111111111"]["failed_result_count"] == 1
+    assert overview_by_span_id["3333333333333333"]["outcome"] == "fail"
+    assert overview_by_span_id["4444444444444444"]["outcome"] == "fail"
+    assert overview_by_span_id["2222222222222222"]["type"] == "llm"
+    assert overview_by_span_id["2222222222222222"]["outcome"] is None
+    assert overview_by_span_id["2222222222222222"]["data"]["model"] == "gpt-test"
 
 
 @pytest.mark.asyncio
-async def test_stream_passes_request_to_in_process_runner(
+async def test_stream_resolves_request_and_starts_background_run(
     transactional_session: AsyncSession, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     admin = await _create_user(
@@ -408,19 +567,19 @@ async def test_stream_passes_request_to_in_process_runner(
     class FakeJob:
         run_id = "fake-run"
 
-        async def subscribe(self) -> AsyncGenerator[EvalRunEvent]:
-            yield EvalRunEvent(
-                "status", {"status": "start", "suite": "chatbot", "run_id": self.run_id}
-            )
-            yield EvalRunEvent("log", {"message": "running in process", "run_id": self.run_id})
-            yield EvalRunEvent("status", {"status": "complete", "run_id": self.run_id})
-
     class FakeManager:
-        def start_run(self, config: object, *, paths: object, user_id: object) -> FakeJob:
+        async def start_run(self, config: object, *, paths: object, user_id: object) -> FakeJob:
+            assert paths == EvalRunPaths(logs_dir=tmp_path / "reports" / "logs")
             captured["config"] = config
-            captured["paths"] = paths
             captured["user_id"] = user_id
             return FakeJob()
+
+    async def fake_stream(run_id: str, user_id: object, _request: object) -> AsyncGenerator[str]:
+        assert run_id == "fake-run"
+        assert user_id == admin.id
+        yield _format_test_sse("status", {"status": "start", "suite": "chatbot", "run_id": run_id})
+        yield _format_test_sse("log", {"message": "background run started", "run_id": run_id})
+        yield _format_test_sse("status", {"status": "complete", "run_id": run_id})
 
     async def fake_resolve_eval_case_payloads_for_run(
         _session: object, suite: EvalSuite, selected_case_ids: tuple[str, ...]
@@ -431,6 +590,7 @@ async def test_stream_passes_request_to_in_process_runner(
 
     monkeypatch.setattr(evals_routes, "LOGS_DIR", tmp_path / "reports" / "logs")
     monkeypatch.setattr(evals_routes, "EVAL_RUN_MANAGER", FakeManager())
+    monkeypatch.setattr(evals_routes, "_stream_persisted_eval_run", fake_stream)
     monkeypatch.setattr(
         evals_routes, "resolve_eval_case_payloads_for_run", fake_resolve_eval_case_payloads_for_run
     )
@@ -447,6 +607,13 @@ async def test_stream_passes_request_to_in_process_runner(
                 "max_concurrency": 3,
                 "pass_threshold": 0.8,
                 "test_cases": "case_a,case_b",
+                "instructions_source": "draft",
+                "draft_prompt_templates": [
+                    {
+                        "filename": "chatbot_agent_internal.j2",
+                        "content": "Draft chatbot instructions",
+                    }
+                ],
                 "chatbot_model": "azure/chatbot",
                 "guardrail_model": "azure/guardrail",
                 "evaluation_model": "azure/judge",
@@ -467,6 +634,12 @@ async def test_stream_passes_request_to_in_process_runner(
     assert config.max_concurrency == 3
     assert config.pass_threshold == 0.8
     assert config.test_cases == ("case_a", "case_b")
+    assert config.instructions is not None
+    assert config.instructions.source == "draft"
+    assert config.instructions.template_overrides["chatbot_agent_internal.j2"] == (
+        "Draft chatbot instructions"
+    )
+    assert "guardrails_agent_internal.j2" in config.instructions.template_overrides
     assert config.chatbot_model == "azure/chatbot"
     assert config.guardrail_model == "azure/guardrail"
     assert config.evaluation_model == "azure/judge"
@@ -484,40 +657,50 @@ async def test_current_run_stream_and_cancel_use_user_scoped_background_job(
     started_at = datetime(2026, 4, 29, 12, 0, tzinfo=UTC)
     cancelled = False
 
-    class FakeJob:
-        run_id = "active-run"
+    def snapshot() -> EvalRunSnapshot:
+        return EvalRunSnapshot(
+            run_id="active-run",
+            user_id=admin.id,
+            suite="chatbot",
+            status="cancelled" if cancelled else "start",
+            report_id=None,
+            error_message=None,
+            started_at=started_at,
+            completed_at=started_at if cancelled else None,
+        )
 
-        def snapshot(self) -> EvalRunSnapshot:
-            return EvalRunSnapshot(
-                run_id=self.run_id,
-                user_id=admin.id,
-                suite="chatbot",
-                status="cancelled" if cancelled else "start",
-                report_id=None,
-                error_message=None,
-                started_at=started_at,
-                completed_at=started_at if cancelled else None,
-            )
+    async def fake_current(user_id: object) -> EvalRunSnapshot:
+        assert user_id == admin.id
+        return snapshot()
 
-        async def subscribe(self) -> AsyncGenerator[EvalRunEvent]:
-            yield EvalRunEvent("status", {"status": "start", "run_id": self.run_id})
-            yield EvalRunEvent("log", {"message": "still running", "run_id": self.run_id})
+    async def fake_get(run_id: str, user_id: object) -> EvalRunSnapshot:
+        assert run_id == "active-run"
+        assert user_id == admin.id
+        return snapshot()
 
-        async def cancel(self) -> None:
-            nonlocal cancelled
-            cancelled = True
+    async def fake_stream(run_id: str, user_id: object, _request: object) -> AsyncGenerator[str]:
+        assert run_id == "active-run"
+        assert user_id == admin.id
+        yield _format_test_sse("status", {"status": "start", "run_id": run_id})
+        yield _format_test_sse("log", {"message": "still running", "run_id": run_id})
+
+    async def fake_cancel(run_id: str, user_id: object) -> EvalRunSnapshot:
+        nonlocal cancelled
+        assert run_id == "active-run"
+        assert user_id == admin.id
+        cancelled = True
+        return snapshot()
 
     class FakeManager:
-        def current_run(self, user_id: object) -> FakeJob | None:
-            assert user_id == admin.id
-            return FakeJob()
-
-        def get_run(self, run_id: str, *, user_id: object) -> FakeJob:
-            assert run_id == "active-run"
-            assert user_id == admin.id
-            return FakeJob()
+        def get_run(self, _run_id: str, *, user_id: object) -> object:
+            del user_id
+            raise evals_routes.EvalRunNotFoundError
 
     monkeypatch.setattr(evals_routes, "EVAL_RUN_MANAGER", FakeManager())
+    monkeypatch.setattr(evals_routes, "get_current_eval_run", fake_current)
+    monkeypatch.setattr(evals_routes, "get_eval_run", fake_get)
+    monkeypatch.setattr(evals_routes, "_stream_persisted_eval_run", fake_stream)
+    monkeypatch.setattr(evals_routes, "request_eval_run_cancellation", fake_cancel)
 
     async with AsyncClient(
         transport=ASGITransport(app=app), base_url="http://testserver"
@@ -540,55 +723,60 @@ async def test_current_run_stream_and_cancel_use_user_scoped_background_job(
 
 
 @pytest.mark.asyncio
-async def test_eval_run_subscription_closes_when_subscriber_falls_behind(tmp_path: Path) -> None:
-    class TestEvalRunJob(EvalRunJob):
-        def publish_event(self, event: EvalRunEvent) -> None:
-            self._publish(event)
-
-    job = TestEvalRunJob(
-        EvalRunRequestConfig(suite=EvalSuite.CHATBOT),
-        paths=EvalRunPaths(logs_dir=tmp_path),
-        user_id=None,
-    )
-    stream = job.subscribe()
-
-    try:
-        start_event = await anext(stream)
-        assert start_event.event == "status"
-
-        for index in range(1001):
-            job.publish_event(EvalRunEvent("log", {"message": f"log {index}"}))
-
-        overflow_event = await anext(stream)
-        assert overflow_event.event == "error"
-        assert overflow_event.payload["run_id"] == job.run_id
-        with pytest.raises(StopAsyncIteration):
-            await anext(stream)
-    finally:
-        await stream.aclose()
-
-
-@pytest.mark.asyncio
-async def test_eval_run_manager_prunes_completed_jobs(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+async def test_persisted_eval_stream_replays_then_follows_cross_worker_events(
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    def _skip_start(_job: EvalRunJob) -> None:
-        return None
-
-    monkeypatch.setattr(EvalRunJob, "start", _skip_start)
-    manager = EvalRunManager(completed_ttl=timedelta(seconds=0), max_completed_runs=1)
     user_id = uuid4()
-    job = manager.start_run(
-        EvalRunRequestConfig(suite=EvalSuite.CHATBOT),
-        paths=EvalRunPaths(logs_dir=tmp_path),
-        user_id=user_id,
+    calls = 0
+
+    @asynccontextmanager
+    async def fake_listener() -> AsyncGenerator[AsyncGenerator[str]]:
+        async def notifications() -> AsyncGenerator[str]:
+            yield "another-run"
+            yield "active-run"
+
+        yield notifications()
+
+    async def fake_list(
+        run_id: str, requested_user_id: object, *, after_sequence: int = 0
+    ) -> list[PersistedEvalRunEvent]:
+        nonlocal calls
+        assert run_id == "active-run"
+        assert requested_user_id == user_id
+        calls += 1
+        if after_sequence == 0:
+            return [
+                PersistedEvalRunEvent(1, "status", {"status": "start", "run_id": run_id}),
+                PersistedEvalRunEvent(2, "log", {"message": "before navigation", "run_id": run_id}),
+            ]
+        return [
+            PersistedEvalRunEvent(3, "log", {"message": "after navigation", "run_id": run_id}),
+            PersistedEvalRunEvent(4, "status", {"status": "complete", "run_id": run_id}),
+        ]
+
+    class FakeRequest:
+        async def is_disconnected(self) -> bool:
+            return False
+
+    monkeypatch.setattr(evals_routes, "listen_eval_run_notifications", fake_listener)
+    monkeypatch.setattr(evals_routes, "list_eval_run_events", fake_list)
+
+    payload = "".join(
+        [
+            event
+            async for event in evals_routes._stream_persisted_eval_run(  # pyright: ignore[reportPrivateUsage]  # noqa: SLF001
+                "active-run", user_id, cast(Any, FakeRequest())
+            )
+        ]
     )
+    events = _parse_sse_events(payload)
 
-    job.status = "complete"
-    job.completed_at = datetime.now(UTC) - timedelta(seconds=1)
-
-    assert manager.current_run(user_id) is None
-    manager.clear()
+    assert calls == 2
+    assert [event for event, _payload in events] == ["status", "log", "log", "status"]
+    assert [payload["message"] for event, payload in events if event == "log"] == [
+        "before navigation",
+        "after navigation",
+    ]
 
 
 def test_load_eval_database_url_does_not_mutate_runtime_db_env(
@@ -667,7 +855,7 @@ async def test_populate_rag_data_uses_supplied_eval_engine(
 
 
 @pytest.mark.asyncio
-async def test_guardrails_stream_skips_rag_setup(
+async def test_guardrails_background_run_skips_rag_setup(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     class FakeReport:
@@ -731,22 +919,16 @@ async def test_guardrails_stream_skips_rag_setup(
     )
     monkeypatch.setattr("app.evals.service.save_eval_report", fake_save_eval_report)
 
-    events = [
-        event
-        async for event in run_eval_in_process(
-            EvalRunRequestConfig(suite=EvalSuite.GUARDRAILS),
-            paths=EvalRunPaths(logs_dir=tmp_path / "reports" / "logs"),
-        )
-    ]
+    job = EvalRunJob(
+        EvalRunRequestConfig(suite=EvalSuite.GUARDRAILS),
+        paths=EvalRunPaths(logs_dir=tmp_path / "reports" / "logs"),
+        user_id=None,
+    )
+    job.start()
+    await job.wait()
 
-    assert any(
-        event.event == "log"
-        and "guardrails evals do not use RAG" in str(event.payload.get("message"))
-        for event in events
-    )
-    assert any(
-        event.event == "status" and event.payload.get("status") == "complete" for event in events
-    )
+    assert "guardrails evals do not use RAG" in job.log_path.read_text(encoding="utf-8")
+    assert job.status == "complete"
 
 
 @pytest.mark.asyncio

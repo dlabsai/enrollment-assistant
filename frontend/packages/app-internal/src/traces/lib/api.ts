@@ -13,6 +13,7 @@ interface FetchTraceIndexParams {
     start?: string;
     end?: string;
     source?: "runtime" | "evals";
+    signal?: AbortSignal;
 }
 
 export const fetchTraceIndex = async (
@@ -42,23 +43,26 @@ export const fetchTraceIndex = async (
     const path = query
         ? `${pathPrefix}/trace-index?${query}`
         : `${pathPrefix}/trace-index`;
-    return api.get<TraceSummaryPage>(path);
+    return api.get<TraceSummaryPage>(path, { signal: params.signal });
 };
 
 export const fetchTraceDetail = async (
     api: AuthenticatedApi,
     traceId: string,
     source: "runtime" | "evals" = "runtime",
+    signal?: AbortSignal,
 ): Promise<TraceDetail> => {
     const pathPrefix = source === "evals" ? "/evals" : "/usage";
-    return api.get<TraceDetail>(`${pathPrefix}/trace/${traceId}`);
+    return api.get<TraceDetail>(`${pathPrefix}/trace/${traceId}`, { signal });
 };
 
 export const fetchTraceDetailByMessageId = async (
     api: AuthenticatedApi,
     messageId: string,
     source: "page" | "chat_trace" | "chat_activity" | "chats_trace" = "page",
+    signal?: AbortSignal,
 ): Promise<TraceDetail> =>
     api.get<TraceDetail>(
         `/usage/trace-by-message/${messageId}?source=${source}`,
+        { signal },
     );

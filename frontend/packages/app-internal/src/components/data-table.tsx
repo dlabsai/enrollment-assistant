@@ -7,9 +7,11 @@ import {
     getSortedRowModel,
     type OnChangeFn,
     type PaginationState,
+    type RowData,
     type SortingState,
     type Table as TableType,
     useReactTable,
+    type VisibilityState,
 } from "@tanstack/react-table";
 import { Button } from "@va/shared/components/ui/button";
 import {
@@ -48,8 +50,10 @@ type ColumnSkeleton<TData, TValue> =
     | JSX.Element
     | ((context: CellContext<TData, TValue>) => JSX.Element);
 
-interface ColumnMeta<TData, TValue> {
-    skeleton?: ColumnSkeleton<TData, TValue>;
+declare module "@tanstack/react-table" {
+    interface ColumnMeta<TData extends RowData, TValue> {
+        skeleton?: ColumnSkeleton<TData, TValue>;
+    }
 }
 
 interface DataTablePaginationProps<TData> {
@@ -173,6 +177,7 @@ interface DataTableProps<TData, TValue> {
     onPaginationChange: OnChangeFn<PaginationState>;
     pageCount: number;
     rowCount: number;
+    rowMarker?: string;
     tableClassName?: string;
     wrapCellText?: boolean;
     manualPagination?: boolean;
@@ -182,6 +187,7 @@ interface DataTableProps<TData, TValue> {
     onRowClick?: (row: TData) => void;
     canRowClick?: (row: TData) => boolean;
     isRowSelected?: (row: TData) => boolean;
+    columnVisibility?: VisibilityState;
 }
 
 export const DataTable = <TData, TValue>({
@@ -193,6 +199,7 @@ export const DataTable = <TData, TValue>({
     onPaginationChange,
     pageCount,
     rowCount,
+    rowMarker,
     tableClassName,
     wrapCellText = false,
     manualPagination = true,
@@ -202,6 +209,7 @@ export const DataTable = <TData, TValue>({
     onRowClick,
     canRowClick,
     isRowSelected,
+    columnVisibility,
 }: DataTableProps<TData, TValue>): JSX.Element => {
     // eslint-disable-next-line react-hooks/incompatible-library
     const table = useReactTable({
@@ -218,10 +226,11 @@ export const DataTable = <TData, TValue>({
         state: {
             sorting,
             pagination,
+            columnVisibility: columnVisibility ?? {},
         },
     });
 
-    const columnCount = table.getAllLeafColumns().length;
+    const columnCount = table.getVisibleLeafColumns().length;
     const { rows } = table.getRowModel();
     const cellClassName = wrapCellText
         ? "whitespace-normal break-words"
@@ -245,10 +254,8 @@ export const DataTable = <TData, TValue>({
                     key={row.id}
                 >
                     {row.getVisibleCells().map((cell) => {
-                        const skeletonMeta = cell.column.columnDef.meta as
-                            | ColumnMeta<TData, TValue>
-                            | undefined;
-                        const skeleton = skeletonMeta?.skeleton;
+                        const skeleton =
+                            cell.column.columnDef.meta?.skeleton;
                         const skeletonContent =
                             typeof skeleton === "function"
                                 ? skeleton(cell.getContext())
@@ -285,11 +292,8 @@ export const DataTable = <TData, TValue>({
                 { length: skeletonRowCount },
                 (_unused, rowIndex) => (
                     <TableRow key={`skeleton-${rowIndex}`}>
-                        {table.getAllLeafColumns().map((column) => {
-                            const skeletonMeta = column.columnDef.meta as
-                                | ColumnMeta<TData, TValue>
-                                | undefined;
-                            const skeleton = skeletonMeta?.skeleton;
+                        {table.getVisibleLeafColumns().map((column) => {
+                            const skeleton = column.columnDef.meta?.skeleton;
                             return (
                                 <TableCell
                                     className={cellClassName}
@@ -321,6 +325,7 @@ export const DataTable = <TData, TValue>({
                     className={cn(
                         clickable && "hover:bg-muted/60 cursor-pointer",
                     )}
+                    data-row-marker={rowMarker}
                     data-state={selected && "selected"}
                     key={row.id}
                     onClick={() => {

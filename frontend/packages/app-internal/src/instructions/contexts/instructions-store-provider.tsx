@@ -1,5 +1,6 @@
 import { type JSX, type ReactNode, useMemo } from "react";
 
+import { useAuth } from "../../auth/contexts/auth-context";
 import { useAuthenticatedApi } from "../../auth/hooks/use-authenticated-api";
 import { createInstructionsStore } from "../lib/store";
 import { InstructionsStoreContext } from "./instructions-store-context";
@@ -12,9 +13,15 @@ export const InstructionsStoreProvider = ({
     children,
 }: InstructionsStoreProviderProps): JSX.Element => {
     const api = useAuthenticatedApi();
+    const { user } = useAuth();
+    const userId = user?.id;
 
-    // Create store once - api is stable after authentication so useMemo runs once
-    const store = useMemo(() => createInstructionsStore(api), [api]);
+    const store = useMemo(() => {
+        if (userId === undefined) {
+            throw new Error("InstructionsStoreProvider requires an authenticated user");
+        }
+        return createInstructionsStore(api, userId);
+    }, [api, userId]);
 
     return (
         <InstructionsStoreContext value={store}>

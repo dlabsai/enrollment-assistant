@@ -1,16 +1,25 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback } from "react";
 
 import { useAuthenticatedApi } from "../../auth/hooks/use-authenticated-api";
+import { useAsyncData } from "../../lib/hooks/use-async-data";
 import { fetchTraceIndex } from "../lib/api";
 import type { TracePlatformFilter, TraceSummary } from "../types";
 
-interface UseTraceIndexResult {
+interface TraceIndexData {
     traces: TraceSummary[];
     total: number;
+}
+
+interface UseTraceIndexResult extends TraceIndexData {
     loading: boolean;
     error: string | undefined;
-    refresh: () => Promise<void>;
+    refresh: () => void;
 }
+
+const initialTraceIndexData: TraceIndexData = {
+    traces: [],
+    total: 0,
+};
 
 export const useTraceIndex = (
     aiOnly: boolean,
@@ -22,16 +31,9 @@ export const useTraceIndex = (
     source: "runtime" | "evals" = "runtime",
 ): UseTraceIndexResult => {
     const api = useAuthenticatedApi();
-    const [traces, setTraces] = useState<TraceSummary[]>([]);
-    const [total, setTotal] = useState(0);
-    const [loading, setLoading] = useState(true);
-    const [error, setError] = useState<string | undefined>();
-
-    const refresh = useCallback(async () => {
-        setLoading(true);
-        setError(undefined);
-        try {
-            const data = await fetchTraceIndex(api, {
+    const load = useCallback(
+        async (signal: AbortSignal): Promise<TraceIndexData> => {
+            const response = await fetchTraceIndex(api, {
                 aiOnly,
                 limit: pageSize,
                 offset: pageIndex * pageSize,
@@ -39,26 +41,17 @@ export const useTraceIndex = (
                 start,
                 end,
                 source,
+                signal,
             });
-            // await new Promise((resolve) => {
-            //     setTimeout(resolve, 5000);
-            // });
-            setTraces(data.items);
-            setTotal(data.total);
-        } catch (error_) {
-            setError(
-                error_ instanceof Error
-                    ? error_.message
-                    : "Failed to fetch traces",
-            );
-        } finally {
-            setLoading(false);
-        }
-    }, [api, end, aiOnly, pageIndex, pageSize, platform, source, start]);
+            return { traces: response.items, total: response.total };
+        },
+        [api, end, aiOnly, pageIndex, pageSize, platform, source, start],
+    );
+    const { data, loading, error, refresh } = useAsyncData({
+        errorMessage: "Failed to fetch traces",
+        initialData: initialTraceIndexData,
+        load,
+    });
 
-    useEffect(() => {
-        void refresh();
-    }, [refresh]);
-
-    return { traces, total, loading, error, refresh };
+    return { ...data, loading, error, refresh };
 };

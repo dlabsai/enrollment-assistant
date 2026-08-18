@@ -31,8 +31,19 @@ import { useAuthenticatedApi } from "../../auth/hooks/use-authenticated-api";
 import { ModelSelectionDialogContent } from "../../components/model-selection-dialog-content";
 import { InlineError } from "../../components/page-state";
 import {
+    useInstructionsStore,
+    useInstructionsStoreApi,
+} from "../../instructions/contexts/instructions-store-context";
+import {
+    getAssistantDraftEdits,
+    selectAssistantDraftBaseVersionId,
+    selectHasAssistantDraft,
+} from "../../instructions/lib/assistant-draft";
+import { useStickyBottomScroll } from "../../lib/hooks/use-sticky-bottom-scroll";
+import {
     cancelEvalRun,
     fetchCurrentEvalRun,
+    fetchEvalInstructionVersions,
     fetchEvalTestCases,
     fetchInternalModels,
     runEvalStream,
@@ -49,6 +60,7 @@ import {
 } from "../lib/model-storage";
 import { parsePassThreshold, parsePositiveInt } from "../lib/run-utils";
 import type {
+    EvalInstructionVersion,
     EvalRunLogEntry,
     EvalRunReportEvent,
     EvalRunRequest,
@@ -64,6 +76,8 @@ const evalSuiteOptions: { label: string; value: EvalSuite }[] = [
 
 const DEFAULT_PRESET_VALUE = "__default_preset__";
 const COMMAND_UNSELECTED_VALUE = "__va_model_unselected__";
+const LIVE_INSTRUCTIONS_VALUE = "live";
+const DRAFT_INSTRUCTIONS_VALUE = "draft";
 type EvalModelTarget = "chatbot" | "guardrails" | "judge";
 
 const EVAL_MODEL_TARGET_TABS: { value: EvalModelTarget; label: string }[] = [
@@ -84,12 +98,27 @@ export const EvalsRunCard = ({
     onOpenReport,
 }: EvalsRunCardProps): JSX.Element => {
     const api = useAuthenticatedApi();
+    const instructionsStore = useInstructionsStoreApi();
+    const hasAssistantDraft = useInstructionsStore(selectHasAssistantDraft);
+    const draftBaseVersionId = useInstructionsStore(
+        selectAssistantDraftBaseVersionId,
+    );
     const [runSuite, setRunSuite] = useState<EvalSuite>("chatbot");
     const [runRepeat, setRunRepeat] = useState("1");
     const [runConcurrency, setRunConcurrency] = useState("5");
     const [runPassThreshold, setRunPassThreshold] = useState("0.9");
     const [selectedTestCases, setSelectedTestCases] = useState<string[]>([]);
-    const [testCasesLoading, setTestCasesLoading] = useState(false);
+    const [instructionsSelection, setInstructionsSelection] = useState(
+        LIVE_INSTRUCTIONS_VALUE,
+    );
+    const [instructionVersions, setInstructionVersions] = useState<
+        EvalInstructionVersion[]
+    >([]);
+    const [instructionsLoading, setInstructionsLoading] = useState(true);
+    const [instructionsError, setInstructionsError] = useState<
+        string | undefined
+    >();
+    const [testCasesLoading, setTestCasesLoading] = useState(true);
     const [testCasesError, setTestCasesError] = useState<string | undefined>();
     const [availableTestCases, setAvailableTestCases] = useState<string[]>([]);
     const [availableModels, setAvailableModels] = useState<string[]>([]);
@@ -137,8 +166,13 @@ export const EvalsRunCard = ({
     const runAbortControllerRef = useRef<AbortController | undefined>(
         undefined,
     );
-    const runOutputContainerRef = useRef<HTMLDivElement | null>(null);
     const runLogCounterRef = useRef(0);
+    const {
+        containerRef: runOutputContainerRef,
+        handleScroll: handleRunOutputScroll,
+        resetStickToBottom: resetRunOutputStickToBottom,
+        scrollToBottomIfPinned: scrollRunOutputToBottomIfPinned,
+    } = useStickyBottomScroll();
 
     const testCasesEmptyLabel = testCasesLoading
         ? "Loading test cases..."
@@ -186,6 +220,7 @@ export const EvalsRunCard = ({
             const controller = new AbortController();
             runAbortControllerRef.current = controller;
             runLogCounterRef.current = 0;
+            resetRunOutputStickToBottom();
             setRunLogs([]);
             setRunError(undefined);
             try {
@@ -253,7 +288,14 @@ export const EvalsRunCard = ({
                 runAbortControllerRef.current = undefined;
             }
         };
-    }, [api, appendRunLog, handleRunError, handleRunReport, handleRunStatus]);
+    }, [
+        api,
+        appendRunLog,
+        handleRunError,
+        handleRunReport,
+        handleRunStatus,
+        resetRunOutputStickToBottom,
+    ]);
 
     useEffect(() => {
         writeStoredModelConfig({
@@ -276,11 +318,38 @@ export const EvalsRunCard = ({
     }, [modelPresets]);
 
     useEffect(() => {
-        if (runOutputContainerRef.current !== null) {
-            runOutputContainerRef.current.scrollTop =
-                runOutputContainerRef.current.scrollHeight;
-        }
-    }, [runLogs]);
+        scrollRunOutputToBottomIfPinned();
+    }, [runLogs, scrollRunOutputToBottomIfPinned]);
+
+    useEffect((): (() => void) => {
+        let mounted = true;
+        void fetchEvalInstructionVersions(api)
+            .then((versions) => {
+                if (!mounted) {
+                    return;
+                }
+                setInstructionVersions(versions);
+            })
+            .catch((error: unknown) => {
+                if (!mounted) {
+                    return;
+                }
+                setInstructionsError(
+                    error instanceof Error
+                        ? error.message
+                        : "Failed to load saved instruction versions",
+                );
+            })
+            .finally(() => {
+                if (mounted) {
+                    setInstructionsLoading(false);
+                }
+            });
+
+        return () => {
+            mounted = false;
+        };
+    }, [api]);
 
     useEffect((): (() => void) | undefined => {
         let mounted = true;
@@ -323,16 +392,6 @@ export const EvalsRunCard = ({
     useEffect((): (() => void) | undefined => {
         let mounted = true;
 
-        const timeout = setTimeout(() => {
-            if (!mounted) {
-                return;
-            }
-            setTestCasesLoading(true);
-            setTestCasesError(undefined);
-            setAvailableTestCases([]);
-            setSelectedTestCases([]);
-        }, 0);
-
         void fetchEvalTestCases(api, runSuite)
             .then((cases) => {
                 if (!mounted) {
@@ -366,7 +425,6 @@ export const EvalsRunCard = ({
 
         return () => {
             mounted = false;
-            clearTimeout(timeout);
         };
     }, [api, runSuite]);
 
@@ -384,6 +442,21 @@ export const EvalsRunCard = ({
         const chatbotModel = runChatbotModel.trim();
         const guardrailModel = runGuardrailModel.trim();
         const evaluationModel = runEvaluationModel.trim();
+        const isLiveInstructions =
+            instructionsSelection === LIVE_INSTRUCTIONS_VALUE;
+        const isDraftInstructions =
+            instructionsSelection === DRAFT_INSTRUCTIONS_VALUE;
+        const instructionsState = instructionsStore.getState();
+        const draftPromptTemplates = isDraftInstructions
+            ? getAssistantDraftEdits(instructionsState)
+            : undefined;
+        const selectedDraftBaseVersionId = isDraftInstructions
+            ? selectAssistantDraftBaseVersionId(instructionsState)
+            : undefined;
+        if (draftPromptTemplates?.length === 0) {
+            toast.error("No unsaved Assistant instruction draft is available");
+            return;
+        }
 
         const payload: EvalRunRequest = {
             suite: runSuite,
@@ -391,6 +464,17 @@ export const EvalsRunCard = ({
             maxConcurrency,
             passThreshold,
             testCases: testCases === "" ? undefined : testCases,
+            instructionsSource: isLiveInstructions
+                ? LIVE_INSTRUCTIONS_VALUE
+                : isDraftInstructions
+                  ? DRAFT_INSTRUCTIONS_VALUE
+                  : "saved",
+            promptSetVersionId:
+                isLiveInstructions || isDraftInstructions
+                    ? undefined
+                    : instructionsSelection,
+            draftBasePromptSetVersionId: selectedDraftBaseVersionId,
+            draftPromptTemplates,
             chatbotModel: chatbotModel === "" ? undefined : chatbotModel,
             guardrailModel: guardrailModel === "" ? undefined : guardrailModel,
             evaluationModel:
@@ -400,6 +484,7 @@ export const EvalsRunCard = ({
         const controller = new AbortController();
         runAbortControllerRef.current = controller;
         runLogCounterRef.current = 0;
+        resetRunOutputStickToBottom();
         setRunLogs([]);
         setRunError(undefined);
         setCurrentRunId(undefined);
@@ -442,6 +527,9 @@ export const EvalsRunCard = ({
         handleRunError,
         handleRunReport,
         handleRunStatus,
+        instructionsSelection,
+        instructionsStore,
+        resetRunOutputStickToBottom,
         runChatbotModel,
         runConcurrency,
         runEvaluationModel,
@@ -454,9 +542,6 @@ export const EvalsRunCard = ({
 
     const handleStop = useCallback((): void => {
         if (currentRunId === undefined) {
-            if (runAbortControllerRef.current !== undefined) {
-                runAbortControllerRef.current.abort();
-            }
             return;
         }
         void cancelEvalRun(api, currentRunId)
@@ -472,11 +557,6 @@ export const EvalsRunCard = ({
                         ? error.message
                         : "Failed to cancel eval run",
                 );
-            })
-            .finally(() => {
-                if (runAbortControllerRef.current !== undefined) {
-                    runAbortControllerRef.current.abort();
-                }
             });
     }, [api, currentRunId]);
 
@@ -530,16 +610,15 @@ export const EvalsRunCard = ({
                 : runChatbotModel;
 
     const setModelForTarget = (value: string): void => {
-        const normalizedValue = value === "" ? "" : value;
         if (modelTarget === "guardrails") {
-            setRunGuardrailModel(normalizedValue);
+            setRunGuardrailModel(value);
             return;
         }
         if (modelTarget === "judge") {
-            setRunEvaluationModel(normalizedValue);
+            setRunEvaluationModel(value);
             return;
         }
-        setRunChatbotModel(normalizedValue);
+        setRunChatbotModel(value);
     };
 
     const resetCurrentTarget = (): void => {
@@ -595,7 +674,7 @@ export const EvalsRunCard = ({
 
     const sortedPresets = useMemo(
         () =>
-            [...modelPresets].toSorted((left, right) =>
+            modelPresets.toSorted((left, right) =>
                 left.name.localeCompare(right.name),
             ),
         [modelPresets],
@@ -677,7 +756,36 @@ export const EvalsRunCard = ({
     const selectedSuiteLabel =
         evalSuiteOptions.find((option) => option.value === runSuite)?.label ??
         "Select suite";
-    const runIsRunning = runStatus === "start";
+    const selectedInstructionVersion = instructionVersions.find(
+        (version) => version.id === instructionsSelection,
+    );
+    const draftBaseVersion = instructionVersions.find(
+        (version) => version.id === draftBaseVersionId,
+    );
+    const instructionsSelectionLabel =
+        instructionsSelection === LIVE_INSTRUCTIONS_VALUE
+            ? "Live instructions"
+            : instructionsSelection === DRAFT_INSTRUCTIONS_VALUE
+              ? "Unsaved draft"
+              : selectedInstructionVersion === undefined
+                ? "Select instructions"
+                : `v${selectedInstructionVersion.versionNumber} – ${selectedInstructionVersion.name}`;
+    const draftBaseLabel =
+        draftBaseVersionId === undefined
+            ? "Default"
+            : draftBaseVersion === undefined
+              ? "the selected saved version"
+              : `v${draftBaseVersion.versionNumber} – ${draftBaseVersion.name}`;
+    const instructionsSourceSummary =
+        instructionsSelection === LIVE_INSTRUCTIONS_VALUE
+            ? "Current deployed internal Assistant version, or Default when none is deployed."
+            : instructionsSelection === DRAFT_INSTRUCTIONS_VALUE
+              ? `Current unsaved Assistant draft based on ${draftBaseLabel}.`
+              : "Selected saved internal Assistant version.";
+    const instructionsSummary = `${instructionsSourceSummary} Applies to internal eval cases; public Chatbot cases keep their public instructions.`;
+    const runIsRunning =
+        runStatus === "start" || runStatus === "cancelling";
+    const runIsCancelling = runStatus === "cancelling";
 
     return (
         <ResizablePanelGroup
@@ -706,6 +814,10 @@ export const EvalsRunCard = ({
                                         value === "guardrails"
                                     ) {
                                         setRunSuite(value);
+                                        setTestCasesLoading(true);
+                                        setTestCasesError(undefined);
+                                        setAvailableTestCases([]);
+                                        setSelectedTestCases([]);
                                     }
                                 }}
                                 value={runSuite}
@@ -769,6 +881,62 @@ export const EvalsRunCard = ({
                                 type="number"
                                 value={runPassThreshold}
                             />
+                        </div>
+                        <div className="flex flex-col gap-1 @lg/main:col-span-4 @2xl/main:col-span-2">
+                            <Label className="text-muted-foreground text-xs">
+                                Instructions
+                            </Label>
+                            <Select
+                                onValueChange={(value) => {
+                                    if (value !== null) {
+                                        setInstructionsSelection(value);
+                                    }
+                                }}
+                                value={instructionsSelection}
+                            >
+                                <SelectTrigger className="w-full">
+                                    <SelectValue placeholder="Select instructions">
+                                        {instructionsSelectionLabel}
+                                    </SelectValue>
+                                </SelectTrigger>
+                                <SelectContent>
+                                    <SelectGroup>
+                                        <SelectItem value={LIVE_INSTRUCTIONS_VALUE}>
+                                            Live instructions
+                                        </SelectItem>
+                                        {hasAssistantDraft && (
+                                            <SelectItem value={DRAFT_INSTRUCTIONS_VALUE}>
+                                                Unsaved draft
+                                            </SelectItem>
+                                        )}
+                                        {instructionVersions.map((version) => (
+                                            <SelectItem
+                                                key={version.id}
+                                                value={version.id}
+                                            >
+                                                v{version.versionNumber} –{" "}
+                                                {version.name}
+                                                {version.isDeployed
+                                                    ? " (Live)"
+                                                    : ""}
+                                            </SelectItem>
+                                        ))}
+                                    </SelectGroup>
+                                </SelectContent>
+                            </Select>
+                            <div className="text-muted-foreground text-xs">
+                                {instructionsSummary}
+                            </div>
+                            {instructionsLoading && (
+                                <div className="text-muted-foreground text-xs">
+                                    Loading saved instruction versions…
+                                </div>
+                            )}
+                            {instructionsError !== undefined && (
+                                <div className="text-destructive text-xs">
+                                    {instructionsError}
+                                </div>
+                            )}
                         </div>
                         <div className="flex flex-col gap-1 @lg/main:col-span-4 @2xl/main:col-span-2">
                             <Label className="text-muted-foreground text-xs">
@@ -903,7 +1071,11 @@ export const EvalsRunCard = ({
                             Run evals
                         </Button>
                         <Button
-                            disabled={!runIsRunning}
+                            disabled={
+                                !runIsRunning ||
+                                runIsCancelling ||
+                                currentRunId === undefined
+                            }
                             onClick={handleStop}
                             size="sm"
                             variant="outline"
@@ -913,9 +1085,12 @@ export const EvalsRunCard = ({
                         <Button
                             onClick={() => {
                                 runLogCounterRef.current = 0;
+                                resetRunOutputStickToBottom();
                                 setRunLogs([]);
                                 setRunError(undefined);
-                                setRunStatus("idle");
+                                if (!runIsRunning) {
+                                    setRunStatus("idle");
+                                }
                             }}
                             size="sm"
                             variant="outline"
@@ -954,6 +1129,7 @@ export const EvalsRunCard = ({
                     )}
                     <div
                         className="bg-muted/20 min-h-0 flex-1 overflow-auto rounded-md border p-4"
+                        onScroll={handleRunOutputScroll}
                         ref={runOutputContainerRef}
                     >
                         <pre className="font-mono text-sm leading-relaxed break-words whitespace-pre-wrap">

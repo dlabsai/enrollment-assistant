@@ -4,7 +4,6 @@ import type {
     PaginationState,
     SortingState,
 } from "@tanstack/react-table";
-import { Badge } from "@va/shared/components/ui/badge";
 import { Skeleton } from "@va/shared/components/ui/skeleton";
 import type { JSX } from "react";
 
@@ -17,6 +16,7 @@ import {
     formatTimestamp,
 } from "../lib/trace-utils";
 import type { TraceSummary } from "../types";
+import { TraceStatusBadge } from "./trace-outcome-badge";
 
 interface TraceTableProps {
     traces: TraceSummary[];
@@ -119,13 +119,10 @@ const buildTraceColumns = (
                 skeleton: skeletonLine("h-[22px] w-16 rounded-full"),
             },
             cell: ({ row }) => (
-                <Badge
-                    variant={
-                        row.original.is_error ? "destructive" : "secondary"
-                    }
-                >
-                    {row.original.is_error ? "Error" : "OK"}
-                </Badge>
+                <TraceStatusBadge
+                    failedResultCount={row.original.failed_result_count}
+                    isError={row.original.is_error}
+                />
             ),
         },
     ];
@@ -177,6 +174,7 @@ export const TraceTable = ({
         pageCount={pageCount}
         pagination={pagination}
         rowCount={rowCount}
+        rowMarker="trace"
         sorting={emptySorting}
     />
 );

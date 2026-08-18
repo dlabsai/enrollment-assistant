@@ -8,7 +8,7 @@ interface UseTraceDetailByMessageResult {
     detail: TraceDetail | undefined;
     loading: boolean;
     error: string | undefined;
-    refresh: () => Promise<void>;
+    refresh: () => void;
 }
 
 export const useTraceDetailByMessage = (
@@ -19,7 +19,8 @@ export const useTraceDetailByMessage = (
         async (
             api: Parameters<typeof fetchTraceDetailByMessageId>[0],
             nextMessageId: string,
-        ) => fetchTraceDetailByMessageId(api, nextMessageId, source),
+            signal: AbortSignal,
+        ) => fetchTraceDetailByMessageId(api, nextMessageId, source, signal),
         [source],
     );
 

@@ -1,5 +1,5 @@
 import { ConfirmDialog } from "@va/shared/components/dialog";
-import { type JSX, useEffect, useRef } from "react";
+import type { JSX } from "react";
 
 import {
     useInstructionsActions,
@@ -12,15 +12,15 @@ const DIALOG_CONFIGS: Record<
     { title: string; description: string; confirmLabel: string }
 > = {
     "delete-version": {
-        title: "Delete version",
+        title: "Delete saved version of the instructions",
         description:
-            "Are you sure you want to delete this version? This action cannot be undone.",
+            "Are you sure you want to delete this saved version of the instructions? This action cannot be undone.",
         confirmLabel: "Delete",
     },
     "switch-version": {
         title: "Discard drafts",
         description:
-            "You have unsaved changes. Switching versions will discard all your drafts. Are you sure?",
+            "You have unsaved changes. Switching to another saved version of the instructions will discard all your drafts. Are you sure?",
         confirmLabel: "Discard",
     },
     "select-default": {
@@ -40,21 +40,7 @@ export const ConfirmDialogs = (): JSX.Element | undefined => {
     const confirmDialogAction = useInstructionsStore(
         (state) => state.confirmDialogAction,
     );
-    const confirmDialogVersionId = useInstructionsStore(
-        (state) => state.confirmDialogVersionId,
-    );
-
     const { closeConfirmDialog, confirmAction } = useInstructionsActions();
-
-    const actionRef = useRef<ConfirmDialogAction | undefined>(undefined);
-    const versionIdRef = useRef<string | undefined>(undefined);
-
-    useEffect(() => {
-        if (confirmDialogAction !== undefined) {
-            actionRef.current = confirmDialogAction;
-            versionIdRef.current = confirmDialogVersionId;
-        }
-    }, [confirmDialogAction, confirmDialogVersionId]);
 
     if (confirmDialogAction === undefined) {
         return undefined;
@@ -63,10 +49,6 @@ export const ConfirmDialogs = (): JSX.Element | undefined => {
     const config = DIALOG_CONFIGS[confirmDialogAction];
 
     const handleConfirm = async (): Promise<void> => {
-        const action = actionRef.current;
-        if (action === undefined) {
-            return;
-        }
         await confirmAction();
     };
 

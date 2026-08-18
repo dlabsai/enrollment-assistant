@@ -14,6 +14,7 @@ import {
     formatTimestamp,
 } from "../lib/trace-utils";
 import { TraceDetailPanel } from "./trace-detail-panel";
+import { TraceStatusBadge } from "./trace-outcome-badge";
 
 const formatTraceId = (traceId: string): string => traceId;
 
@@ -40,8 +41,19 @@ const TraceDetailContent = ({
         if (!detail) {
             return "Trace details";
         }
-        return (
-            <span className="inline-flex flex-wrap items-center gap-2">
+        const evaluation = detail.overview.find(
+            (item) => item.type === "evaluation",
+        );
+        let traceBadge: JSX.Element | undefined;
+        if (source === "evals" && evaluation !== undefined) {
+            traceBadge = (
+                <TraceStatusBadge
+                    failedResultCount={evaluation.failed_result_count}
+                    isError={evaluation.outcome === "error"}
+                />
+            );
+        } else if (source === "runtime") {
+            traceBadge = (
                 <Badge
                     variant={
                         detail.is_public === true ? "secondary" : "outline"
@@ -49,16 +61,21 @@ const TraceDetailContent = ({
                 >
                     {formatPlatform(detail.is_public)}
                 </Badge>
+            );
+        }
+        return (
+            <span className="inline-flex flex-wrap items-center gap-2">
+                {traceBadge}
                 <span>{formatTimestamp(detail.started_at)}</span>
                 <span>{formatDurationMs(detail.duration_ms)}</span>
                 <span>{formatLocaleNumber(detail.span_count)} spans</span>
             </span>
         );
-    }, [detail]);
+    }, [detail, source]);
 
     const handleSpanChange = useCallback(
-        (spanId: string | undefined): void => {
-            void navigate({
+        async (spanId: string): Promise<void> =>
+            navigate({
                 params: { traceId },
                 search: (prev) => ({
                     span: spanId,
@@ -68,8 +85,7 @@ const TraceDetailContent = ({
                             : undefined,
                 }),
                 to: routePath,
-            });
-        },
+            }),
         [navigate, routePath, traceId],
     );
 
@@ -115,7 +131,7 @@ const TraceDetailContent = ({
         >
             <PageHeader title={detailTitle}>
                 <Button
-                    onClick={() => void refresh()}
+                    onClick={refresh}
                     variant="outline"
                 >
                     <RefreshCw data-icon="inline-start" />
@@ -131,6 +147,7 @@ const TraceDetailContent = ({
                     <TraceDetailPanel
                         detail={detail}
                         error={error}
+                        key={traceId}
                         loading={loading}
                         onSpanChange={handleSpanChange}
                         onSpanSync={handleSpanSync}
@@ -138,7 +155,7 @@ const TraceDetailContent = ({
                         selectedSpanId={search.span}
                         view={
                             search.view === "span" || search.view === "summary"
-                                ? (search.view as TraceDetailView)
+                                ? search.view
                                 : undefined
                         }
                     />

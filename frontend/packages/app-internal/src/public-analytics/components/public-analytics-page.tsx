@@ -131,7 +131,7 @@ export const PublicAnalyticsPage = (): JSX.Element => {
         return (
             <PageError
                 message={error ?? "Failed to load public analytics."}
-                onRetry={() => void refresh()}
+                onRetry={refresh}
             />
         );
     }
@@ -158,7 +158,7 @@ export const PublicAnalyticsPage = (): JSX.Element => {
                     Clear
                 </Button>
                 <Button
-                    onClick={() => void refresh()}
+                    onClick={refresh}
                     variant="outline"
                 >
                     <RefreshCw data-icon="inline-start" />

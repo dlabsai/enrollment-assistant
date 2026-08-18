@@ -62,7 +62,7 @@ interface EvalsReportCompareViewProps {
     onCompareLeftIdChange: (reportId: string) => void;
     onCompareRightIdChange: (reportId: string) => void;
     onCompareTypeChange: (type: string) => void;
-    onLoadReportDetail: (reportId: string) => Promise<void> | void;
+    onRetryReportDetail: (reportId: string) => void;
     onSwapCompare: () => void;
     onViewModeChange: (viewMode: EvalsReportViewMode) => void;
     viewMode: EvalsReportViewMode;
@@ -96,7 +96,7 @@ export const EvalsReportCompareView = ({
     onCompareLeftIdChange,
     onCompareRightIdChange,
     onCompareTypeChange,
-    onLoadReportDetail,
+    onRetryReportDetail,
     onSwapCompare,
     onViewModeChange,
     viewMode,
@@ -579,13 +579,13 @@ export const EvalsReportCompareView = ({
                                 message={detailError}
                                 onRetry={() => {
                                     if (compareLeftId !== undefined) {
-                                        void onLoadReportDetail(compareLeftId);
+                                        onRetryReportDetail(compareLeftId);
                                     }
                                     if (
                                         compareRightId !== undefined &&
                                         compareRightId !== compareLeftId
                                     ) {
-                                        void onLoadReportDetail(compareRightId);
+                                        onRetryReportDetail(compareRightId);
                                     }
                                 }}
                             />

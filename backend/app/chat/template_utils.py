@@ -1,3 +1,4 @@
+import asyncio
 from typing import TYPE_CHECKING
 
 from jinja2 import BaseLoader, Environment, FileSystemLoader
@@ -88,6 +89,9 @@ def create_jinja_environment_with_db(
 _jinja_environments: dict[tuple[Path, bool], Environment] = {}
 _deployed_templates_cache: dict[tuple[bool, PromptSetScope], dict[str, str]] = {}
 _version_templates_cache: dict[UUID, dict[str, str]] = {}
+_deployed_template_load_locks: dict[tuple[bool, PromptSetScope], asyncio.Lock] = {}
+_version_template_load_locks: dict[UUID, asyncio.Lock] = {}
+_template_cache_generation = 0
 
 
 def get_jinja_environment(template_dir: Path, *, is_internal: bool = False) -> Environment:
@@ -99,46 +103,70 @@ def get_jinja_environment(template_dir: Path, *, is_internal: bool = False) -> E
 
 async def get_deployed_templates(*, is_internal: bool, scope: PromptSetScope) -> dict[str, str]:
     cache_key = (is_internal, scope)
-    if cache_key in _deployed_templates_cache:
-        return dict(_deployed_templates_cache[cache_key])
+    cached = _deployed_templates_cache.get(cache_key)
+    if cached is not None:
+        return dict(cached)
 
-    async with get_session() as session:
-        version_stmt = (
-            select(PromptSetVersion)
-            .where(PromptSetVersion.is_deployed == True)  # noqa: E712
-            .where(PromptSetVersion.is_internal == is_internal)
-            .where(PromptSetVersion.scope == scope)
-            .limit(1)
-        )
-        version = (await session.execute(version_stmt)).scalar_one_or_none()
-        if version is None:
-            _deployed_templates_cache[cache_key] = {}
-            return {}
+    lock = _deployed_template_load_locks.setdefault(cache_key, asyncio.Lock())
+    async with lock:
+        while True:
+            cached = _deployed_templates_cache.get(cache_key)
+            if cached is not None:
+                return dict(cached)
 
-        templates_stmt = select(PromptSetTemplate).where(
-            PromptSetTemplate.prompt_set_version_id == version.id
-        )
-        prompts = (await session.execute(templates_stmt)).scalars().all()
+            generation = _template_cache_generation
+            async with get_session() as session:
+                version_stmt = (
+                    select(PromptSetVersion)
+                    .where(PromptSetVersion.is_deployed == True)  # noqa: E712
+                    .where(PromptSetVersion.is_internal == is_internal)
+                    .where(PromptSetVersion.scope == scope)
+                    .limit(1)
+                )
+                version = (await session.execute(version_stmt)).scalar_one_or_none()
+                if version is None:
+                    templates: dict[str, str] = {}
+                else:
+                    templates_stmt = select(PromptSetTemplate).where(
+                        PromptSetTemplate.prompt_set_version_id == version.id
+                    )
+                    prompts = (await session.execute(templates_stmt)).scalars().all()
+                    templates = {prompt.filename: prompt.content for prompt in prompts}
 
-    templates = {prompt.filename: prompt.content for prompt in prompts}
-    _deployed_templates_cache[cache_key] = dict(templates)
-    _version_templates_cache[version.id] = dict(templates)
-    return templates
+            if generation != _template_cache_generation:
+                continue
+
+            _deployed_templates_cache[cache_key] = dict(templates)
+            if version is not None:
+                _version_templates_cache[version.id] = dict(templates)
+            return dict(templates)
 
 
 async def get_templates_for_version(version_id: UUID) -> dict[str, str]:
-    if version_id in _version_templates_cache:
-        return dict(_version_templates_cache[version_id])
+    cached = _version_templates_cache.get(version_id)
+    if cached is not None:
+        return dict(cached)
 
-    async with get_session() as session:
-        templates_stmt = select(PromptSetTemplate).where(
-            PromptSetTemplate.prompt_set_version_id == version_id
-        )
-        prompts = (await session.execute(templates_stmt)).scalars().all()
+    lock = _version_template_load_locks.setdefault(version_id, asyncio.Lock())
+    async with lock:
+        while True:
+            cached = _version_templates_cache.get(version_id)
+            if cached is not None:
+                return dict(cached)
 
-    templates = {prompt.filename: prompt.content for prompt in prompts}
-    _version_templates_cache[version_id] = dict(templates)
-    return templates
+            generation = _template_cache_generation
+            async with get_session() as session:
+                templates_stmt = select(PromptSetTemplate).where(
+                    PromptSetTemplate.prompt_set_version_id == version_id
+                )
+                prompts = (await session.execute(templates_stmt)).scalars().all()
+
+            templates = {prompt.filename: prompt.content for prompt in prompts}
+            if generation != _template_cache_generation:
+                continue
+
+            _version_templates_cache[version_id] = dict(templates)
+            return dict(templates)
 
 
 async def get_runtime_jinja_environment(
@@ -147,7 +175,13 @@ async def get_runtime_jinja_environment(
     is_internal: bool = False,
     scope: PromptSetScope = PromptSetScope.ASSISTANT,
     prompt_set_version_id: UUID | None = None,
+    template_overrides: dict[str, str] | None = None,
 ) -> Environment:
+    if template_overrides is not None:
+        return create_jinja_environment_with_db(
+            template_dir, template_overrides, is_internal=is_internal
+        )
+
     if prompt_set_version_id is not None:
         db_templates = await get_templates_for_version(prompt_set_version_id)
     else:
@@ -159,6 +193,9 @@ async def get_runtime_jinja_environment(
 
 
 def clear_deployed_templates_cache() -> None:
+    global _template_cache_generation  # noqa: PLW0603
+
+    _template_cache_generation += 1
     _deployed_templates_cache.clear()
     _version_templates_cache.clear()
     _jinja_environments.clear()

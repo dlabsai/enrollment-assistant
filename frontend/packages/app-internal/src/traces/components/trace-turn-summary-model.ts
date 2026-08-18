@@ -26,9 +26,8 @@ interface TimingRow {
     spanId: string;
     label: string;
     value: string;
-    offsetPct: number;
-    widthPct: number;
-    barClass: string;
+    offsetMs: number;
+    durationMs: number;
     start: number;
     depth: number;
     displaySpan: TraceSpan;
@@ -270,23 +269,6 @@ const isLlmOperationSpan = (span: TraceSpan): boolean => {
     return operationName !== undefined && operationName !== "embeddings";
 };
 
-const getRowColorForAgent = (agentName: string | undefined): string => {
-    switch (agentName) {
-        case "search": {
-            return "bg-chart-2";
-        }
-        case "guardrails": {
-            return "bg-chart-4";
-        }
-        case "chatbot": {
-            return "bg-chart-1";
-        }
-        default: {
-            return "bg-primary";
-        }
-    }
-};
-
 const getRawSpanBounds = (
     span: TraceSpan,
 ): {
@@ -492,7 +474,6 @@ const createTimingRow = ({
     label,
     rangeEnd,
     rangeStart,
-    barClass,
     metricSpans,
     contentSpans,
 }: {
@@ -502,7 +483,6 @@ const createTimingRow = ({
     label: string;
     rangeEnd: number | undefined;
     rangeStart: number | undefined;
-    barClass: string;
     metricSpans?: TraceSpan[];
     contentSpans?: TraceSpan[];
 }): TimingRow | undefined => {
@@ -519,9 +499,8 @@ const createTimingRow = ({
         spanId: displaySpan.span_id,
         label,
         value: formatSpanDuration(displaySpan),
-        offsetPct: timelineLayout.offsetPct,
-        widthPct: timelineLayout.widthPct,
-        barClass,
+        offsetMs: timelineLayout.offsetMs,
+        durationMs: timelineLayout.durationMs,
         start: timelineLayout.start,
         depth,
         displaySpan,
@@ -577,7 +556,6 @@ const buildTimingRows = (
                 label: "Turn",
                 rangeEnd,
                 rangeStart,
-                barClass: "bg-primary",
             });
             if (row !== undefined) {
                 rows.push(row);
@@ -618,7 +596,6 @@ const buildTimingRows = (
                 label,
                 rangeEnd,
                 rangeStart,
-                barClass: getRowColorForAgent(directAgentName),
                 metricSpans: hasUsageMetrics(span) ? [span] : descendants,
             });
             if (parentRow !== undefined) {
@@ -693,7 +670,6 @@ const buildTimingRows = (
                     label: `LLM #${llmCount}`,
                     rangeEnd,
                     rangeStart,
-                    barClass: getRowColorForAgent(directAgentName),
                     metricSpans:
                         llmMetric === undefined
                             ? llmPhaseSpans
@@ -730,11 +706,6 @@ const buildTimingRows = (
                             : normalizeOperationLabel(child),
                         rangeEnd,
                         rangeStart,
-                        barClass: isUrlGuardrailsSpan(child)
-                            ? "bg-chart-4"
-                            : getOperationName(child) === "embeddings"
-                              ? "bg-chart-3"
-                              : "bg-chart-5",
                     });
                     if (row !== undefined) {
                         rows.push(row);
@@ -770,7 +741,6 @@ const buildTimingRows = (
                     label,
                     rangeEnd,
                     rangeStart,
-                    barClass: "bg-chart-1",
                 });
                 if (row !== undefined) {
                     rows.push(row);
@@ -789,7 +759,6 @@ const buildTimingRows = (
                 label: "URL Guardrails",
                 rangeEnd,
                 rangeStart,
-                barClass: "bg-chart-4",
             });
             if (row !== undefined) {
                 rows.push(row);

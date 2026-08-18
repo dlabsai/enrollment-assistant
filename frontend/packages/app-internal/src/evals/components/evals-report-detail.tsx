@@ -1205,9 +1205,7 @@ export const EvalsReportDetail = memo(
                                 <Select
                                     onValueChange={(value) => {
                                         if (value !== null) {
-                                            setRunStatusFilter(
-                                                value as RunStatusFilter,
-                                            );
+                                            setRunStatusFilter(value);
                                         }
                                     }}
                                     value={runStatusFilter}
@@ -1266,9 +1264,7 @@ export const EvalsReportDetail = memo(
                                 <Select
                                     onValueChange={(value) => {
                                         if (value !== null) {
-                                            setCasePassRateFilter(
-                                                value as CasePassRateFilter,
-                                            );
+                                            setCasePassRateFilter(value);
                                         }
                                     }}
                                     value={casePassRateFilter}

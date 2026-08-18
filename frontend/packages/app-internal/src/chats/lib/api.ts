@@ -43,10 +43,12 @@ interface ChatListPageResponseItem {
     title?: string;
     summary?: string;
     last_message_preview?: string | null;
-    message_count: number;
+    user_message_count: number;
+    assistant_message_count: number;
     created_at: string;
     updated_at: string;
     is_public: boolean;
+    prompt_source?: string | null;
     user_name?: string | null;
     user_email?: string | null;
     total_cost?: number | null;
@@ -127,10 +129,12 @@ export const fetchChatListPage = async (
             title: item.title ?? undefined,
             summary: item.summary ?? undefined,
             lastMessagePreview: item.last_message_preview ?? undefined,
-            messageCount: item.message_count,
+            userMessageCount: item.user_message_count,
+            assistantMessageCount: item.assistant_message_count,
             createdAt: item.created_at,
             updatedAt: item.updated_at,
             isPublic: item.is_public,
+            promptSource: item.prompt_source ?? undefined,
             userName: item.user_name ?? undefined,
             userEmail: item.user_email ?? undefined,
             totalCost: item.total_cost ?? undefined,

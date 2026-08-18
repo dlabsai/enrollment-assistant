@@ -1,6 +1,9 @@
-import { Button } from "@va/shared/components/ui/button";
-import { ChevronRight } from "lucide-react";
-import { type JSX, useEffect, useRef, useState } from "react";
+import {
+    ResizableHandle,
+    ResizablePanel,
+    ResizablePanelGroup,
+} from "@va/shared/components/ui/resizable";
+import { type JSX, useEffect } from "react";
 
 import {
     useInstructionsActions,
@@ -16,7 +19,8 @@ import { ConfirmDialogs } from "./confirm-dialogs";
 import { EditorArea } from "./editor-area";
 import { HelpGuide } from "./help-guide";
 import { InstructionsSidebar } from "./instructions-sidebar";
-import { TestChat, TestChatControls, TestChatInfo } from "./test-chat";
+import { InstructionsToolbar } from "./instructions-toolbar";
+import { TestChat } from "./test-chat";
 
 const ErrorBanner = (): JSX.Element | undefined => {
     const error = useInstructionsStore((state) => state.error);
@@ -40,91 +44,68 @@ const ErrorBanner = (): JSX.Element | undefined => {
     );
 };
 
-interface TestChatPanelProps {
-    onNewChat: () => void;
-    onMessagesChange: (hasMessages: boolean) => void;
-    onNewChatReady: (handler: () => void) => void;
-    showNewChat: boolean;
-}
+const TestChatPanel = (): JSX.Element => (
+    <div className="bg-background text-foreground flex h-full min-h-0 w-full flex-col overflow-hidden border-l">
+        <div className="min-h-0 flex-1 overflow-hidden">
+            <TestChat />
+        </div>
+    </div>
+);
 
-const TestChatPanel = ({
-    onNewChat,
-    onMessagesChange,
-    onNewChatReady,
-    showNewChat,
-}: TestChatPanelProps): JSX.Element | undefined => {
+const InstructionsWorkspace = (): JSX.Element => {
     const isChatPanelOpen = useInstructionsStore(
         (state) => state.isChatPanelOpen,
     );
     const activeSectionId = useInstructionsStore(
         (state) => state.activeSectionId,
     );
-    const { setChatPanelOpen } = useInstructionsActions();
-
-    if (!isChatPanelOpen || !isAssistantSectionId(activeSectionId)) {
-        return undefined;
-    }
-
-    return (
-        <div className="bg-background text-foreground flex min-h-0 w-full flex-col border-t md:w-[380px] md:border-t-0 md:border-l">
-            <div className="border-b px-3 py-2">
-                <div className="flex items-center justify-between">
-                    <span className="text-sm font-medium">Test Chat</span>
-                    <Button
-                        onClick={() => {
-                            setChatPanelOpen(false);
-                        }}
-                        size="icon"
-                        variant="ghost"
-                    >
-                        <ChevronRight className="size-4" />
-                        <span className="sr-only">Collapse test chat</span>
-                    </Button>
-                </div>
-            </div>
-            <div className="border-b px-3 py-2">
-                <div className="flex flex-wrap items-center gap-2">
-                    <TestChatControls
-                        onNewChat={onNewChat}
-                        showNewChat={showNewChat}
-                    />
-                    <TestChatInfo />
-                </div>
-            </div>
-            <div className="min-h-0 flex-1">
-                <TestChat
-                    onMessagesChange={onMessagesChange}
-                    onNewChatReady={onNewChatReady}
-                />
-            </div>
-        </div>
-    );
-};
-
-const InstructionsWorkspace = (): JSX.Element => {
-    const [testChatHasMessages, setTestChatHasMessages] = useState(false);
-    const testChatNewChatRef = useRef<(() => void) | undefined>(undefined);
+    const showTestChat = isChatPanelOpen && isAssistantSectionId(activeSectionId);
 
     return (
         <div className="bg-background text-foreground flex h-full flex-col">
             <ErrorBanner />
-            <div className="flex min-h-0 flex-1 flex-col overflow-hidden md:flex-row">
+            <div className="flex min-h-0 flex-1 overflow-hidden">
                 <div className="hidden md:flex">
                     <InstructionsSidebar />
                 </div>
                 <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
-                    <EditorArea />
+                    <InstructionsToolbar />
+                    <div className="min-h-0 flex-1 overflow-hidden">
+                        {showTestChat ? (
+                            <ResizablePanelGroup
+                                className="min-h-0"
+                                orientation="horizontal"
+                            >
+                                <ResizablePanel
+                                    defaultSize="50%"
+                                    minSize="22%"
+                                    style={{ overflow: "visible" }}
+                                >
+                                    <div className="flex h-full min-w-0 flex-col overflow-hidden">
+                                        <EditorArea />
+                                    </div>
+                                </ResizablePanel>
+                                <ResizableHandle
+                                    className="mx-2"
+                                    withHandle
+                                />
+                                <ResizablePanel
+                                    defaultSize="50%"
+                                    minSize="22%"
+                                    style={{ overflow: "visible" }}
+                                >
+                                    <div className="flex h-full min-w-0 flex-col overflow-hidden">
+                                        <TestChatPanel />
+                                    </div>
+                                </ResizablePanel>
+                            </ResizablePanelGroup>
+                        ) : (
+                            <div className="flex h-full min-w-0 flex-col overflow-hidden">
+                                <EditorArea />
+                            </div>
+                        )}
+                    </div>
                 </div>
-                <TestChatPanel
-                    onMessagesChange={setTestChatHasMessages}
-                    onNewChat={() => {
-                        testChatNewChatRef.current?.();
-                    }}
-                    onNewChatReady={(handler) => {
-                        testChatNewChatRef.current = handler;
-                    }}
-                    showNewChat={testChatHasMessages}
-                />
             </div>
         </div>
     );

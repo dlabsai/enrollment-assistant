@@ -46,6 +46,7 @@ from app.models import (
     User,
 )
 from app.rag.build_notifications import (
+    RagBuildLogHandler,
     RagBuildNotificationPublisher,
     active_manual_rag_build_snapshot_events,
     listen_rag_build_notifications,
@@ -53,9 +54,12 @@ from app.rag.build_notifications import (
 )
 from app.rag.constants import EMBEDDING_MODEL, EMBEDDING_VECTOR_DIMENSIONS
 from app.rag.document_exclusions import RagExclusionFilter, apply_exclusion_filter
+from app.rag.job_tracking import finish_rag_build_job, request_active_manual_rag_build_cancellation
 from app.rag.pipeline import (
     RagPipelineAlreadyRunningError,
+    RagPipelineCancellationRequestedError,
     RagPipelineProgressSnapshot,
+    rag_pipeline_lock_is_held,
     run_rag_sync_pipeline,
 )
 from app.rag.training_materials.urls import (
@@ -64,7 +68,7 @@ from app.rag.training_materials.urls import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable
+    from collections.abc import AsyncIterator
 
 router = APIRouter(prefix="/rag", tags=["rag"])
 logger = logging.getLogger(__name__)
@@ -226,6 +230,11 @@ class _TreeDocument:
 class RagBuildRequest(BaseModel):
     force_rebuild: bool = False
     resume_existing: bool = False
+
+
+class RagBuildCancelOut(BaseModel):
+    job_id: UUID
+    status: Literal["cancelling", "cancelled"]
 
 
 class RagBuildJobUserOut(BaseModel):
@@ -782,33 +791,7 @@ async def _next_rag_build_notification(
     return await anext(notifications)
 
 
-class _PipelineLogHandler(logging.Handler):
-    def __init__(
-        self, publisher: RagBuildNotificationPublisher, job_id_getter: Callable[[], UUID | None]
-    ) -> None:
-        super().__init__(level=logging.INFO)
-        self._publisher = publisher
-        self._job_id_getter = job_id_getter
-        self.previous_level = logging.NOTSET
-
-    def emit(self, record: logging.LogRecord) -> None:
-        try:
-            message = self.format(record)
-        except Exception:
-            self.handleError(record)
-            return
-
-        job_id = self._job_id_getter()
-        if job_id is None:
-            return
-
-        stream = "stderr" if record.levelno >= logging.ERROR else "stdout"
-        self._publisher.publish_nowait(
-            "log", {"job_id": str(job_id), "stream": stream, "message": message}
-        )
-
-
-def _attach_pipeline_log_handler(handler: _PipelineLogHandler) -> None:
+def _attach_pipeline_log_handler(handler: RagBuildLogHandler) -> None:
     app_logger = logging.getLogger("app")
     handler.setFormatter(logging.Formatter("%(message)s"))
     handler.previous_level = app_logger.level
@@ -817,7 +800,7 @@ def _attach_pipeline_log_handler(handler: _PipelineLogHandler) -> None:
     app_logger.addHandler(handler)
 
 
-def _detach_pipeline_log_handler(handler: _PipelineLogHandler) -> None:
+def _detach_pipeline_log_handler(handler: RagBuildLogHandler) -> None:
     app_logger = logging.getLogger("app")
     app_logger.removeHandler(handler)
     app_logger.setLevel(handler.previous_level)
@@ -836,11 +819,9 @@ async def _run_manual_rag_build_notifications(
         if started_job_id_future is not None and not started_job_id_future.done():
             started_job_id_future.set_result(value)
 
-    def current_job_id() -> UUID | None:
-        return job_id
-
-    log_handler = _PipelineLogHandler(publisher, current_job_id)
-    _attach_pipeline_log_handler(log_handler)
+    log_context_token = None
+    log_handler = RagBuildLogHandler(publisher)
+    log_handler_attached = False
 
     async def publish_status(status: str, *, exit_code: int | None = None) -> None:
         payload: dict[str, Any] = {"status": status}
@@ -857,8 +838,11 @@ async def _run_manual_rag_build_notifications(
         await publish_rag_build_notification("error", payload)
 
     async def on_job_started(started_job_id: UUID) -> None:
-        nonlocal job_id
+        nonlocal job_id, log_context_token, log_handler_attached
         job_id = started_job_id
+        log_context_token = log_handler.bind(started_job_id)
+        _attach_pipeline_log_handler(log_handler)
+        log_handler_attached = True
         resolve_started_job_id(started_job_id)
         await publish_status("start")
 
@@ -884,6 +868,8 @@ async def _run_manual_rag_build_notifications(
     except asyncio.CancelledError:
         terminal_status = ("cancelled", None)
         raise
+    except RagPipelineCancellationRequestedError:
+        terminal_status = ("cancelled", None)
     except RagPipelineAlreadyRunningError as exc:
         terminal_error_message = str(exc)
         terminal_status = ("error", 409)
@@ -893,7 +879,10 @@ async def _run_manual_rag_build_notifications(
         terminal_status = ("error", 1)
     finally:
         resolve_started_job_id(job_id)
-        _detach_pipeline_log_handler(log_handler)
+        if log_handler_attached:
+            _detach_pipeline_log_handler(log_handler)
+        if log_context_token is not None:
+            log_handler.unbind(log_context_token)
         await publisher.close()
         if terminal_error_message is not None:
             await publish_error(terminal_error_message)
@@ -1740,6 +1729,25 @@ async def stream_eval_rag_copy_from_runtime(
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+@router.post("/build/cancel", response_model=RagBuildCancelOut)
+async def cancel_rag_build(_current_user: RagBuildAccessUser) -> RagBuildCancelOut:
+    job_id = await request_active_manual_rag_build_cancellation()
+    if job_id is None:
+        raise HTTPException(status_code=404, detail="No manual RAG build is running")
+
+    await publish_rag_build_notification("status", {"job_id": str(job_id), "status": "cancelling"})
+    if not await rag_pipeline_lock_is_held():
+        await finish_rag_build_job(
+            job_id, status="cancelled", error_message="RAG build was cancelled"
+        )
+        await publish_rag_build_notification(
+            "status", {"job_id": str(job_id), "status": "cancelled"}
+        )
+        return RagBuildCancelOut(job_id=job_id, status="cancelled")
+
+    return RagBuildCancelOut(job_id=job_id, status="cancelling")
 
 
 @router.post("/build/stream", response_class=StreamingResponse)

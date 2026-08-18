@@ -1,6 +1,7 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback } from "react";
 
 import { useAuthenticatedApi } from "../../auth/hooks/use-authenticated-api";
+import { useAsyncData } from "../../lib/hooks/use-async-data";
 import type { CustomTimeRange, TimeRangeValue } from "../../lib/time-range";
 import { fetchPublicUsageSummary } from "../../public-analytics/lib/api";
 import type { PublicUsageSummary } from "../types";
@@ -10,7 +11,7 @@ interface UsePublicUsageDataResult {
     loading: boolean;
     hasLoaded: boolean;
     error: string | undefined;
-    refresh: () => Promise<void>;
+    refresh: () => void;
 }
 
 export const usePublicUsageData = (
@@ -18,36 +19,18 @@ export const usePublicUsageData = (
     customRange: CustomTimeRange,
 ): UsePublicUsageDataResult => {
     const api = useAuthenticatedApi();
-    const [summary, setSummary] = useState<PublicUsageSummary | undefined>();
-    const [loading, setLoading] = useState(true);
-    const [hasLoaded, setHasLoaded] = useState(false);
-    const [error, setError] = useState<string | undefined>();
+    const load = useCallback(
+        async (signal: AbortSignal) =>
+            fetchPublicUsageSummary(api, timeRange, customRange, signal),
+        [api, customRange, timeRange],
+    );
+    const { data, loading, hasLoaded, error, refresh } = useAsyncData<
+        PublicUsageSummary | undefined
+    >({
+        errorMessage: "Failed to fetch public usage data",
+        initialData: undefined,
+        load,
+    });
 
-    const refresh = useCallback(async () => {
-        setLoading(true);
-        setError(undefined);
-        try {
-            const data = await fetchPublicUsageSummary(
-                api,
-                timeRange,
-                customRange,
-            );
-            setSummary(data);
-        } catch (error_) {
-            setError(
-                error_ instanceof Error
-                    ? error_.message
-                    : "Failed to fetch public usage data",
-            );
-        } finally {
-            setLoading(false);
-            setHasLoaded(true);
-        }
-    }, [api, customRange, timeRange]);
-
-    useEffect(() => {
-        void refresh();
-    }, [refresh]);
-
-    return { summary, loading, hasLoaded, error, refresh };
+    return { summary: data, loading, hasLoaded, error, refresh };
 };

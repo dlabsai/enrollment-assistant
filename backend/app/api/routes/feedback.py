@@ -521,17 +521,35 @@ async def list_feedback(
         end=end,
     )
 
-    total_stmt = select(func.count()).select_from(base_stmt.subquery())
-    total = (await session.execute(total_stmt)).scalar() or 0
-
-    stmt = (
-        _sort_feedback_stmt(base_stmt, sort_by=sort_by, descending=descending)
-        .offset(offset)
-        .limit(limit)
-    )
-
-    rows = (await session.execute(stmt)).all()
-    items = [_row_to_feedback_query_item(row) for row in rows]
-    return FeedbackListPage(
+    filtered_ids_stmt = base_stmt.with_only_columns(MessageFeedback.id, maintain_column_froms=True)
+    page_rows = (
+        await session.execute(
+            _sort_feedback_stmt(
+                filtered_ids_stmt.add_columns(func.count().over().label("page_total")),
+                sort_by=sort_by,
+                descending=descending,
+            )
+            .offset(offset)
+            .limit(limit)
+        )
+    ).all()
+    if page_rows:
+        total = int(page_rows[0].page_total)
+        page_ids = [row[0] for row in page_rows]
+        rows = (await session.execute(base_stmt.where(MessageFeedback.id.in_(page_ids)))).all()
+        rows_by_id = {row[0].id: row for row in rows}
+        items = [
+            _row_to_feedback_query_item(rows_by_id[feedback_id])
+            for feedback_id in page_ids
+            if feedback_id in rows_by_id
+        ]
+    else:
+        total_stmt = select(func.count()).select_from(filtered_ids_stmt.subquery())
+        total = (await session.execute(total_stmt)).scalar() or 0
+        items = []
+    response = FeedbackListPage(
         total=total, items=[_query_item_to_feedback_list_item(item) for item in items]
     )
+    # Release the reserved connection before FastAPI validates and serializes the response.
+    await session.commit()
+    return response

@@ -20,6 +20,7 @@ class _CasePayloadBase(BaseModel):
 
     test_case_id: str = Field(min_length=1, max_length=255)
     criteria: str = Field(min_length=1)
+    verified: bool = False
 
     @field_validator("test_case_id")
     @classmethod

@@ -3,3 +3,80 @@
 @source "./**/*.{ts,tsx}";
 @source "../../shared/src/**/*.{ts,tsx}";
 @source "../../../node_modules/.pnpm/node_modules/streamdown/dist/*.js";
+
+.trace-timeline-row {
+    background-color: var(--background);
+}
+
+.trace-timeline-row.trace-timeline-selection {
+    background-color: color-mix(
+        in oklab,
+        var(--primary) 15%,
+        var(--background)
+    );
+}
+
+.dark .trace-timeline-row.trace-timeline-selection {
+    background-color: color-mix(
+        in oklab,
+        var(--primary) 24%,
+        var(--background)
+    );
+}
+
+.trace-timeline-row:hover:not(.trace-timeline-selection) {
+    background-color: color-mix(
+        in oklab,
+        var(--primary) 10%,
+        var(--background)
+    );
+}
+
+.trace-timeline-row:hover:not(.trace-timeline-selection)
+    > .trace-timeline-gutter {
+    border-right-color: transparent;
+}
+
+.dark .trace-timeline-row:hover:not(.trace-timeline-selection) {
+    background-color: var(--muted);
+}
+
+.trace-tree-line {
+    border-color: color-mix(
+        in oklab,
+        var(--foreground) 30%,
+        var(--background)
+    );
+}
+
+.dark .trace-tree-line {
+    border-color: color-mix(
+        in oklab,
+        var(--foreground) 42%,
+        var(--background)
+    );
+}
+
+.trace-timeline-row.trace-timeline-failure {
+    background-color: color-mix(
+        in oklab,
+        var(--destructive) 10%,
+        var(--background)
+    );
+}
+
+.trace-timeline-row.trace-timeline-error {
+    background-color: color-mix(
+        in oklab,
+        var(--color-amber-500) 10%,
+        var(--background)
+    );
+}
+
+/* Trace table peeks stay non-modal so another row can replace the open trace. */
+[data-slot="sheet-overlay"]:has(~ [data-trace-peek-content]) {
+    pointer-events: none;
+    background-color: transparent;
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+}

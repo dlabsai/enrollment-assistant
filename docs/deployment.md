@@ -72,7 +72,40 @@ The deployment script:
 5. Generates an Azure `startup.sh` that runs migrations, starts the optional standalone scheduler, and serves `app.static_app:app` with gunicorn.
 6. Creates and deploys `deploy.zip`.
 
-Set `AZURE_POSTGRES_SERVER_NAME` when the script should enable the Azure PostgreSQL `vector` extension before deployment. Keep real credentials in local environment variables or Azure app settings, not in repository files.
+Set `AZURE_POSTGRES_SERVER_NAME` when the script should enable the Azure PostgreSQL `vector` extension before deployment. Leave it unset for Neon because Alembic creates the supported `vector` extension. Keep real credentials in local environment variables or Azure app settings, not in repository files.
+
+### Low-traffic Azure App Service with Neon
+
+The demo deployment can keep the FastAPI/React application on Azure App Service while using one Neon project with separate main and guarded eval databases. Use the direct Neon endpoint because Alembic and eval progress `LISTEN/NOTIFY` require session-aware PostgreSQL connections.
+
+Configure only the targeted Azure app settings; do not rerun `deploy-env.sh` against an established deployment because it replaces the complete setting set.
+
+```text
+POSTGRES_SERVER=<direct Neon host without protocol>
+POSTGRES_PORT=5432
+POSTGRES_USER=<Neon role>
+POSTGRES_PASSWORD=<secret>
+POSTGRES_DB=enrollment_assistant
+
+PYTEST_POSTGRES_SERVER=<same direct Neon host>
+PYTEST_POSTGRES_PORT=5432
+PYTEST_POSTGRES_USER=<Neon role>
+PYTEST_POSTGRES_PASSWORD=<secret>
+PYTEST_POSTGRES_DB=enrollment_assistant_test
+
+PGSSLMODE=require
+PGCHANNELBINDING=require
+WEB_CONCURRENCY=1
+POSTGRES_POOL_SIZE=2
+POSTGRES_MAX_OVERFLOW=2
+INTERACTIVE_POSTGRES_POOL_SIZE=1
+INTERACTIVE_POSTGRES_MAX_OVERFLOW=0
+OTEL_POSTGRES_POOL_SIZE=1
+OTEL_POSTGRES_MAX_OVERFLOW=0
+SCHEDULER=false
+```
+
+SQLAlchemy checks pooled connections before reuse so a connection closed during Neon scale-to-zero is replaced on the next checkout. The health endpoint does not query PostgreSQL; platform health probes therefore do not keep Neon awake.
 
 ## Deployment Package Shape
 

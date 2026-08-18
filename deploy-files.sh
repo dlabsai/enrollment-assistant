@@ -39,6 +39,11 @@ else
 fi
 
 FRONTEND_API_URL="${VITE_API_URL:-/api}"
+if [ -n "$(git -C "$SCRIPT_DIR" status --porcelain)" ]; then
+    echo "Error: working tree has uncommitted changes; commit or stash before deploying so the embedded commit SHA matches the deployed bundle."
+    exit 1
+fi
+DEPLOY_COMMIT_SHA="$(git -C "$SCRIPT_DIR" rev-parse HEAD)"
 
 # Enable PostgreSQL vector extension if server is specified
 if [ -n "$POSTGRES_SERVER" ]; then
@@ -61,7 +66,10 @@ if [ -d "$FRONTEND_DIR" ]; then
     cd "$FRONTEND_DIR"
     pnpm install --frozen-lockfile
     echo "Using frontend API URL: $FRONTEND_API_URL"
-    VITE_API_URL="$FRONTEND_API_URL" pnpm run build-internal-stage
+    echo "Embedding deploy commit: $DEPLOY_COMMIT_SHA"
+    VITE_API_URL="$FRONTEND_API_URL" \
+        VITE_DEPLOY_COMMIT_SHA="$DEPLOY_COMMIT_SHA" \
+        pnpm run build-internal-stage
 else
     echo "Error: Frontend not found at $FRONTEND_DIR"
     exit 1
@@ -144,8 +152,15 @@ case "$SCHEDULER_VALUE" in
         ;;
 esac
 
+WEB_CONCURRENCY_VALUE="${WEB_CONCURRENCY:-1}"
+if ! [[ "$WEB_CONCURRENCY_VALUE" =~ ^[1-9][0-9]*$ ]]; then
+    echo "Invalid WEB_CONCURRENCY value: $WEB_CONCURRENCY_VALUE" >&2
+    exit 1
+fi
+
 # Start the app with gunicorn + uvicorn workers (use static_app which serves frontend).
-SCHEDULER=false gunicorn --bind=0.0.0.0:8000 --timeout 600 --workers 4 -k uvicorn.workers.UvicornWorker app.static_app:app &
+SCHEDULER=false gunicorn --bind=0.0.0.0:8000 --timeout 600 \
+    --workers "$WEB_CONCURRENCY_VALUE" -k uvicorn.workers.UvicornWorker app.static_app:app &
 WEB_PID=$!
 
 set +e

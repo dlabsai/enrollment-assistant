@@ -17,8 +17,10 @@ from app.rag.demo_corpus.generate import write_demo_rag_data
 from app.rag.job_tracking import (
     create_rag_build_job,
     finish_rag_build_job,
+    rag_build_cancellation_requested,
     record_rag_build_progress,
     record_rag_build_source_stats,
+    start_rag_build_job,
 )
 
 if TYPE_CHECKING:
@@ -37,6 +39,10 @@ RagPipelineJobStartedCallback = Callable[["UUID"], Awaitable[None]]
 
 class RagPipelineAlreadyRunningError(RuntimeError):
     """Raised when another worker already holds the RAG pipeline advisory lock."""
+
+
+class RagPipelineCancellationRequestedError(RuntimeError):
+    """Raised when a persisted RAG build cancellation request is observed."""
 
 
 class RagPipelineStepSnapshot(BaseModel):
@@ -94,6 +100,14 @@ async def try_acquire_rag_pipeline_lock(*, job_name: str) -> _RagPipelineLockHan
 
     logger.debug("Acquired RAG pipeline advisory lock for %s", job_name)
     return _RagPipelineLockHandle(connection, job_name=job_name)
+
+
+async def rag_pipeline_lock_is_held() -> bool:
+    lock = await try_acquire_rag_pipeline_lock(job_name="rag_pipeline_lock_check")
+    if lock is None:
+        return True
+    await lock.release()
+    return False
 
 
 def _build_step_definitions() -> list[_PipelineStepDefinition]:
@@ -167,8 +181,6 @@ async def run_rag_sync_pipeline(
         force_rebuild=force_rebuild,
         started_by_user_id=started_by_user_id,
     )
-    if job_started_callback is not None:
-        await job_started_callback(job_id)
 
     async def publish_progress(snapshot: RagPipelineProgressSnapshot) -> None:
         await record_rag_build_progress(job_id, snapshot)
@@ -191,7 +203,26 @@ async def run_rag_sync_pipeline(
         await finish_rag_build_job(job_id, status="skipped", error_message=error_message)
         raise RagPipelineAlreadyRunningError(error_message)
 
+    steps: list[RagPipelineStepSnapshot] = []
+
+    async def raise_if_cancel_requested() -> None:
+        if await rag_build_cancellation_requested(job_id):
+            raise RagPipelineCancellationRequestedError("RAG build cancellation requested")
+
+    async def run_step(
+        definition: _PipelineStepDefinition, operation: Callable[[], Awaitable[None]]
+    ) -> None:
+        await raise_if_cancel_requested()
+        await _run_step(steps, definition, operation, callback=publish_progress)
+        await raise_if_cancel_requested()
+
     try:
+        await start_rag_build_job(job_id)
+        if job_started_callback is not None:
+            await job_started_callback(job_id)
+
+        logger.info("RAG pipeline options: force_rebuild=%s", force_rebuild)
+
         steps = [
             RagPipelineStepSnapshot(key=definition.key, label=definition.label, status="pending")
             for definition in _build_step_definitions()
@@ -203,11 +234,9 @@ async def run_rag_sync_pipeline(
             stats = await asyncio.to_thread(write_demo_rag_data)
             logger.info("Wrote Demo University RAG corpus: %s documents", stats.total_documents)
 
-        await _run_step(
-            steps,
+        await run_step(
             _PipelineStepDefinition(key="demo_corpus_ingest", label="Demo corpus ingest"),
             run_demo_corpus_ingest,
-            callback=publish_progress,
         )
 
         async def run_build_search_db() -> None:
@@ -222,11 +251,9 @@ async def run_rag_sync_pipeline(
                     ),
                 )
 
-        await _run_step(
-            steps,
+        await run_step(
             _PipelineStepDefinition(key="build_search_db", label="Build search DB"),
             run_build_search_db,
-            callback=publish_progress,
         )
 
         async def run_vacuum() -> None:
@@ -234,13 +261,15 @@ async def run_rag_sync_pipeline(
                 for table_name in ("document", "document_content_chunk", "guardrail_url_registry"):
                     await conn.execute(text(f"VACUUM ANALYZE {table_name}"))
 
-        await _run_step(
-            steps,
-            _PipelineStepDefinition(key="vacuum_database", label="Vacuum database"),
-            run_vacuum,
-            callback=publish_progress,
+        await run_step(
+            _PipelineStepDefinition(key="vacuum_database", label="Vacuum database"), run_vacuum
         )
     except asyncio.CancelledError:
+        await finish_rag_build_job(
+            job_id, status="cancelled", error_message="RAG build was cancelled"
+        )
+        raise
+    except RagPipelineCancellationRequestedError:
         await finish_rag_build_job(
             job_id, status="cancelled", error_message="RAG build was cancelled"
         )

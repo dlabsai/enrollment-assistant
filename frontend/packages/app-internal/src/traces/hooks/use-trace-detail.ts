@@ -9,7 +9,7 @@ interface UseTraceDetailResult {
     detail: TraceDetail | undefined;
     loading: boolean;
     error: string | undefined;
-    refresh: () => Promise<void>;
+    refresh: () => void;
 }
 
 export const useTraceDetail = (
@@ -17,7 +17,8 @@ export const useTraceDetail = (
     source: "runtime" | "evals" = "runtime",
 ): UseTraceDetailResult => {
     const fetcher = useCallback(
-        async (api: AuthenticatedApi, id: string) => fetchTraceDetail(api, id, source),
+        async (api: AuthenticatedApi, id: string, signal: AbortSignal) =>
+            fetchTraceDetail(api, id, source, signal),
         [source],
     );
     return useTraceDetailLoader(traceId, fetcher);

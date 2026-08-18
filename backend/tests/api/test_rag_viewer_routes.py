@@ -483,9 +483,10 @@ async def test_rag_training_material_file_extension_preserves_hash_filename(
     assert list_response.status_code == 200
     assert str(document.id) in {item["id"] for item in list_response.json()["items"]}
     assert tree_response.status_code == 200
-    folder = next(node for node in tree_response.json() if node["label"] == "Training materials")[
-        "children"
-    ][0]
+    training_materials = next(
+        node for node in tree_response.json() if node["label"] == "Training materials"
+    )
+    folder = next(node for node in training_materials["children"] if node["label"] == "Folder")
     assert any(
         child["label"] == "New  Unconverted Leads #4 - approved.docx"
         and child["document_id"] == str(document.id)

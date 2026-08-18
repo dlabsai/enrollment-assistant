@@ -59,8 +59,6 @@ export interface PromptSetVersionCreate {
     prompts: { filename: string; content: string }[];
 }
 
-export type InstructionsTab = "editor" | "test-chat";
-
 export type ConfirmDialogAction =
     | "delete-version"
     | "switch-version"

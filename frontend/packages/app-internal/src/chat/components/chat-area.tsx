@@ -24,8 +24,6 @@ import {
 } from "@va/shared/components/ui/tooltip";
 import type { ChatMessage } from "@va/shared/types";
 import {
-    ChevronLeft,
-    ChevronRight,
     Copy,
     Link,
     ListTree,
@@ -33,7 +31,14 @@ import {
     RefreshCw,
     SlidersHorizontal,
 } from "lucide-react";
-import { type JSX, useEffect, useMemo, useState } from "react";
+import {
+    type JSX,
+    useEffect,
+    useLayoutEffect,
+    useMemo,
+    useRef,
+    useState,
+} from "react";
 import { toast } from "sonner";
 
 import { useAuth } from "../../auth/contexts/auth-context";
@@ -41,9 +46,13 @@ import { useAuthenticatedApi } from "../../auth/hooks/use-authenticated-api";
 import { hasPermission } from "../../auth/lib/permissions";
 import { ChatTurnTraceSheet } from "../../chats/components/chat-turn-trace-sheet";
 import { ModelSelectionDialogContent } from "../../components/model-selection-dialog-content";
-import { formatLocaleNumber } from "../../lib/number-format";
+import { InlineError } from "../../components/page-state";
 import { useChatActions, useChatStore } from "../contexts/chat-store-context";
 import { fetchInternalModels } from "../lib/api";
+import {
+    hasConversationBranches,
+    hasMessageBranchAlternatives,
+} from "../lib/conversation-tree";
 import {
     buildResponseLink,
     type ResponseLinkTarget,
@@ -53,16 +62,17 @@ import {
     selectCurrentDraft,
     selectIsCurrentLoading,
 } from "../lib/store";
-import type { Message, ModelOverrides } from "../types";
+import type { DraftPromptTemplate, Message, ModelOverrides } from "../types";
+import {
+    ConversationBranchNavigator,
+    ConversationBranchSwitcher,
+} from "./conversation-branch-navigation";
 import { renderGenerationTimeFooter } from "./generation-time-footer";
 import { GuardrailsFooter } from "./guardrails-footer";
 import { InvestigationButton } from "./investigation-button";
 import { MessageFeedback } from "./message-feedback";
 import { useMessageSourcePanelState } from "./message-source-state";
-import {
-    MessageSourceButtons,
-    MessageSourcePanels,
-} from "./message-source-ui";
+import { MessageSourceButtons, MessageSourcePanels } from "./message-source-ui";
 import { renderMessageTimestampFooter } from "./message-timestamp-footer";
 import { renderResponseCostFooter } from "./response-cost-footer";
 
@@ -82,6 +92,7 @@ interface ChatAreaProps {
     allowInvestigations?: boolean;
     canSendMessages?: boolean;
     focusMessageId?: string;
+    getDraftPromptTemplates?: () => DraftPromptTemplate[] | undefined;
     modelSelectionMode?: "chat" | "investigation";
     responseLinkTarget?: ResponseLinkTarget;
 }
@@ -175,7 +186,9 @@ const copyResponseLinkToClipboard = async (
     target: ResponseLinkTarget,
 ): Promise<void> => {
     try {
-        await navigator.clipboard.writeText(buildResponseLink(conversationId, messageId, target));
+        await navigator.clipboard.writeText(
+            buildResponseLink(conversationId, messageId, target),
+        );
         toast.success("Copied response link");
     } catch {
         toast.error("Failed to copy response link");
@@ -333,6 +346,7 @@ export const ChatArea = ({
     allowInvestigations = true,
     canSendMessages = true,
     focusMessageId,
+    getDraftPromptTemplates,
     modelSelectionMode = "chat",
     responseLinkTarget = "chat",
 }: ChatAreaProps): JSX.Element => {
@@ -342,11 +356,13 @@ export const ChatArea = ({
     const currentChat = useChatStore(selectCurrentChat);
     const isLoading = useChatStore(selectIsCurrentLoading);
     const draft = useChatStore(selectCurrentDraft);
-    const conversationTree = useChatStore((state) =>
+    const conversationTreeResult = useChatStore((state) =>
         currentChatId === undefined
             ? undefined
-            : state.conversationTrees.get(currentChatId),
+            : state.conversationTreeResults.get(currentChatId),
     );
+    const conversationTree = conversationTreeResult?.tree;
+    const conversationTreeError = conversationTreeResult?.error;
     const canRegenerate = hasPermission(user, "chat_regenerate");
     const canViewActivity = hasPermission(user, "chat_view_activity");
     const canViewTrace = hasPermission(user, "chat_view_trace");
@@ -416,7 +432,8 @@ export const ChatArea = ({
     const [isModelDialogOpen, setIsModelDialogOpen] = useState(false);
     const [isModelTooltipOpen, setIsModelTooltipOpen] = useState(false);
     const [modelTarget, setModelTarget] = useState<ModelTarget>("chatbot");
-    const isInvestigationModelSelection = modelSelectionMode === "investigation";
+    const isInvestigationModelSelection =
+        modelSelectionMode === "investigation";
     const modelTargetTabs = isInvestigationModelSelection
         ? ([{ value: "chatbot", label: "Investigation" }] satisfies {
               value: ModelTarget;
@@ -427,6 +444,20 @@ export const ChatArea = ({
     const [editDialogOpen, setEditDialogOpen] = useState(false);
     const [editValue, setEditValue] = useState("");
     const [editMessageId, setEditMessageId] = useState<string | undefined>();
+    const branchNavigationContext = `${currentChatId ?? ""}:${focusMessageId ?? ""}`;
+    const branchNavigationContextRef = useRef(branchNavigationContext);
+    useLayoutEffect(() => {
+        branchNavigationContextRef.current = branchNavigationContext;
+    }, [branchNavigationContext]);
+    const [branchFocus, setBranchFocus] = useState<{
+        context: string;
+        messageId: string;
+    }>();
+    const [pendingBranchConversationIds, setPendingBranchConversationIds] =
+        useState<ReadonlySet<string>>(() => new Set());
+    const branchNavigationLoading =
+        currentChatId !== undefined &&
+        pendingBranchConversationIds.has(currentChatId);
 
     const [tracePanelOpen, setTracePanelOpen] = useState(false);
     const [traceMessageId, setTraceMessageId] = useState<string | undefined>();
@@ -548,21 +579,10 @@ export const ChatArea = ({
         return map;
     }, [currentChat]);
 
-    const firstUserMessageId = useMemo(() => {
-        const firstUser = currentChat?.messages.find(
-            (message) => message.role === "user",
-        );
-        return firstUser?.id;
-    }, [currentChat]);
-
-    const activeChildByParent = useMemo(() => {
-        const map = new Map<string, string>();
-        const path = conversationTree?.currentBranchPath ?? [];
-        for (let index = 0; index < path.length - 1; index += 1) {
-            map.set(path[index], path[index + 1]);
-        }
-        return map;
-    }, [conversationTree?.currentBranchPath]);
+    const branchFocusMessageId =
+        branchFocus?.context === branchNavigationContext
+            ? branchFocus.messageId
+            : undefined;
 
     const loadingActivity = useMemo(() => {
         const activity = currentChat?.loadingActivity ?? [];
@@ -593,7 +613,14 @@ export const ChatArea = ({
         return currentChat.messages.length > 0;
     }, [currentChatId, currentChat]);
 
-    const { sendMessage, setDraft, setActiveChild } = useChatActions();
+    const {
+        loadConversationTree,
+        retryGroundingSources,
+        retryMessage,
+        sendMessage,
+        setDraft,
+        setActiveBranch,
+    } = useChatActions();
 
     const modelOverrides = useMemo((): ModelOverrides | undefined => {
         const overrides: ModelOverrides = {};
@@ -608,7 +635,10 @@ export const ChatArea = ({
                 overrides.guardrailModel = guardrailModel;
             }
             if (
-                isReasoningEffortSupported(guardrailModel, guardrailReasoningEffort)
+                isReasoningEffortSupported(
+                    guardrailModel,
+                    guardrailReasoningEffort,
+                )
             ) {
                 overrides.guardrailReasoningEffort = guardrailReasoningEffort;
             }
@@ -622,8 +652,39 @@ export const ChatArea = ({
         isInvestigationModelSelection,
     ]);
 
+    const getSendOptions = (options?: {
+        parentMessageId?: string | null;
+        isRegeneration?: boolean;
+        trimToMessageId?: string | null;
+    }): {
+        parentMessageId?: string | null;
+        isRegeneration?: boolean;
+        trimToMessageId?: string | null;
+        draftPromptTemplates?: DraftPromptTemplate[];
+    } | undefined => {
+        const draftPromptTemplates = getDraftPromptTemplates?.();
+        if (draftPromptTemplates === undefined) {
+            return options;
+        }
+        return {
+            ...options,
+            draftPromptTemplates,
+        };
+    };
+
     const handleSendMessage = (content: string): void => {
-        void sendMessage(content, modelOverrides);
+        setBranchFocus(undefined);
+        void sendMessage(content, modelOverrides, getSendOptions());
+    };
+
+    const handleRetryGroundingSources = (messageId: string): void => {
+        void retryGroundingSources(messageId).catch(() => {
+            toast.error("Source check failed. Please try again.");
+        });
+    };
+
+    const handleRetryMessage = (errorMessageId: string): void => {
+        void retryMessage(errorMessageId);
     };
 
     const editTargetMessage =
@@ -647,10 +708,15 @@ export const ChatArea = ({
             return;
         }
         const parentMessageId = editTargetMessage.parentId;
-        void sendMessage(trimmed, modelOverrides, {
-            parentMessageId,
-            trimToMessageId: parentMessageId ?? editTargetMessage.id,
-        });
+        setBranchFocus(undefined);
+        void sendMessage(
+            trimmed,
+            modelOverrides,
+            getSendOptions({
+                parentMessageId: parentMessageId ?? null,
+                trimToMessageId: parentMessageId ?? null,
+            }),
+        );
         setEditDialogOpen(false);
     };
 
@@ -664,24 +730,61 @@ export const ChatArea = ({
             toast.error("Missing parent message");
             return;
         }
-        void sendMessage(parentMessage.content, modelOverrides, {
-            parentMessageId: message.parentId,
-            isRegeneration: true,
-            trimToMessageId: message.parentId,
-        });
+        setBranchFocus(undefined);
+        void sendMessage(
+            parentMessage.content,
+            modelOverrides,
+            getSendOptions({
+                parentMessageId: message.parentId,
+                isRegeneration: true,
+                trimToMessageId: message.parentId,
+            }),
+        );
     };
 
-    const handleSwitchBranch = async (
+    const handleSelectBranchMessage = async (
         messageId: string,
-        nextChildId: string,
-    ): Promise<void> => {
-        if (currentChatId === undefined) {
-            return;
+    ): Promise<boolean> => {
+        if (
+            currentChatId === undefined ||
+            conversationTree === undefined ||
+            !canSendMessages ||
+            isLoading ||
+            branchNavigationLoading
+        ) {
+            return false;
         }
+        if (conversationTree.currentBranchPath.includes(messageId)) {
+            setBranchFocus({ context: branchNavigationContext, messageId });
+            return true;
+        }
+        const branchChatId = currentChatId;
+        const requestContext = branchNavigationContext;
+        const isCurrentBranchContext = (): boolean =>
+            branchNavigationContextRef.current === requestContext;
+        setPendingBranchConversationIds((conversationIds) => {
+            const nextConversationIds = new Set(conversationIds);
+            nextConversationIds.add(branchChatId);
+            return nextConversationIds;
+        });
         try {
-            await setActiveChild(currentChatId, messageId, nextChildId);
+            await setActiveBranch(branchChatId, messageId);
+            if (!isCurrentBranchContext()) {
+                return false;
+            }
+            setBranchFocus({ context: requestContext, messageId });
+            return true;
         } catch {
-            toast.error("Failed to switch branch");
+            if (isCurrentBranchContext()) {
+                toast.error("Failed to switch branch");
+            }
+            return false;
+        } finally {
+            setPendingBranchConversationIds((conversationIds) => {
+                const nextConversationIds = new Set(conversationIds);
+                nextConversationIds.delete(branchChatId);
+                return nextConversationIds;
+            });
         }
     };
 
@@ -691,8 +794,12 @@ export const ChatArea = ({
     };
 
     const selectorDisabled = !enableChatModelSelector;
-    const childrenByParent = conversationTree?.childrenByParent;
-    const messageActionsDisabled = !canSendMessages || isLoading;
+    const authorWritesDisabled =
+        !canSendMessages ||
+        isLoading ||
+        branchNavigationLoading ||
+        currentChat?.hasPendingGeneration === true;
+    const passiveMessageActionsDisabled = isLoading;
 
     const renderTraceButton = (messageId: string): JSX.Element => (
         <Tooltip>
@@ -701,7 +808,7 @@ export const ChatArea = ({
                     <Button
                         aria-label="Trace"
                         className="text-muted-foreground rounded-full transition"
-                        disabled={messageActionsDisabled}
+                        disabled={passiveMessageActionsDisabled}
                         onClick={() => {
                             openTracePanel(messageId);
                         }}
@@ -718,7 +825,9 @@ export const ChatArea = ({
         </Tooltip>
     );
 
-    const renderResponseLinkButton = (messageId: string): JSX.Element | undefined => {
+    const renderResponseLinkButton = (
+        messageId: string,
+    ): JSX.Element | undefined => {
         if (
             !canViewResponseCost ||
             currentChatId === undefined ||
@@ -733,7 +842,7 @@ export const ChatArea = ({
                         <Button
                             aria-label="Copy response link"
                             className="text-muted-foreground rounded-full transition"
-                            disabled={messageActionsDisabled}
+                            disabled={passiveMessageActionsDisabled}
                             onClick={() => {
                                 void copyResponseLinkToClipboard(
                                     currentChatId,
@@ -755,79 +864,17 @@ export const ChatArea = ({
         );
     };
 
-    const renderInvestigationButton = (messageId: string): JSX.Element | undefined =>
+    const renderInvestigationButton = (
+        messageId: string,
+    ): JSX.Element | undefined =>
         allowInvestigations ? (
             <InvestigationButton
                 conversationId={currentChatId}
-                disabled={messageActionsDisabled}
+                disabled={passiveMessageActionsDisabled}
                 messageId={messageId}
             />
         ) : undefined;
 
-    const renderBranchSwitcher = (
-        parentMessageId: string | undefined,
-        currentMessageId: string,
-    ): JSX.Element | undefined => {
-        if (parentMessageId === undefined) {
-            return undefined;
-        }
-
-        const siblings = childrenByParent?.get(parentMessageId);
-        if (!siblings || siblings.length < 2) {
-            return undefined;
-        }
-
-        const lastSibling = siblings.at(-1);
-        if (lastSibling === undefined) {
-            return undefined;
-        }
-
-        const fallbackChildId =
-            activeChildByParent.get(parentMessageId) ?? lastSibling;
-        const currentIndex = siblings.indexOf(currentMessageId);
-        const fallbackIndex = siblings.indexOf(fallbackChildId);
-        const resolvedIndex =
-            currentIndex === -1
-                ? fallbackIndex === -1
-                    ? siblings.length - 1
-                    : fallbackIndex
-                : currentIndex;
-        const isFirst = resolvedIndex <= 0;
-        const isLast = resolvedIndex >= siblings.length - 1;
-        const previousChild = siblings[Math.max(resolvedIndex - 1, 0)];
-        const nextChild =
-            siblings[Math.min(resolvedIndex + 1, siblings.length - 1)];
-
-        return (
-            <div className="text-muted-foreground flex items-center gap-1 text-xs">
-                <button
-                    aria-label="Previous branch"
-                    className="hover:text-foreground disabled:opacity-40"
-                    disabled={messageActionsDisabled || isFirst}
-                    onClick={() => {
-                        void handleSwitchBranch(parentMessageId, previousChild);
-                    }}
-                    type="button"
-                >
-                    <ChevronLeft className="size-3" />
-                </button>
-                <span>
-                    {formatLocaleNumber(resolvedIndex + 1)} / {formatLocaleNumber(siblings.length)}
-                </span>
-                <button
-                    aria-label="Next branch"
-                    className="hover:text-foreground disabled:opacity-40"
-                    disabled={messageActionsDisabled || isLast}
-                    onClick={() => {
-                        void handleSwitchBranch(parentMessageId, nextChild);
-                    }}
-                    type="button"
-                >
-                    <ChevronRight className="size-3" />
-                </button>
-            </div>
-        );
-    };
 
     const favoriteModelsAvailable = useMemo(
         () => favoriteModels.filter((model) => availableModels.includes(model)),
@@ -896,7 +943,9 @@ export const ChatArea = ({
                 parts.push(model);
             }
             if (isReasoningEffortSupported(model, reasoningEffort)) {
-                parts.push(`effort ${getReasoningEffortLabel(reasoningEffort)}`);
+                parts.push(
+                    `effort ${getReasoningEffortLabel(reasoningEffort)}`,
+                );
             }
             if (parts.length === 0) {
                 return undefined;
@@ -1292,14 +1341,50 @@ export const ChatArea = ({
         </Dialog>
     ) : undefined;
 
+    const branchErrorHeader =
+        conversationTreeError === undefined ||
+        currentChatId === undefined ? undefined : (
+            <div className="px-3 pt-3">
+                <InlineError
+                    className="mb-0"
+                    message={conversationTreeError}
+                    onRetry={() => {
+                        void loadConversationTree(currentChatId);
+                    }}
+                />
+            </div>
+        );
+    const branchActionsAccessory = hasConversationBranches(conversationTree) ? (
+        <ConversationBranchNavigator
+            compactTrigger
+            disabled={authorWritesDisabled}
+            key={currentChatId}
+            loading={branchNavigationLoading}
+            mode="author"
+            onSelectMessage={handleSelectBranchMessage}
+            tree={conversationTree}
+            viewedPath={conversationTree?.currentBranchPath ?? []}
+        />
+    ) : undefined;
+    const composerActionsAccessory =
+        branchActionsAccessory === undefined &&
+        modelActionsAccessory === undefined ? undefined : (
+            <>
+                {branchActionsAccessory}
+                {modelActionsAccessory}
+            </>
+        );
+
     return (
         <>
             <Chat
                 canSendMessages={canSendMessages}
-                composerActionsAccessory={modelActionsAccessory}
+                composerActionsAccessory={composerActionsAccessory}
+                composerDisabled={branchNavigationLoading}
                 composerValue={draft}
                 contentWidthMode="standard"
-                focusMessageId={focusMessageId}
+                focusMessageId={branchFocusMessageId ?? focusMessageId}
+                headerContent={branchErrorHeader}
                 hideMessageFooterUntilHover={HIDE_MESSAGE_ACTIONS_UNTIL_HOVER}
                 isLoading={isLoading}
                 loadingActivity={loadingActivity}
@@ -1330,28 +1415,33 @@ export const ChatArea = ({
                             internalMessage.id.startsWith("error-"));
 
                     const branchSwitcher =
-                        internalMessage === undefined
-                            ? undefined
-                            : renderBranchSwitcher(
-                                  internalMessage.parentId,
-                                  internalMessage.id,
-                              );
+                        internalMessage !== undefined &&
+                        hasMessageBranchAlternatives(
+                            conversationTree,
+                            internalMessage.id,
+                        ) ? (
+                            <ConversationBranchSwitcher
+                                currentMessageId={internalMessage.id}
+                                disabled={authorWritesDisabled}
+                                onSelectMessage={handleSelectBranchMessage}
+                                tree={conversationTree}
+                            />
+                        ) : undefined;
 
                     const isAssistantMessage =
                         internalMessage?.role === "assistant" &&
                         !isErrorMessage;
 
-                    const feedbackControls = isAssistantMessage && allowFeedback ? (
-                        <MessageFeedback
-                            isEligible={isAssistantMessage}
-                            messageId={message.id}
-                        />
-                    ) : undefined;
+                    const feedbackControls =
+                        isAssistantMessage && allowFeedback ? (
+                            <MessageFeedback
+                                isEligible={isAssistantMessage}
+                                messageId={message.id}
+                            />
+                        ) : undefined;
 
                     const editMessage =
-                        internalMessage?.role === "user" &&
-                        !isErrorMessage &&
-                        internalMessage.id !== firstUserMessageId
+                        internalMessage?.role === "user" && !isErrorMessage
                             ? internalMessage
                             : undefined;
 
@@ -1362,7 +1452,7 @@ export const ChatArea = ({
                                     <Button
                                         aria-label="Edit"
                                         className="text-muted-foreground rounded-full transition"
-                                        disabled={messageActionsDisabled}
+                                        disabled={authorWritesDisabled}
                                         onClick={() => {
                                             handleEditMessage(editMessage);
                                         }}
@@ -1387,17 +1477,21 @@ export const ChatArea = ({
                             : undefined;
 
                     const sourceButtons =
-                        internalMessage?.role === "assistant" && !isErrorMessage
-                            ? (
-                                  <MessageSourceButtons
-                                      canViewSources={canViewSources}
-                                      canViewTools={canViewTools}
-                                      disabled={messageActionsDisabled}
-                                      message={internalMessage}
-                                      state={sourcePanelState}
-                                  />
-                              )
-                            : undefined;
+                        internalMessage?.role === "assistant" &&
+                        !isErrorMessage ? (
+                            <MessageSourceButtons
+                                canViewSources={canViewSources}
+                                canViewTools={canViewTools}
+                                disabled={passiveMessageActionsDisabled}
+                                message={internalMessage}
+                                onRetryGrounding={
+                                    canSendMessages
+                                        ? handleRetryGroundingSources
+                                        : undefined
+                                }
+                                state={sourcePanelState}
+                            />
+                        ) : undefined;
 
                     const regenerateButton =
                         regenerateMessage && canRegenerate ? (
@@ -1407,7 +1501,7 @@ export const ChatArea = ({
                                         <Button
                                             aria-label="Regenerate response"
                                             className="text-muted-foreground rounded-full transition"
-                                            disabled={messageActionsDisabled}
+                                            disabled={authorWritesDisabled}
                                             onClick={() => {
                                                 handleRegenerateMessage(
                                                     regenerateMessage,
@@ -1428,6 +1522,23 @@ export const ChatArea = ({
                             </Tooltip>
                         ) : undefined;
 
+                    const retryButton =
+                        isErrorMessage &&
+                        internalMessage?.retryRequest !== undefined ? (
+                            <Button
+                                disabled={authorWritesDisabled}
+                                onClick={() => {
+                                    handleRetryMessage(internalMessage.id);
+                                }}
+                                size="sm"
+                                type="button"
+                                variant="outline"
+                            >
+                                <RefreshCw />
+                                Retry
+                            </Button>
+                        ) : undefined;
+
                     const copyMessage =
                         internalMessage !== undefined && !isErrorMessage
                             ? internalMessage
@@ -1440,7 +1551,7 @@ export const ChatArea = ({
                                     <Button
                                         aria-label="Copy message"
                                         className="text-muted-foreground rounded-full transition"
-                                        disabled={messageActionsDisabled}
+                                        disabled={passiveMessageActionsDisabled}
                                         onClick={() => {
                                             void copyMessageToClipboard(
                                                 copyMessage.content,
@@ -1465,6 +1576,7 @@ export const ChatArea = ({
                         editButton !== undefined ||
                         regenerateButton !== undefined ||
                         sourceButtons !== undefined ||
+                        retryButton !== undefined ||
                         copyButton !== undefined ||
                         branchSwitcher !== undefined ? (
                             <div className="flex flex-wrap items-center gap-1">
@@ -1472,6 +1584,7 @@ export const ChatArea = ({
                                 {isUserMessage ? editButton : feedbackControls}
                                 {!isUserMessage && regenerateButton}
                                 {!isUserMessage && sourceButtons}
+                                {retryButton}
                                 {branchSwitcher}
                             </div>
                         ) : undefined;
@@ -1490,7 +1603,8 @@ export const ChatArea = ({
                         internalMessage,
                         canViewDurationTooltip,
                     );
-                    const timestampFooter = renderMessageTimestampFooter(internalMessage);
+                    const timestampFooter =
+                        renderMessageTimestampFooter(internalMessage);
                     const responseCostFooter = renderResponseCostFooter(
                         internalMessage,
                         canViewResponseCost,
@@ -1498,7 +1612,8 @@ export const ChatArea = ({
                     const guardrailsFooter =
                         canViewGuardrailsFailures &&
                         internalMessage?.role === "assistant" &&
-                        (internalMessage.guardrailsFailures?.length ?? 0) > 0 ? (
+                        (internalMessage.guardrailsFailures?.length ?? 0) >
+                            0 ? (
                             <GuardrailsFooter message={internalMessage} />
                         ) : undefined;
                     const responseLinkButton =
@@ -1577,8 +1692,7 @@ export const ChatArea = ({
                         </Button>
                         <Button
                             disabled={
-                                messageActionsDisabled ||
-                                editValue.trim() === ""
+                                authorWritesDisabled || editValue.trim() === ""
                             }
                             onClick={handleEditSave}
                             type="button"

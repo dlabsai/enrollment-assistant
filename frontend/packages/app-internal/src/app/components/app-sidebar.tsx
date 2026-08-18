@@ -21,6 +21,7 @@ import { UNIVERSITY_NAME } from "@va/shared/config";
 import {
     BarChart3,
     Bot,
+    CircleHelp,
     ClipboardCheck,
     ClipboardList,
     Database,
@@ -38,8 +39,9 @@ import {
     Settings,
     Sun,
     ThumbsUp,
+    UserRoundCheck,
 } from "lucide-react";
-import type { JSX } from "react";
+import { type JSX, type MouseEvent, type PointerEvent, useState } from "react";
 
 import { hasPermission } from "../../auth/lib/permissions";
 import type { UserProfile } from "../../auth/types";
@@ -56,6 +58,9 @@ interface AppSidebarProps {
 // Keep low-frequency admin views out of sidebar navigation while direct route
 // access still resolves through normal permission checks.
 const HIDDEN_SIDEBAR_VIEWS = new Set<AppView>(["settings"]);
+const HELP_URL = String(import.meta.env.VITE_HELP_URL ?? "");
+const OPEN_SIDEBAR_LABEL = "Open sidebar";
+const CLOSE_SIDEBAR_LABEL = "Close sidebar";
 
 export const AppSidebar = ({
     activeView,
@@ -63,6 +68,8 @@ export const AppSidebar = ({
     onLogout,
     user,
 }: AppSidebarProps): JSX.Element => {
+    const [suppressOpenSidebarTooltip, setSuppressOpenSidebarTooltip] =
+        useState(false);
     const { resolvedTheme, setTheme } = useTheme();
     const { isMobile, state, toggleSidebar } = useSidebar();
     const isDarkMode = resolvedTheme === "dark";
@@ -80,10 +87,39 @@ export const AppSidebar = ({
         user.name.charAt(0).toUpperCase() ||
         user.email.charAt(0).toUpperCase();
     const themeText = "Theme";
-    const showUserTooltip = state === "collapsed" && !isMobile;
     const isCollapsed = state === "collapsed";
-    const sidebarToggleLabel = isCollapsed ? "Open sidebar" : "Close sidebar";
-    const showSidebarTooltip = !isMobile;
+    const showDesktopTooltip = !isMobile;
+    const showCollapsedTooltip = showDesktopTooltip && isCollapsed;
+    const showOpenSidebarTooltip =
+        showCollapsedTooltip && !suppressOpenSidebarTooltip;
+
+    const openSidebar = (): void => {
+        setSuppressOpenSidebarTooltip(false);
+        toggleSidebar();
+    };
+
+    const closeSidebar = (event: MouseEvent<HTMLButtonElement>): void => {
+        if (event.detail > 0) {
+            setSuppressOpenSidebarTooltip(true);
+        }
+        toggleSidebar();
+    };
+
+    const resetOpenSidebarTooltipOnPointerLeave = (
+        event: PointerEvent<HTMLButtonElement>,
+    ): void => {
+        const rect = event.currentTarget.getBoundingClientRect();
+        const pointerIsInsideTrigger =
+            event.clientX >= rect.left &&
+            event.clientX <= rect.right &&
+            event.clientY >= rect.top &&
+            event.clientY <= rect.bottom;
+
+        if (!pointerIsInsideTrigger) {
+            setSuppressOpenSidebarTooltip(false);
+        }
+    };
+
     const navItems = [
         {
             id: "chat",
@@ -144,6 +180,12 @@ export const AppSidebar = ({
             icon: BarChart3,
             label: "Chat Analytics",
             allowed: hasPermission(user, "access_analytics"),
+        },
+        {
+            id: "adoption",
+            icon: UserRoundCheck,
+            label: "Adoption",
+            allowed: hasPermission(user, "access_adoption"),
         },
         {
             id: "public-analytics",
@@ -224,16 +266,22 @@ export const AppSidebar = ({
                 <div className="flex items-center justify-between gap-2 px-2 group-data-[collapsible=icon]:px-0">
                     <div className="flex items-center gap-2">
                         <div className="relative flex size-6 items-center justify-center group-data-[collapsible=icon]:size-8">
-                            <Tooltip>
+                            <Tooltip disabled={!showOpenSidebarTooltip}>
                                 <TooltipTrigger
+                                    delay={0}
                                     render={
                                         <button
+                                            aria-hidden={!isCollapsed}
                                             className="text-foreground hover:bg-accent hover:text-accent-foreground pointer-events-none absolute inset-0 flex items-center justify-center rounded-md transition-colors group-data-[collapsible=icon]:pointer-events-auto"
                                             onClick={
                                                 isCollapsed
-                                                    ? toggleSidebar
+                                                    ? openSidebar
                                                     : undefined
                                             }
+                                            onPointerLeave={
+                                                resetOpenSidebarTooltipOnPointerLeave
+                                            }
+                                            tabIndex={isCollapsed ? 0 : -1}
                                             type="button"
                                         >
                                             <GraduationCap
@@ -245,17 +293,17 @@ export const AppSidebar = ({
                                                 className="absolute size-4 opacity-0 transition-opacity group-data-[collapsible=icon]:group-hover:opacity-100"
                                             />
                                             <span className="sr-only">
-                                                {sidebarToggleLabel}
+                                                {OPEN_SIDEBAR_LABEL}
                                             </span>
                                         </button>
                                     }
                                 />
                                 <TooltipContent
                                     align="center"
-                                    hidden={!showSidebarTooltip || !isCollapsed}
+                                    hidden={!showOpenSidebarTooltip}
                                     side="right"
                                 >
-                                    {sidebarToggleLabel}
+                                    {OPEN_SIDEBAR_LABEL}
                                 </TooltipContent>
                             </Tooltip>
                         </div>
@@ -267,27 +315,28 @@ export const AppSidebar = ({
                         </div>
                     </div>
                     {!isCollapsed && (
-                        <Tooltip>
+                        <Tooltip disabled={!showDesktopTooltip}>
                             <TooltipTrigger
+                                delay={0}
                                 render={
                                     <button
                                         className="text-foreground hover:bg-accent hover:text-accent-foreground flex size-7 items-center justify-center rounded-md transition-colors"
-                                        onClick={toggleSidebar}
+                                        onClick={closeSidebar}
                                         type="button"
                                     >
                                         <PanelLeftIcon className="size-4" />
                                         <span className="sr-only">
-                                            {sidebarToggleLabel}
+                                            {CLOSE_SIDEBAR_LABEL}
                                         </span>
                                     </button>
                                 }
                             />
                             <TooltipContent
                                 align="center"
-                                hidden={!showSidebarTooltip}
+                                hidden={!showDesktopTooltip}
                                 side="right"
                             >
-                                {sidebarToggleLabel}
+                                {CLOSE_SIDEBAR_LABEL}
                             </TooltipContent>
                         </Tooltip>
                     )}
@@ -327,8 +376,9 @@ export const AppSidebar = ({
             <SidebarFooter>
                 <SidebarMenu>
                     <SidebarMenuItem>
-                        <Tooltip>
+                        <Tooltip disabled={!showCollapsedTooltip}>
                             <TooltipTrigger
+                                delay={0}
                                 render={
                                     <SidebarMenuButton
                                         className="cursor-default"
@@ -353,7 +403,7 @@ export const AppSidebar = ({
                             />
                             <TooltipContent
                                 align="center"
-                                hidden={!showUserTooltip}
+                                hidden={!showCollapsedTooltip}
                                 side="right"
                             >
                                 <div className="text-sm font-semibold">
@@ -367,6 +417,23 @@ export const AppSidebar = ({
                     </SidebarMenuItem>
                 </SidebarMenu>
                 <SidebarMenu>
+                    {HELP_URL && (
+                        <SidebarMenuItem>
+                            <SidebarMenuButton
+                                render={
+                                    <a
+                                        href={HELP_URL}
+                                        rel="noopener noreferrer"
+                                        target="_blank"
+                                    />
+                                }
+                                tooltip="Help"
+                            >
+                                <CircleHelp />
+                                <span>Help</span>
+                            </SidebarMenuButton>
+                        </SidebarMenuItem>
+                    )}
                     <SidebarMenuItem>
                         <SidebarMenuButton
                             onClick={() => {

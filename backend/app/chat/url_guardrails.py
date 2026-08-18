@@ -1,13 +1,17 @@
 from __future__ import annotations
 
+import asyncio
 import re
+import time
+from dataclasses import dataclass
 from html import unescape
 from typing import TYPE_CHECKING
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import unquote_plus, urlsplit, urlunsplit
 from uuid import uuid4
 
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert
+from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.chat.url_guardrails_config import get_prompt_allowed_urls
@@ -18,16 +22,22 @@ from app.utils import current_time_utc
 if TYPE_CHECKING:
     from collections.abc import Iterable
 
-_TRAILING_URL_PUNCTUATION = ".,;:!?)]}>*"
+# ASCII quotes plus common Unicode smart quotes and guillemets.
+_URL_QUOTE_DELIMITERS = (
+    "\"'\u2018\u2019\u201a\u201b\u201c\u201d\u201e\u201f\u00ab\u00bb\u2039\u203a"
+)
+_URL_BOUNDARY_CHARS = "<>()[]{}" + _URL_QUOTE_DELIMITERS
+_URL_TOKEN_CHARACTER = rf"[^\s{re.escape(_URL_BOUNDARY_CHARS)}]"
+_TRAILING_URL_PUNCTUATION = ".,;:!?)]}>*" + _URL_QUOTE_DELIMITERS
 _RELATIVE_URL_BASE = "https://demo-university.example.edu"
 _WWW_HOST_ALIASES = {
     "www.demo-university.example.edu": "demo-university.example.edu",
     "www.catalog.demo-university.example.edu": "catalog.demo-university.example.edu",
 }
 
-_HTTP_URL_PATTERN = re.compile(r"https?://[^\s<>()\[\]{}\"']+", re.IGNORECASE)
-_MAILTO_PATTERN = re.compile(r"mailto:[^\s<>()\[\]{}\"']+", re.IGNORECASE)
-_RELATIVE_URL_PATTERN = re.compile(r"(?<![\w@<])/(?!/)[A-Za-z0-9][^\s<>()\[\]{}\"']*")
+_HTTP_URL_PATTERN = re.compile(rf"https?://{_URL_TOKEN_CHARACTER}+", re.IGNORECASE)
+_MAILTO_PATTERN = re.compile(rf"mailto:{_URL_TOKEN_CHARACTER}+", re.IGNORECASE)
+_RELATIVE_URL_PATTERN = re.compile(rf"(?<![\w@<])/(?!/)[A-Za-z0-9]{_URL_TOKEN_CHARACTER}*")
 _BARE_EMAIL_PATTERN = re.compile(
     r"(?<![A-Za-z0-9._%+-])"
     r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,63}",
@@ -37,7 +47,7 @@ _BARE_DOMAIN_PATTERN = re.compile(
     r"(?<![@\w])"
     r"(?:www\.)?(?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,63}"
     r"(?::\d{2,5})?"
-    r"(?:[/?#][^\s<>()\[\]{}\"']*)?",
+    rf"(?:[/?#]{_URL_TOKEN_CHARACTER}*)?",
     re.IGNORECASE,
 )
 _URL_EXTRACTOR_PATTERNS = (
@@ -47,7 +57,47 @@ _URL_EXTRACTOR_PATTERNS = (
     _BARE_EMAIL_PATTERN,
     _BARE_DOMAIN_PATTERN,
 )
-_URL_REGISTRY_VERSION = "v7"
+_TRACKING_QUERY_PARAM_NAMES = frozenset(
+    {
+        "_fplc",
+        "_ga",
+        "_gat",
+        "_gid",
+        "_gl",
+        "dclid",
+        "fbclid",
+        "fpau",
+        "gbraid",
+        "gclid",
+        "igshid",
+        "li_fat_id",
+        "mc_cid",
+        "mc_eid",
+        "mkt_tok",
+        "msclkid",
+        "ttclid",
+        "twclid",
+        "wbraid",
+        "yclid",
+    }
+)
+_TRACKING_QUERY_PARAM_PREFIXES = ("_ga_", "_gac_", "_gcl_", "hsa_", "mtm_", "utm_")
+_URL_REGISTRY_VERSION = "v9"
+_URL_REGISTRY_CACHE_TTL_SECONDS = 60.0
+
+
+type _UrlRegistryCacheKey = tuple[str, str]
+
+
+@dataclass(frozen=True, slots=True)
+class _UrlRegistryCacheEntry:
+    urls: frozenset[str]
+    loaded_at: float
+
+
+_url_registry_cache: dict[_UrlRegistryCacheKey, _UrlRegistryCacheEntry] = {}
+_url_registry_cache_locks: dict[_UrlRegistryCacheKey, asyncio.Lock] = {}
+_url_registry_cache_generation = 0
 
 
 def _is_allowed_response_url(normalized_url: str, *, allowed_urls: frozenset[str]) -> bool:
@@ -106,6 +156,16 @@ def _normalize_mailto(candidate: str) -> str | None:
     return urlunsplit(("mailto", "", email, parts.query, ""))
 
 
+def _is_tracking_query_param(raw_param: str) -> bool:
+    name = unquote_plus(raw_param.partition("=")[0]).lower()
+    return name in _TRACKING_QUERY_PARAM_NAMES or name.startswith(_TRACKING_QUERY_PARAM_PREFIXES)
+
+
+def _strip_tracking_query_params(query: str) -> str:
+    query_parts = [part for part in query.split("&") if part != ""]
+    return "&".join(part for part in query_parts if not _is_tracking_query_param(part))
+
+
 def normalize_url(url: str) -> str | None:
     candidate = unescape(url).strip().rstrip(_TRAILING_URL_PUNCTUATION)
     if candidate == "":
@@ -133,7 +193,9 @@ def normalize_url(url: str) -> str | None:
     if path != "/":
         path = path.rstrip("/") or "/"
 
-    return urlunsplit((scheme, netloc, path, parts.query, ""))
+    query = _strip_tracking_query_params(parts.query)
+
+    return urlunsplit((scheme, netloc, path, query, ""))
 
 
 def collect_normalized_urls(text: str) -> set[str]:
@@ -210,21 +272,65 @@ async def load_guardrail_url_registry(session: AsyncSession, *, key: str) -> fro
     return frozenset(urls)
 
 
+def _guardrail_url_registry_cache_key(
+    session: AsyncSession, *, registry_key: str
+) -> _UrlRegistryCacheKey:
+    bind = session.get_bind()
+    engine = bind.engine if isinstance(bind, Connection) else bind
+    database_namespace = engine.url.render_as_string(hide_password=True)
+    return database_namespace, registry_key
+
+
+def clear_guardrail_url_registry_cache() -> None:
+    """Invalidate process-local URL registries without disturbing active loaders."""
+    global _url_registry_cache_generation  # noqa: PLW0603
+
+    _url_registry_cache_generation += 1
+    _url_registry_cache.clear()
+
+
 async def get_allowed_url_registry_for_va(
     session: AsyncSession, *, is_internal: bool
 ) -> frozenset[str]:
     key = get_guardrail_url_registry_key(is_internal=is_internal)
-    persisted_registry = await load_guardrail_url_registry(session, key=key)
-    if persisted_registry is not None:
-        return persisted_registry
+    cache_key = _guardrail_url_registry_cache_key(session, registry_key=key)
+    now = time.monotonic()
+    cached = _url_registry_cache.get(cache_key)
+    if cached is not None and now - cached.loaded_at < _URL_REGISTRY_CACHE_TTL_SECONDS:
+        return cached.urls
 
-    computed_registry = await build_allowed_url_registry(
-        session,
-        extra_urls=get_prompt_allowed_urls(is_internal=is_internal),
-        is_internal=is_internal,
-    )
-    await _upsert_guardrail_url_registry(session, key=key, urls=computed_registry)
-    return computed_registry
+    lock = _url_registry_cache_locks.setdefault(cache_key, asyncio.Lock())
+    async with lock:
+        while True:
+            now = time.monotonic()
+            cached = _url_registry_cache.get(cache_key)
+            if cached is not None and now - cached.loaded_at < _URL_REGISTRY_CACHE_TTL_SECONDS:
+                return cached.urls
+
+            generation = _url_registry_cache_generation
+            persisted_registry = await load_guardrail_url_registry(session, key=key)
+            if generation != _url_registry_cache_generation:
+                continue
+            if persisted_registry is not None:
+                _url_registry_cache[cache_key] = _UrlRegistryCacheEntry(
+                    urls=persisted_registry, loaded_at=now
+                )
+                return persisted_registry
+
+            computed_registry = await build_allowed_url_registry(
+                session,
+                extra_urls=get_prompt_allowed_urls(is_internal=is_internal),
+                is_internal=is_internal,
+            )
+            if generation != _url_registry_cache_generation:
+                continue
+            await _upsert_guardrail_url_registry(session, key=key, urls=computed_registry)
+            if generation != _url_registry_cache_generation:
+                continue
+            _url_registry_cache[cache_key] = _UrlRegistryCacheEntry(
+                urls=computed_registry, loaded_at=now
+            )
+            return computed_registry
 
 
 async def refresh_guardrail_url_registries(session: AsyncSession) -> None:

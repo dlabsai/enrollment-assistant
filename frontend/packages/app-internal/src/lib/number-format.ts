@@ -9,18 +9,22 @@ export const makeLocaleNumberFormatter = (
     options?: Intl.NumberFormatOptions,
 ): Intl.NumberFormat => new Intl.NumberFormat(browserLocale, options);
 
-export const formatEstimatedUsdCost = (value: number | undefined): string => {
-    if (value === undefined || !Number.isFinite(value)) {
+export const formatUsdCost = (
+    value: number | null | undefined,
+): string => {
+    if (value === null || value === undefined || !Number.isFinite(value)) {
         return "-";
     }
-    if (value > 0 && value < 0.01) {
-        return `<$${formatLocaleNumber(0.01, {
-            minimumFractionDigits: 2,
-            maximumFractionDigits: 2,
+    if (value > 0 && value < 0.0001) {
+        return `<$${formatLocaleNumber(0.0001, {
+            minimumFractionDigits: 4,
+            maximumFractionDigits: 4,
         })}`;
     }
+
+    const fractionDigits = value > 0 && value < 0.01 ? 4 : 2;
     return `$${formatLocaleNumber(value, {
-        minimumFractionDigits: 2,
-        maximumFractionDigits: 2,
+        minimumFractionDigits: fractionDigits,
+        maximumFractionDigits: fractionDigits,
     })}`;
 };

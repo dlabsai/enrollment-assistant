@@ -7,7 +7,14 @@ import time
 import traceback
 from typing import TYPE_CHECKING, Any
 
-from opentelemetry.trace import INVALID_SPAN_ID, INVALID_TRACE_ID, get_current_span
+from opentelemetry.trace import (
+    INVALID_SPAN_ID,
+    INVALID_TRACE_ID,
+    Span,
+    Status,
+    StatusCode,
+    get_current_span,
+)
 from opentelemetry.trace.span import format_span_id, format_trace_id
 
 from app import telemetry
@@ -49,6 +56,11 @@ def _current_otel_ids() -> tuple[str | None, str | None]:
     return trace_id, span_id
 
 
+def _record_span_error(span: Span, error: BaseException) -> None:
+    span.record_exception(error)
+    span.set_status(Status(StatusCode.ERROR, _exception_summary(error)))
+
+
 def _evaluation_score_attributes(result: EvaluationResult) -> dict[str, str | float]:
     """Map an eval result to OTel GenAI evaluation score attributes."""
     if isinstance(result.value, bool):
@@ -68,6 +80,7 @@ def _record_evaluation_result_span(
     evaluator_name: str,
     result_kind: str,
     result: EvaluationResult,
+    error: BaseException | None = None,
 ) -> None:
     """Record one evaluator result using OTel GenAI evaluation semantics."""
     with telemetry.span("gen_ai.evaluation.result") as span:
@@ -80,6 +93,8 @@ def _record_evaluation_result_span(
         span.set_attribute("app.eval.run_index", run_index)
         span.set_attribute("app.eval.evaluator.name", evaluator_name)
         span.set_attribute("app.eval.result.kind", result_kind)
+        if error is not None:
+            _record_span_error(span, error)
 
 
 def _record_evaluation_result_spans(
@@ -182,6 +197,7 @@ async def _run_single[InputsT, OutputT, MetadataT](
                 duration = time.perf_counter() - start_time
             except Exception as e:
                 duration = time.perf_counter() - start_time
+                _record_span_error(span, e)
                 error_summary = _exception_summary(e)
                 error_details = _exception_details(e)
                 telemetry.error("Task error: {error}", error=error_summary, case_name=case.name)
@@ -250,6 +266,7 @@ async def _run_single[InputsT, OutputT, MetadataT](
                         evaluator_name=evaluator.name,
                         result_kind="assertion",
                         result=error_result,
+                        error=e,
                     )
                     all_assertions[error_result.name] = error_result
 

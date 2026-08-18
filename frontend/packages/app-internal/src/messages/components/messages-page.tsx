@@ -1,4 +1,8 @@
-import type { ColumnDef, SortingState } from "@tanstack/react-table";
+import type {
+    ColumnDef,
+    SortingState,
+    VisibilityState,
+} from "@tanstack/react-table";
 import { DEFAULT_HIGHLIGHT_CLASS } from "@va/shared/components/highlighted-text";
 import { Badge } from "@va/shared/components/ui/badge";
 import {
@@ -40,13 +44,17 @@ import {
 } from "../../chats/lib/user-filter-options";
 import type { ChatUserOption } from "../../chats/types";
 import { DataTable } from "../../components/data-table";
+import { DataTableColumnVisibility } from "../../components/data-table-column-visibility";
 import { getDefaultDataTablePageSize } from "../../components/data-table-constants";
 import { PageHeader, PageHeaderGroup } from "../../components/page-header";
 import { PageSection, PageShell } from "../../components/page-shell";
 import { InlineError } from "../../components/page-state";
 import { ReviewTableToolbar } from "../../components/review-table-toolbar";
 import { formatTableTimestamp } from "../../lib/date-format";
-import { formatLocaleNumber } from "../../lib/number-format";
+import {
+    formatLocaleNumber,
+    formatUsdCost,
+} from "../../lib/number-format";
 import type { CustomTimeRange, TimeRangeValue } from "../../lib/time-range";
 import { fetchMessageListPage } from "../lib/api";
 import type {
@@ -55,6 +63,38 @@ import type {
 } from "../types";
 
 const formatTimestamp = formatTableTimestamp;
+
+const COLUMN_VISIBILITY_STORAGE_KEY = "messages-table-column-visibility";
+
+const loadColumnVisibility = (): VisibilityState => {
+    if (typeof window === "undefined") {
+        return {};
+    }
+
+    try {
+        const stored = window.localStorage.getItem(
+            COLUMN_VISIBILITY_STORAGE_KEY,
+        );
+        if (stored === null) {
+            return {};
+        }
+        const parsed: unknown = JSON.parse(stored);
+        if (
+            typeof parsed !== "object" ||
+            parsed === null ||
+            Array.isArray(parsed)
+        ) {
+            return {};
+        }
+        return Object.fromEntries(
+            Object.entries(parsed).filter(([, value]) =>
+                typeof value === "boolean"
+            ),
+        );
+    } catch {
+        return {};
+    }
+};
 
 const formatCount = (value: number): string => formatLocaleNumber(value);
 
@@ -100,7 +140,9 @@ const openChatInNewTab = (conversationId: string): void => {
     openUrl(`${base}#/chats/${conversationId}`);
 };
 
-const buildColumns = (): ColumnDef<MessageListRow>[] => [
+const buildColumns = (
+    canViewResponseCost: boolean,
+): ColumnDef<MessageListRow>[] => [
     {
         id: "content_length",
         accessorKey: "contentLength",
@@ -186,14 +228,26 @@ const buildColumns = (): ColumnDef<MessageListRow>[] => [
         ),
     },
     {
-        id: "input_tokens",
-        accessorKey: "inputTokens",
-        header: "Input",
+        id: "uncached_input_tokens",
+        accessorKey: "uncachedInputTokens",
+        header: "Uncached input",
         enableSorting: true,
         meta: { skeleton: skeletonLine("h-5 w-16") },
         cell: ({ row }): JSX.Element => (
             <div className="text-muted-foreground text-xs tabular-nums">
-                {formatOptionalCount(row.original.inputTokens)}
+                {formatOptionalCount(row.original.uncachedInputTokens)}
+            </div>
+        ),
+    },
+    {
+        id: "cache_read_input_tokens",
+        accessorKey: "cacheReadInputTokens",
+        header: "Cached input",
+        enableSorting: true,
+        meta: { skeleton: skeletonLine("h-5 w-16") },
+        cell: ({ row }): JSX.Element => (
+            <div className="text-muted-foreground text-xs tabular-nums">
+                {formatOptionalCount(row.original.cacheReadInputTokens)}
             </div>
         ),
     },
@@ -209,6 +263,26 @@ const buildColumns = (): ColumnDef<MessageListRow>[] => [
             </div>
         ),
     },
+    ...(canViewResponseCost
+        ? [
+              {
+                  id: "response_cost",
+                  accessorKey: "responseCost",
+                  header: "Cost",
+                  enableSorting: true,
+                  meta: { skeleton: skeletonLine("h-5 w-16") },
+                  cell: ({
+                      row,
+                  }: {
+                      row: { original: MessageListRow };
+                  }): JSX.Element => (
+                      <div className="text-muted-foreground text-xs tabular-nums">
+                          {formatUsdCost(row.original.responseCost)}
+                      </div>
+                  ),
+              },
+          ]
+        : []),
     {
         id: "tool_call_count",
         accessorKey: "toolCallCount",
@@ -299,6 +373,8 @@ export const MessagesPage = (): JSX.Element => {
     const [sorting, setSorting] = useState<SortingState>([
         { id: "created_at", desc: true },
     ]);
+    const [columnVisibility, setColumnVisibility] =
+        useState<VisibilityState>(loadColumnVisibility);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | undefined>();
     const [page, setPage] = useState<MessageListPageResponse | undefined>();
@@ -333,15 +409,6 @@ export const MessagesPage = (): JSX.Element => {
             clearTimeout(timeout);
         };
     }, [userSearchInput]);
-
-    useEffect((): (() => void) => {
-        const timeout = setTimeout(() => {
-            setPageIndex(0);
-        }, 0);
-        return (): void => {
-            clearTimeout(timeout);
-        };
-    }, [customRange, pageSize, role, selectedUser, sorting, timeRange]);
 
     useEffect(() => {
         let isMounted = true;
@@ -445,7 +512,7 @@ export const MessagesPage = (): JSX.Element => {
             return (): void => undefined;
         }
 
-        let isMounted = true;
+        let active = true;
         const loadDetail = async (): Promise<void> => {
             setDetailLoading(true);
             setDetailError(undefined);
@@ -458,11 +525,11 @@ export const MessagesPage = (): JSX.Element => {
                         targetMessageId: selectedMessage.id,
                     },
                 );
-                if (isMounted) {
+                if (active) {
                     setDetail(response);
                 }
             } catch (error_) {
-                if (isMounted) {
+                if (active) {
                     setDetailError(
                         error_ instanceof Error
                             ? error_.message
@@ -470,7 +537,7 @@ export const MessagesPage = (): JSX.Element => {
                     );
                 }
             } finally {
-                if (isMounted) {
+                if (active) {
                     setDetailLoading(false);
                 }
             }
@@ -478,11 +545,25 @@ export const MessagesPage = (): JSX.Element => {
         void loadDetail();
 
         return (): void => {
-            isMounted = false;
+            active = false;
         };
     }, [api, selectedMessage]);
 
-    const columns = useMemo(() => buildColumns(), []);
+    useEffect(() => {
+        try {
+            window.localStorage.setItem(
+                COLUMN_VISIBILITY_STORAGE_KEY,
+                JSON.stringify(columnVisibility),
+            );
+        } catch {
+            // Keep the in-memory preference when browser storage is unavailable.
+        }
+    }, [columnVisibility]);
+
+    const columns = useMemo(
+        () => buildColumns(canViewResponseCost),
+        [canViewResponseCost],
+    );
     const tableData = page?.items ?? [];
     const pageCount = Math.max(1, Math.ceil((page?.total ?? 0) / pageSize));
     const userOptionsWithOwnerGroups = useMemo(
@@ -528,9 +609,11 @@ export const MessagesPage = (): JSX.Element => {
             highlightPhrase={false}
             highlightQuery={highlightQuery}
             loading={detailLoading}
+            onDetailChange={setDetail}
             onFeedbackChange={(): void => undefined}
             onOpenTrace={openTracePanel}
             showSummary={showSummary}
+            source="messages"
         />
     );
 
@@ -546,6 +629,7 @@ export const MessagesPage = (): JSX.Element => {
                                 onValueChange={(value) => {
                                     if (isMessageRoleFilter(value)) {
                                         setRole(value);
+                                        setPageIndex(0);
                                     }
                                 }}
                                 value={role}
@@ -571,6 +655,11 @@ export const MessagesPage = (): JSX.Element => {
                                     </SelectGroup>
                                 </SelectContent>
                             </Select>
+                            <DataTableColumnVisibility
+                                columnVisibility={columnVisibility}
+                                columns={columns}
+                                onColumnVisibilityChange={setColumnVisibility}
+                            />
                         </PageHeaderGroup>
                     }
                     onClear={() => {
@@ -583,7 +672,10 @@ export const MessagesPage = (): JSX.Element => {
                         setPageIndex(0);
                         setSorting([{ id: "created_at", desc: true }]);
                     }}
-                    onCustomRangeChange={setCustomRange}
+                    onCustomRangeChange={(value) => {
+                        setCustomRange(value);
+                        setPageIndex(0);
+                    }}
                     onRefresh={() => {
                         setRefreshToken((value) => value + 1);
                     }}
@@ -593,7 +685,10 @@ export const MessagesPage = (): JSX.Element => {
                         setUserPopoverOpen(false);
                         setPageIndex(0);
                     }}
-                    onTimeRangeChange={setTimeRange}
+                    onTimeRangeChange={(value) => {
+                        setTimeRange(value);
+                        setPageIndex(0);
+                    }}
                     onUserPopoverOpenChange={setUserPopoverOpen}
                     onUserSearchInputChange={setUserSearchInput}
                     searchInput={searchInput}
@@ -608,6 +703,7 @@ export const MessagesPage = (): JSX.Element => {
             <PageSection className="flex min-h-0 flex-1 flex-col gap-4">
                 {error !== undefined && <InlineError message={error} />}
                 <DataTable
+                    columnVisibility={columnVisibility}
                     columns={columns}
                     data={tableData}
                     emptyMessage="No messages found."
@@ -620,13 +716,18 @@ export const MessagesPage = (): JSX.Element => {
                             typeof updater === "function"
                                 ? updater({ pageIndex, pageSize })
                                 : updater;
-                        setPageIndex(next.pageIndex);
+                        setPageIndex(
+                            next.pageSize === pageSize ? next.pageIndex : 0,
+                        );
                         setPageSize(next.pageSize);
                     }}
                     onRowClick={(row) => {
                         openMessage(row);
                     }}
-                    onSortingChange={setSorting}
+                    onSortingChange={(updater) => {
+                        setSorting(updater);
+                        setPageIndex(0);
+                    }}
                     pageCount={pageCount}
                     pagination={{ pageIndex, pageSize }}
                     rowCount={page?.total ?? 0}

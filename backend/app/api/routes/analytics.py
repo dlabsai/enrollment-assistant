@@ -1,16 +1,24 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import date, datetime, time, timedelta
 from typing import TYPE_CHECKING, Annotated, Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
-from sqlalchemy import Float, Integer, case, cast, func, or_, select
+from sqlalchemy import Date as SqlDate
+from sqlalchemy import Float, Integer, case, cast, func, or_, select, true
 from sqlalchemy.sql import ColumnElement
 
 from app.api.deps import CurrentUser, SessionDep, require_permission
-from app.core.rbac import PermissionKey
+from app.api.routes.owner_group_filter import (
+    OwnerGroup,
+    apply_aggregate_owner_filter,
+    validate_exclusive_user_filters,
+)
+from app.core.rbac import PermissionKey, get_effective_permission_map
 from app.models import Conversation, Message, OtelSpan, PublicChatContact
+from app.utils import current_time_utc
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -34,6 +42,9 @@ RESPONSE_BUCKET_25 = 25
 
 AnalyticsAccessUser = Annotated[
     CurrentUser, Depends(require_permission(PermissionKey.ACCESS_ANALYTICS))
+]
+AdoptionAccessUser = Annotated[
+    CurrentUser, Depends(require_permission(PermissionKey.ACCESS_ADOPTION))
 ]
 PublicAnalyticsAccessUser = Annotated[
     CurrentUser, Depends(require_permission(PermissionKey.ACCESS_PUBLIC_ANALYTICS))
@@ -86,6 +97,20 @@ class ConversationAnalyticsSummaryOut(BaseModel):
     length_stats: ConversationAnalyticsStatsOut | None
     response_time_buckets: list[ConversationAnalyticsResponseTimeBucketOut]
     response_time_stats: ConversationAnalyticsStatsOut | None
+
+
+class AdoptionDailyOut(BaseModel):
+    date: date
+    daily_active_users: int
+    monthly_active_users: int
+
+
+class AdoptionSummaryOut(BaseModel):
+    latest_daily_active_users: int
+    monthly_active_users: int
+    average_daily_active_users: float
+    stickiness: float
+    daily: list[AdoptionDailyOut]
 
 
 class PublicUsageDailyOut(BaseModel):
@@ -268,12 +293,19 @@ async def get_conversation_analytics_summary(
     platform: Annotated[str | None, Query()] = None,
     start: Annotated[datetime | None, Query()] = None,
     end: Annotated[datetime | None, Query()] = None,
+    user_email: Annotated[str | None, Query()] = None,
+    user_group: Annotated[OwnerGroup | None, Query()] = None,
 ) -> Any:
-    _ = current_user
     if platform not in {None, "both", "public", "internal"}:
         raise HTTPException(status_code=400, detail="Invalid platform")
     if start is not None and end is not None and start > end:
         raise HTTPException(status_code=400, detail="Invalid time range")
+    validate_exclusive_user_filters(user_email=user_email, user_group=user_group)
+    permission_map = (
+        await get_effective_permission_map(session, current_user)
+        if user_group is not None or (user_email is not None and user_email.strip() != "")
+        else {}
+    )
 
     platform_value = "both" if platform in (None, "both") else platform
     platform_conditions: list[Any] = []
@@ -282,6 +314,16 @@ async def get_conversation_analytics_summary(
     if platform_value in {"both", "internal"}:
         platform_conditions.append(Conversation.is_public.is_(False))
     platform_filter = or_(*platform_conditions)
+
+    def apply_user_filters(statement: Any) -> Any:
+        return apply_aggregate_owner_filter(
+            statement,
+            current_user=current_user,
+            permission_map=permission_map,
+            user_email=user_email,
+            user_group=user_group,
+            include_internal=platform_value != "public",
+        )
 
     conversation_time_filters, message_time_filters = _conversation_time_filters(start, end)
     message_count_subquery = _message_count_subquery(message_time_filters)
@@ -307,6 +349,7 @@ async def get_conversation_analytics_summary(
         .group_by(time_bucket)
         .order_by(time_bucket)
     )
+    daily_stmt = apply_user_filters(daily_stmt)
     daily_rows = (await session.execute(daily_stmt)).all()
     daily_series = _build_conversation_daily_series(
         daily_rows, start, end, use_hourly=use_hourly_buckets
@@ -345,6 +388,7 @@ async def get_conversation_analytics_summary(
         )
         .where(platform_filter, *conversation_time_filters)
     )
+    message_stats_stmt = apply_user_filters(message_stats_stmt)
     message_stats = (await session.execute(message_stats_stmt)).one()
 
     hour_bucket = func.date_part("hour", Message.created_at)
@@ -357,6 +401,7 @@ async def get_conversation_analytics_summary(
         .group_by(hour_bucket)
         .order_by(hour_bucket)
     )
+    hourly_stmt = apply_user_filters(hourly_stmt)
     hourly_rows = {row.hour: row.messages for row in await session.execute(hourly_stmt)}
 
     response_time_expr: ColumnElement[float] = cast(OtelSpan.total_time, Float)
@@ -437,6 +482,7 @@ async def get_conversation_analytics_summary(
         .outerjoin(Conversation, Conversation.id == OtelSpan.conversation_id)
         .where(*response_time_filters)
     )
+    response_time_stmt = apply_user_filters(response_time_stmt)
     response_time_stats_row = (await session.execute(response_time_stmt)).one()
 
     bucket_counts = {
@@ -485,6 +531,111 @@ async def get_conversation_analytics_summary(
             max_field="max_time",
             avg_field="avg_time",
         ),
+    )
+
+
+def _resolve_browser_timezone(value: str) -> ZoneInfo:
+    try:
+        return ZoneInfo(value)
+    except ValueError, ZoneInfoNotFoundError:
+        return ZoneInfo("UTC")
+
+
+@router.get("/adoption", response_model=AdoptionSummaryOut)
+async def get_adoption_summary(
+    session: SessionDep,
+    current_user: AdoptionAccessUser,
+    start: Annotated[datetime | None, Query()] = None,
+    end: Annotated[datetime | None, Query()] = None,
+    browser_time_zone: Annotated[str, Query()] = "UTC",
+    user_email: Annotated[str | None, Query()] = None,
+    user_group: Annotated[OwnerGroup | None, Query()] = None,
+) -> AdoptionSummaryOut:
+    end_value = end or current_time_utc()
+    if start is not None and start > end_value:
+        raise HTTPException(status_code=400, detail="Invalid time range")
+    validate_exclusive_user_filters(user_email=user_email, user_group=user_group)
+    permission_map = (
+        await get_effective_permission_map(session, current_user)
+        if user_group is not None or (user_email is not None and user_email.strip() != "")
+        else {}
+    )
+
+    timezone = _resolve_browser_timezone(browser_time_zone)
+    activity_day = cast(func.timezone(timezone.key, Message.created_at), SqlDate)
+    selected_activity = Message.created_at >= start if start is not None else true()
+    activity_stmt = (
+        select(
+            activity_day.label("date"),
+            Conversation.user_id.label("user_id"),
+            func.bool_or(selected_activity).label("selected_activity"),
+        )
+        .select_from(Message)
+        .join(Conversation, Conversation.id == Message.conversation_id)
+        .where(
+            Message.role == "user",
+            Conversation.is_public.is_(False),
+            Conversation.kind == "chat",
+            Conversation.user_id.is_not(None),
+            Message.created_at <= end_value,
+        )
+        .group_by(activity_day, Conversation.user_id)
+    )
+    if start is not None:
+        first_display_day = start.astimezone(timezone).date()
+        lookback_start = datetime.combine(
+            first_display_day - timedelta(days=29), time.min, timezone
+        )
+        activity_stmt = activity_stmt.where(Message.created_at >= lookback_start)
+    activity_stmt = apply_aggregate_owner_filter(
+        activity_stmt,
+        current_user=current_user,
+        permission_map=permission_map,
+        user_email=user_email,
+        user_group=user_group,
+        include_internal=True,
+    )
+    activity_rows = (await session.execute(activity_stmt)).all()
+
+    active_by_day: dict[date, set[str]] = {}
+    selected_count_by_day: dict[date, int] = {}
+    for row in activity_rows:
+        active_by_day.setdefault(row.date, set()).add(str(row.user_id))
+        if row.selected_activity:
+            selected_count_by_day[row.date] = selected_count_by_day.get(row.date, 0) + 1
+
+    display_end = end_value.astimezone(timezone).date()
+    display_start = (
+        start.astimezone(timezone).date()
+        if start is not None
+        else min(active_by_day, default=display_end)
+    )
+    daily: list[AdoptionDailyOut] = []
+    current_day = display_start
+    while current_day <= display_end:
+        monthly_users: set[str] = set()
+        for offset in range(30):
+            monthly_users.update(active_by_day.get(current_day - timedelta(days=offset), ()))
+        daily.append(
+            AdoptionDailyOut(
+                date=current_day,
+                daily_active_users=selected_count_by_day.get(current_day, 0),
+                monthly_active_users=len(monthly_users),
+            )
+        )
+        current_day += timedelta(days=1)
+
+    latest = daily[-1]
+    return AdoptionSummaryOut(
+        latest_daily_active_users=latest.daily_active_users,
+        monthly_active_users=latest.monthly_active_users,
+        average_daily_active_users=sum(row.daily_active_users for row in daily) / len(daily),
+        stickiness=(
+            latest.daily_active_users / latest.monthly_active_users
+            if latest.monthly_active_users
+            else 0
+        ),
+        daily=daily,
     )
 
 

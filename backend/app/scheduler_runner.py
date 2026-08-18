@@ -4,8 +4,11 @@ import asyncio
 import contextlib
 import signal
 
+from app.chat.provider_http import close_provider_http_clients
+from app.chat.tools.utils import close_embedding_client
 from app.core.config import settings
-from app.otel import configure_otel_span_processor
+from app.core.db import close_database_pools
+from app.otel import close_telemetry_database_pool, configure_otel_span_processor
 from app.scheduler import configure_scheduler_jobs, scheduler
 from app.utils import configure_observability, logger
 
@@ -37,9 +40,21 @@ async def main() -> None:
     try:
         await _wait_for_shutdown()
     finally:
-        logger.info("Shutting down standalone scheduler")
-        scheduler.shutdown()
-        logger.info("Standalone scheduler stopped")
+        try:
+            logger.info("Shutting down standalone scheduler")
+            scheduler.shutdown()
+            logger.info("Standalone scheduler stopped")
+        finally:
+            try:
+                await close_embedding_client()
+            finally:
+                try:
+                    await close_provider_http_clients()
+                finally:
+                    try:
+                        await close_database_pools()
+                    finally:
+                        await close_telemetry_database_pool()
 
 
 if __name__ == "__main__":

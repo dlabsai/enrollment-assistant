@@ -9,15 +9,8 @@ import {
 } from "./trace-utils";
 
 const JSON_TREE_EXPAND_DEPTH = 2;
-// Measured Structured first render after reload (Raw → Structured tab switch).
-//
-// | JSON_TREE_EXPAND_DEPTH | Samples (ms)        | Avg (ms) |
-// | ---------------------- | ------------------- | -------- |
-// | 1                      | 166.6, 173.0, 161.7 | 167.1    |
-// | 2                      | 308.8, 291.7, 277.5 | 292.7    |
-// | 3                      | 629.6, 640.2, 549.1 | 606.3    |
-//
-// Impact: depth 1 → 2 adds ~125ms; 2 → 3 adds ~314ms.
+
+export const TRACE_TEXT_PREVIEW_LENGTH = 1400;
 
 export interface SpanTreeNode {
     span: TraceSpan;

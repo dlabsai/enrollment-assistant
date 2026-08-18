@@ -336,13 +336,7 @@ export const ChatList = ({
             return (): void => undefined;
         }
         if (searchQuery === "") {
-            const timeout = setTimeout(() => {
-                clearSearchResults();
-            }, 0);
-
-            return (): void => {
-                clearTimeout(timeout);
-            };
+            return (): void => undefined;
         }
 
         let isMounted = true;
@@ -417,7 +411,14 @@ export const ChatList = ({
         return (): void => {
             isMounted = false;
         };
-    }, [api, chats, clearSearchResults, isInvestigationList, itemLabelPlural, searchDialogOpen, searchQuery]);
+    }, [
+        api,
+        chats,
+        isInvestigationList,
+        itemLabelPlural,
+        searchDialogOpen,
+        searchQuery,
+    ]);
 
     const highlightQuery = searchQuery.trim();
 

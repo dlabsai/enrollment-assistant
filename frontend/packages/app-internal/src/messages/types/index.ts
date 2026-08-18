@@ -11,8 +11,10 @@ export interface MessageListRow {
     conversationUserName?: string;
     conversationUserEmail?: string;
     generationTimeMs?: number;
-    inputTokens?: number;
+    uncachedInputTokens?: number;
+    cacheReadInputTokens?: number;
     outputTokens?: number;
+    responseCost?: number;
     toolCallCount: number;
     guardrailFailureCount: number;
     guardrailsBlocked: boolean;

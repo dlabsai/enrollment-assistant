@@ -3,7 +3,9 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import logging
 from contextlib import asynccontextmanager
+from contextvars import ContextVar, Token
 from typing import TYPE_CHECKING, Any, cast
 
 import psycopg
@@ -168,6 +170,41 @@ class RagBuildNotificationPublisher:
             await connection.close()
 
 
+_rag_build_log_job_id: ContextVar[UUID | None] = ContextVar("rag_build_log_job_id", default=None)
+
+
+class RagBuildLogHandler(logging.Handler):
+    def __init__(self, publisher: RagBuildNotificationPublisher) -> None:
+        super().__init__(level=logging.INFO)
+        self._publisher = publisher
+        self._job_id: UUID | None = None
+        self.previous_level = logging.NOTSET
+
+    def bind(self, job_id: UUID) -> Token[UUID | None]:
+        self._job_id = job_id
+        return _rag_build_log_job_id.set(job_id)
+
+    @staticmethod
+    def unbind(token: Token[UUID | None]) -> None:
+        _rag_build_log_job_id.reset(token)
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            message = self.format(record)
+        except Exception:
+            self.handleError(record)
+            return
+
+        job_id = _rag_build_log_job_id.get()
+        if job_id is None or job_id != self._job_id:
+            return
+
+        stream = "stderr" if record.levelno >= logging.ERROR else "stdout"
+        self._publisher.publish_nowait(
+            "log", {"job_id": str(job_id), "stream": stream, "message": message}
+        )
+
+
 def _progress_payload_from_steps(job: RagBuildJob, steps: list[RagBuildJobStep]) -> dict[str, Any]:
     return {
         "job_id": str(job.id),
@@ -186,7 +223,9 @@ async def active_manual_rag_build_snapshot_events() -> tuple[
     async with get_session() as session:
         job = await session.scalar(
             select(RagBuildJob)
-            .where(RagBuildJob.status == "running", RagBuildJob.trigger == "manual")
+            .where(
+                RagBuildJob.status.in_(("running", "cancelling")), RagBuildJob.trigger == "manual"
+            )
             .order_by(desc(RagBuildJob.started_at), desc(RagBuildJob.id))
             .limit(1)
         )
@@ -205,8 +244,9 @@ async def active_manual_rag_build_snapshot_events() -> tuple[
             .all()
         )
 
+    status = "cancelling" if job.status == "cancelling" else "start"
     events: list[tuple[str, dict[str, Any]]] = [
-        ("status", {"job_id": str(job.id), "status": "start"})
+        ("status", {"job_id": str(job.id), "status": status})
     ]
     if steps:
         events.append(("progress", _progress_payload_from_steps(job, steps)))

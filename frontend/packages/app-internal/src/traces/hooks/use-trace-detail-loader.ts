@@ -1,9 +1,10 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback } from "react";
 
 import {
     type AuthenticatedApi,
     useAuthenticatedApi,
 } from "../../auth/hooks/use-authenticated-api";
+import { useAsyncData } from "../../lib/hooks/use-async-data";
 import type { TraceDetail } from "../types";
 
 interface UseTraceDetailLoaderOptions {
@@ -14,12 +15,13 @@ interface UseTraceDetailLoaderResult {
     detail: TraceDetail | undefined;
     loading: boolean;
     error: string | undefined;
-    refresh: () => Promise<void>;
+    refresh: () => void;
 }
 
 type TraceDetailFetcher = (
     api: AuthenticatedApi,
     id: string,
+    signal: AbortSignal,
 ) => Promise<TraceDetail>;
 
 export const useTraceDetailLoader = (
@@ -28,67 +30,25 @@ export const useTraceDetailLoader = (
     options: UseTraceDetailLoaderOptions = {},
 ): UseTraceDetailLoaderResult => {
     const api = useAuthenticatedApi();
-    const [detail, setDetail] = useState<TraceDetail | undefined>();
-    const [loading, setLoading] = useState(false);
-    const [error, setError] = useState<string | undefined>();
-    const requestIdRef = useRef(0);
-    const mountedRef = useRef(true);
-
-    useEffect((): (() => void) => {
-        mountedRef.current = true;
-        return () => {
-            mountedRef.current = false;
-        };
-    }, []);
-
-    const refresh = useCallback(async (): Promise<void> => {
-        requestIdRef.current += 1;
-        const requestId = requestIdRef.current;
-        const isActive = (): boolean =>
-            mountedRef.current && requestId === requestIdRef.current;
-
-        if (id === undefined || id.trim() === "") {
-            if (isActive()) {
-                setDetail(undefined);
-                setError(undefined);
-                setLoading(false);
+    const enabled = id !== undefined && id.trim() !== "";
+    const load = useCallback(
+        async (signal: AbortSignal): Promise<TraceDetail> => {
+            if (id === undefined || id.trim() === "") {
+                throw new Error("A trace identifier is required");
             }
-            return;
-        }
+            return fetcher(api, id, signal);
+        },
+        [api, fetcher, id],
+    );
+    const { data, loading, error, refresh } = useAsyncData<
+        TraceDetail | undefined
+    >({
+        clearDataOnError: options.clearDetailOnError,
+        enabled,
+        errorMessage: "Failed to fetch trace",
+        initialData: undefined,
+        load,
+    });
 
-        if (isActive()) {
-            setLoading(true);
-            setError(undefined);
-        }
-
-        try {
-            const data = await fetcher(api, id);
-            if (!isActive()) {
-                return;
-            }
-            setDetail(data);
-        } catch (error_) {
-            if (!isActive()) {
-                return;
-            }
-            setError(
-                error_ instanceof Error
-                    ? error_.message
-                    : "Failed to fetch trace",
-            );
-            if (options.clearDetailOnError === true) {
-                setDetail(undefined);
-            }
-        } finally {
-            if (isActive()) {
-                setLoading(false);
-            }
-        }
-    }, [api, fetcher, id, options.clearDetailOnError]);
-
-    useEffect(() => {
-        void refresh();
-    }, [refresh]);
-
-    return { detail, loading, error, refresh };
+    return { detail: data, loading, error, refresh };
 };

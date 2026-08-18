@@ -8,12 +8,17 @@ from pydantic_ai.messages import TextPart
 from sqlalchemy import select
 
 from app.chat.agents import get_pydantic_ai_model_name
+from app.chat.engine_utils import (
+    build_max_tokens_settings,
+    set_direct_model_response_span_attributes,
+)
 from app.chat.template_utils import get_runtime_jinja_environment
 from app.chat.tree_utils import get_current_branch_path
 from app.core.config import settings
 from app.core.db import get_session
 from app.models import Conversation, Message, PromptSetScope
-from app.otel_genai import genai_agent_name_scope
+from app.otel import otel_export_scope
+from app.otel_genai import genai_helper_trace_scope
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -43,7 +48,7 @@ def _message_content_for_summary(message: Message) -> str:
     return message.content
 
 
-async def _get_active_transcript(conversation_id: UUID) -> str | None:
+async def _get_active_transcript(conversation_id: UUID) -> tuple[str, UUID | None] | None:
     async with get_session() as session:
         conversation = await session.get(Conversation, conversation_id)
         if not conversation:
@@ -84,20 +89,43 @@ async def _get_active_transcript(conversation_id: UUID) -> str | None:
             )
             return None
 
-        return _format_transcript(ordered_messages)
+        trigger_message_id = next(
+            (message.id for message in reversed(ordered_messages) if message.role == "assistant"),
+            None,
+        )
+        return _format_transcript(ordered_messages), trigger_message_id
 
 
-async def _generate_internal_summary(transcript: str) -> str:
+async def _generate_internal_summary(
+    transcript: str, *, conversation_id: UUID, trigger_message_id: UUID | None
+) -> str:
     env = await get_runtime_jinja_environment(
         TEMPLATES_DIR, is_internal=True, scope=PromptSetScope.SUMMARY
     )
     template = env.get_template("summary_agent.j2")
     prompt = template.render(transcript=transcript)
 
-    with genai_agent_name_scope("summary"):
+    configured_model = settings.SUMMARIZER_MODEL
+    with (
+        otel_export_scope(enabled=True),
+        genai_helper_trace_scope(
+            "summary",
+            model=configured_model,
+            conversation_id=str(conversation_id),
+            trigger_message_id=(
+                str(trigger_message_id) if trigger_message_id is not None else None
+            ),
+            is_internal=True,
+        ) as span,
+    ):
         model_response = await model_request(
-            get_pydantic_ai_model_name(settings.SUMMARIZER_MODEL),
+            get_pydantic_ai_model_name(configured_model),
             [ModelRequest.user_text_prompt(prompt)],
+            model_settings=build_max_tokens_settings(settings.SUMMARIZER_MODEL_MAX_TOKENS),
+            instrument=False,
+        )
+        set_direct_model_response_span_attributes(
+            span, model_response, configured_model=configured_model
         )
 
     first_part = model_response.parts[0]
@@ -114,11 +142,14 @@ async def _generate_internal_summary(transcript: str) -> str:
 async def summarize_internal_conversation(conversation_id: UUID) -> None:
     """Generate and persist a summary for an internal conversation without blocking the request."""
     try:
-        transcript = await _get_active_transcript(conversation_id)
-        if not transcript:
+        summary_input = await _get_active_transcript(conversation_id)
+        if summary_input is None:
             return
+        transcript, trigger_message_id = summary_input
 
-        summary = await _generate_internal_summary(transcript)
+        summary = await _generate_internal_summary(
+            transcript, conversation_id=conversation_id, trigger_message_id=trigger_message_id
+        )
 
         async with get_session() as session:
             conversation = await session.get(Conversation, conversation_id)

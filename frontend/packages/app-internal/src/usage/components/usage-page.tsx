@@ -19,10 +19,14 @@ import {
 import { Check, ChevronsUpDown, Filter, RefreshCw } from "lucide-react";
 import { type JSX, useEffect, useMemo, useState } from "react";
 
+import { useDashboardUserFilter } from "../../chats/hooks/use-dashboard-user-filter";
+import { parseStoredUserFilter } from "../../chats/lib/user-filter-options";
+import type { ChatUserOption } from "../../chats/types";
 import { PageHeader, PageHeaderGroup } from "../../components/page-header";
 import { PageSection, PageShell } from "../../components/page-shell";
 import { LoadingState, PageError } from "../../components/page-state";
 import { TimeRangeFilter } from "../../components/time-range-filter";
+import { UserFilterPopover } from "../../components/user-filter-popover";
 import { formatLocaleNumber } from "../../lib/number-format";
 import {
     type CustomTimeRange,
@@ -60,6 +64,7 @@ interface StoredUsageFilters {
         end?: string;
     };
     modelFilters?: string[];
+    selectedUser?: ChatUserOption;
 }
 
 const isPlatformFilter = (value: string): value is PlatformFilter =>
@@ -131,6 +136,7 @@ const parseStoredUsageFilters = (
                         : undefined,
             },
             modelFilters: modelFiltersValue,
+            selectedUser: parseStoredUserFilter(parsed.selectedUser),
         };
     } catch {
         return undefined;
@@ -159,6 +165,10 @@ export const UsagePage = (): JSX.Element => {
             return "both";
         },
     );
+    const userFilter = useDashboardUserFilter({
+        initialSelectedUser: storedFilters?.selectedUser,
+        platform: selectedPlatform,
+    });
     const [timeRange, setTimeRange] = useState<TimeRangeValue>(() => {
         const storedTimeRange = storedFilters?.timeRange;
         if (storedTimeRange !== undefined) {
@@ -190,6 +200,8 @@ export const UsagePage = (): JSX.Element => {
         timeRange,
         customRange,
         modelFilters,
+        userEmail: userFilter.userFilterParams.userEmail,
+        userGroup: userFilter.userFilterParams.userGroup,
         referenceDate,
     });
 
@@ -251,12 +263,19 @@ export const UsagePage = (): JSX.Element => {
                 end: customRange.end?.toISOString(),
             },
             modelFilters,
+            selectedUser: userFilter.selectedUser,
         };
         window.localStorage.setItem(
             usageFilterStorageKey,
             JSON.stringify(payload),
         );
-    }, [customRange, modelFilters, selectedPlatform, timeRange]);
+    }, [
+        customRange,
+        modelFilters,
+        selectedPlatform,
+        timeRange,
+        userFilter.selectedUser,
+    ]);
 
     if (loading && !hasLoaded) {
         return <LoadingState />;
@@ -266,7 +285,7 @@ export const UsagePage = (): JSX.Element => {
         return (
             <PageError
                 message={error}
-                onRetry={() => void refresh()}
+                onRetry={refresh}
             />
         );
     }
@@ -274,6 +293,16 @@ export const UsagePage = (): JSX.Element => {
     return (
         <PageShell variant="dashboard">
             <PageHeader title="Usage">
+                <UserFilterPopover
+                    label={userFilter.label}
+                    loading={userFilter.loading}
+                    onChange={userFilter.handleChange}
+                    onOpenChange={userFilter.handleOpenChange}
+                    onSearchInputChange={userFilter.handleSearchInputChange}
+                    open={userFilter.open}
+                    options={userFilter.options}
+                    searchInput={userFilter.searchInput}
+                />
                 <PageHeaderGroup>
                     <ToggleGroup
                         aria-label="Platform"
@@ -445,6 +474,7 @@ export const UsagePage = (): JSX.Element => {
                 </PageHeaderGroup>
                 <Button
                     onClick={() => {
+                        userFilter.clear();
                         setSelectedPlatform("both");
                         setTimeRange("30d");
                         setCustomRange({});
@@ -457,7 +487,7 @@ export const UsagePage = (): JSX.Element => {
                     Clear
                 </Button>
                 <Button
-                    onClick={() => void refresh()}
+                    onClick={refresh}
                     variant="outline"
                 >
                     <RefreshCw data-icon="inline-start" />

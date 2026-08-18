@@ -6,6 +6,7 @@ import {
     redirect,
 } from "@tanstack/react-router";
 
+import { AdoptionPage } from "../adoption/components/adoption-page";
 import { InvestigatePage } from "../chat/components/chat-page";
 import { AnalyticsPage } from "../chat-analytics/components/analytics-page";
 import {
@@ -114,6 +115,11 @@ const redirectToView = (view: AppView): ReturnType<typeof redirect> => {
         case "analytics": {
             return redirect({
                 to: "/analytics",
+            });
+        }
+        case "adoption": {
+            return redirect({
+                to: "/adoption",
             });
         }
         case "public-analytics": {
@@ -321,6 +327,12 @@ const AnalyticsRoute = createRoute({
     component: AnalyticsPage,
 });
 
+const AdoptionRoute = createRoute({
+    getParentRoute: () => RootRoute,
+    path: "/adoption",
+    component: AdoptionPage,
+});
+
 const PublicAnalyticsRoute = createRoute({
     getParentRoute: () => RootRoute,
     path: "/public-analytics",
@@ -434,6 +446,7 @@ const routeTree = RootRoute.addChildren([
     TracesRoute,
     TraceDetailRoute,
     AnalyticsRoute,
+    AdoptionRoute,
     PublicAnalyticsRoute,
     EvalsRoute,
     EvalCasesRoute,

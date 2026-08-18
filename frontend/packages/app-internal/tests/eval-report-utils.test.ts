@@ -4,7 +4,6 @@ import { describe, it } from "node:test";
 import {
     buildModelRoleMap,
     buildOverallAverages,
-    buildReportSummaryMetrics,
     buildScoreSummaryRows,
     formatEvalAudience,
     parseModelConfigurations,
@@ -102,11 +101,6 @@ describe("eval report utilities", () => {
                 assertions: "✗ passed: 0%",
             },
         ]);
-
-        const metrics = buildReportSummaryMetrics(report);
-        assert.equal(metrics.passRateAverage, 0.5);
-        assert.ok(metrics.durationMedianAverage !== undefined);
-        assert.ok(Math.abs(metrics.durationMedianAverage - 1.8) < 0.0001);
 
         assert.deepEqual(buildScoreSummaryRows(report), [
             {

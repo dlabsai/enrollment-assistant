@@ -107,6 +107,18 @@ async def test_scheduler_runner_starts_and_stops_scheduler_when_enabled(
     async def fake_wait_for_shutdown() -> None:
         events.append("wait")
 
+    async def fake_close_embedding_client() -> None:
+        events.append("close_embedding")
+
+    async def fake_close_provider_http_clients() -> None:
+        events.append("close_providers")
+
+    async def fake_close_database_pools() -> None:
+        events.append("close_database")
+
+    async def fake_close_telemetry_database_pool() -> None:
+        events.append("close_telemetry")
+
     monkeypatch.setattr(scheduler_runner.settings, "SCHEDULER", True)
     monkeypatch.setattr(scheduler_runner, "configure_observability", lambda: events.append("obs"))
     monkeypatch.setattr(
@@ -117,7 +129,26 @@ async def test_scheduler_runner_starts_and_stops_scheduler_when_enabled(
     )
     monkeypatch.setattr(scheduler_runner, "scheduler", FakeScheduler())
     monkeypatch.setattr(scheduler_runner, "_wait_for_shutdown", fake_wait_for_shutdown)
+    monkeypatch.setattr(scheduler_runner, "close_embedding_client", fake_close_embedding_client)
+    monkeypatch.setattr(
+        scheduler_runner, "close_provider_http_clients", fake_close_provider_http_clients
+    )
+    monkeypatch.setattr(scheduler_runner, "close_database_pools", fake_close_database_pools)
+    monkeypatch.setattr(
+        scheduler_runner, "close_telemetry_database_pool", fake_close_telemetry_database_pool
+    )
 
     await scheduler_runner.main()
 
-    assert events == ["obs", "otel", "configure", "start", "wait", "shutdown"]
+    assert events == [
+        "obs",
+        "otel",
+        "configure",
+        "start",
+        "wait",
+        "shutdown",
+        "close_embedding",
+        "close_providers",
+        "close_database",
+        "close_telemetry",
+    ]

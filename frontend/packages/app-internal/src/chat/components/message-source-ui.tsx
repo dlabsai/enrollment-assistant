@@ -7,7 +7,7 @@ import {
     TooltipProvider,
     TooltipTrigger,
 } from "@va/shared/components/ui/tooltip";
-import { BookOpen, Wrench } from "lucide-react";
+import { BookOpen, CircleAlert, Wrench } from "lucide-react";
 import type { JSX } from "react";
 
 import type {
@@ -37,10 +37,19 @@ const canShowToolsButton = (
 const isGroundingPending = (message: MessageSourcePanelMessage): boolean =>
     message.groundingSourceStatus === "pending";
 
+const isGroundingFailed = (message: MessageSourcePanelMessage): boolean =>
+    message.groundingSourceStatus === "failed";
+
+const isGroundingComplete = (message: MessageSourcePanelMessage): boolean =>
+    message.groundingSourceStatus === "selected" ||
+    message.groundingSourceStatus === "no_selection";
+
 const canOpenSourcesPanel = (
     message: MessageSourcePanelMessage,
     canViewSources: boolean,
-): boolean => canShowSourcesButton(message, canViewSources) && !isGroundingPending(message);
+): boolean =>
+    canShowSourcesButton(message, canViewSources) &&
+    isGroundingComplete(message);
 
 const hasOpenMessageSourcePanels = (
     message: MessageSourcePanelMessage,
@@ -60,6 +69,7 @@ interface MessageSourceButtonsProps {
     canViewTools: boolean;
     disabled?: boolean;
     message: MessageSourcePanelMessage;
+    onRetryGrounding?: (messageId: string) => void;
     state: MessageSourcePanelState;
 }
 
@@ -68,23 +78,34 @@ export const MessageSourceButtons = ({
     canViewTools,
     disabled = false,
     message,
+    onRetryGrounding,
     state,
 }: MessageSourceButtonsProps): JSX.Element | null => {
     const sourceCount = message.groundingSourcesUsed?.length ?? 0;
     const sourcesOpen = state.sourcesOpenMessageIds.has(message.id);
     const sourcesPending = isGroundingPending(message);
+    const sourcesFailed = isGroundingFailed(message);
+    const canRetryGrounding = sourcesFailed && onRetryGrounding !== undefined;
     const sourcesLabel = sourcesPending
         ? "Checking sources"
-        : sourcesOpen
-          ? "Hide sources"
-          : "Show sources";
+        : sourcesFailed
+          ? canRetryGrounding
+              ? "Retry source check"
+              : "Source check failed"
+          : sourcesOpen
+            ? "Hide sources"
+            : "Show sources";
     const sourcesTooltip = sourcesPending
         ? "Checking sources"
-        : sourcesOpen
-          ? "Hide sources"
-          : sourceCount > 0
-            ? `Show ${sourceCount} ${sourceCount === 1 ? "source" : "sources"}`
-            : "Show sources";
+        : sourcesFailed
+          ? canRetryGrounding
+              ? "Source check failed. Retry"
+              : "Source check failed"
+          : sourcesOpen
+            ? "Hide sources"
+            : sourceCount > 0
+              ? `Show ${sourceCount} ${sourceCount === 1 ? "source" : "sources"}`
+              : "Show sources";
     const toolsOpen = state.toolSourcesOpenMessageIds.has(message.id);
 
     const sourcesButton = canShowSourcesButton(message, canViewSources) ? (
@@ -93,17 +114,35 @@ export const MessageSourceButtons = ({
                 render={
                     <Button
                         aria-label={sourcesLabel}
-                        className="text-muted-foreground rounded-full transition"
-                        disabled={disabled || sourcesPending}
+                        className={
+                            sourcesFailed
+                                ? "text-destructive rounded-full transition"
+                                : "text-muted-foreground rounded-full transition"
+                        }
+                        disabled={
+                            disabled ||
+                            sourcesPending ||
+                            (sourcesFailed && !canRetryGrounding)
+                        }
                         onClick={() => {
+                            if (sourcesFailed) {
+                                onRetryGrounding?.(message.id);
+                                return;
+                            }
                             state.toggleSourcesPanel(message.id);
                         }}
                         size="icon-sm"
                         type="button"
-                        variant={sourcesOpen && !sourcesPending ? "secondary" : "ghost"}
+                        variant={
+                            sourcesOpen && !sourcesPending
+                                ? "secondary"
+                                : "ghost"
+                        }
                     >
                         {sourcesPending ? (
                             <Spinner className="size-4" />
+                        ) : sourcesFailed ? (
+                            <CircleAlert className="size-4" />
                         ) : (
                             <BookOpen className="size-4" />
                         )}

@@ -45,13 +45,16 @@ import {
 } from "../../lib/time-range";
 import { useTraceDetail } from "../hooks/use-trace-detail";
 import { useTraceIndex } from "../hooks/use-trace-index";
+import { useTraceSheetPanel } from "../hooks/use-trace-sheet-panel";
+import { TRACE_SHEET_WIDTH_CLASS } from "../lib/trace-layout";
 import {
     formatDurationMs,
     formatPlatform,
     formatTimestamp,
 } from "../lib/trace-utils";
-import type { TracePlatformFilter } from "../types";
 import { TraceDetailPanel } from "./trace-detail-panel";
+import { TraceStatusBadge } from "./trace-outcome-badge";
+import { TraceSheetResizeHandle } from "./trace-sheet-resize-handle";
 import { TraceTable } from "./trace-table";
 
 const platformOptions = [
@@ -205,7 +208,6 @@ export const TracesPage = ({
         parseStoredCustomRange(storedFilters?.customRange),
     );
     const [referenceDate, setReferenceDate] = useState(() => new Date());
-    const [detailExpanded, setDetailExpanded] = useState(false);
     const search = useSearch({ strict: false });
     const navigate = useNavigate();
 
@@ -237,7 +239,6 @@ export const TracesPage = ({
         );
     }, [customRange, selectedPlatform, timeRange, traceFilterStorageKey]);
 
-    const platformFilter = selectedPlatform as TracePlatformFilter;
     const timeRangeParams = useMemo(
         () => getTimeRangeQueryParams(timeRange, referenceDate, customRange),
         [customRange, referenceDate, timeRange],
@@ -245,7 +246,7 @@ export const TracesPage = ({
 
     const { traces, total, loading, error, refresh } = useTraceIndex(
         aiOnly,
-        platformFilter,
+        selectedPlatform,
         pageIndex,
         pageSize,
         timeRangeParams.start,
@@ -261,6 +262,7 @@ export const TracesPage = ({
         [search.trace, traces],
     );
     const sheetOpen = search.trace !== undefined;
+    const traceSheetPanel = useTraceSheetPanel();
 
     const {
         detail,
@@ -268,6 +270,8 @@ export const TracesPage = ({
         error: detailError,
         refresh: refreshDetail,
     } = useTraceDetail(activeTraceId, source);
+    const currentDetail =
+        detail?.trace_id === activeTraceId ? detail : undefined;
 
     const clearTraceSelection = useCallback((): void => {
         void navigate({
@@ -282,11 +286,11 @@ export const TracesPage = ({
     }, [navigate, routePath]);
 
     const handleSpanChange = useCallback(
-        (spanId: string | undefined): void => {
+        async (spanId: string): Promise<void> => {
             if (activeTraceId === undefined) {
                 return;
             }
-            void navigate({
+            await navigate({
                 replace: false,
                 search: (prev) => ({
                     ...prev,
@@ -326,15 +330,21 @@ export const TracesPage = ({
             "Trace details"
         ) : (
             <span className="inline-flex flex-wrap items-center gap-2">
-                <Badge
-                    variant={
-                        selectedTrace.is_public === true
-                            ? "secondary"
-                            : "outline"
-                    }
-                >
-                    {formatPlatform(selectedTrace.is_public)}
-                </Badge>
+                <TraceStatusBadge
+                    failedResultCount={selectedTrace.failed_result_count}
+                    isError={selectedTrace.is_error}
+                />
+                {isEvalTraces ? undefined : (
+                    <Badge
+                        variant={
+                            selectedTrace.is_public === true
+                                ? "secondary"
+                                : "outline"
+                        }
+                    >
+                        {formatPlatform(selectedTrace.is_public)}
+                    </Badge>
+                )}
                 <span>{formatTimestamp(selectedTrace.started_at)}</span>
                 <span>{formatDurationMs(selectedTrace.duration_ms)}</span>
                 <span>
@@ -441,7 +451,7 @@ export const TracesPage = ({
                     Clear
                 </Button>
                 <Button
-                    onClick={() => void refresh()}
+                    onClick={refresh}
                     variant="outline"
                 >
                     <RefreshCw data-icon="inline-start" />
@@ -483,21 +493,37 @@ export const TracesPage = ({
             </PageSection>
 
             <Sheet
-                onOpenChange={(open) => {
-                    if (!open) {
-                        clearTraceSelection();
+                modal={false}
+                onOpenChange={(open, eventDetails) => {
+                    if (open) {
+                        return;
                     }
+                    const eventTarget = eventDetails.event.target;
+                    if (
+                        eventDetails.reason === "outside-press" &&
+                        eventTarget instanceof Element &&
+                        eventTarget.closest(
+                            '[data-row-marker="trace"]',
+                        ) !== null
+                    ) {
+                        eventDetails.cancel();
+                        return;
+                    }
+                    traceSheetPanel.handleCancelResize();
+                    clearTraceSelection();
                 }}
                 open={sheetOpen}
             >
                 <SheetContent
                     className={cn(
                         "flex flex-col gap-4 p-0",
-                        detailExpanded
-                            ? "!w-screen !max-w-none"
-                            : "!w-[min(100vw,860px)] !max-w-[min(100vw,860px)]",
+                        TRACE_SHEET_WIDTH_CLASS,
+                        traceSheetPanel.isResizing &&
+                            "select-none !transition-none",
                     )}
+                    data-trace-peek-content=""
                     initialFocus={false}
+                    style={traceSheetPanel.panelStyle}
                 >
                     <SheetHeader className="border-b px-4 py-4">
                         <div className="flex items-start justify-between gap-4">
@@ -509,9 +535,7 @@ export const TracesPage = ({
                                             render={
                                                 <Button
                                                     aria-label="Refresh trace"
-                                                    onClick={() =>
-                                                        void refreshDetail()
-                                                    }
+                                                    onClick={refreshDetail}
                                                     size="icon-sm"
                                                     variant="outline"
                                                 >
@@ -528,20 +552,17 @@ export const TracesPage = ({
                                             render={
                                                 <Button
                                                     aria-label={
-                                                        detailExpanded
+                                                        traceSheetPanel.isExpanded
                                                             ? "Collapse trace sheet"
                                                             : "Expand trace sheet"
                                                     }
-                                                    onClick={() => {
-                                                        setDetailExpanded(
-                                                            (expanded) =>
-                                                                !expanded,
-                                                        );
-                                                    }}
+                                                    onClick={
+                                                        traceSheetPanel.handleToggleExpanded
+                                                    }
                                                     size="icon-sm"
                                                     variant="outline"
                                                 >
-                                                    {detailExpanded ? (
+                                                    {traceSheetPanel.isExpanded ? (
                                                         <Minimize2 />
                                                     ) : (
                                                         <Maximize2 />
@@ -550,7 +571,7 @@ export const TracesPage = ({
                                             }
                                         />
                                         <TooltipContent>
-                                            {detailExpanded
+                                            {traceSheetPanel.isExpanded
                                                 ? "Collapse sheet"
                                                 : "Expand to full viewport"}
                                         </TooltipContent>
@@ -655,14 +676,22 @@ export const TracesPage = ({
 
                     <div className="min-h-0 flex-1 overflow-hidden">
                         <TraceDetailPanel
-                            detail={detail}
+                            detail={currentDetail}
                             error={detailError}
+                            key={activeTraceId}
+                            layoutScope="peek"
                             loading={detailLoading}
                             onSpanChange={handleSpanChange}
                             onSpanSync={handleSpanSync}
                             selectedSpanId={search.span}
                         />
                     </div>
+                    <TraceSheetResizeHandle
+                        isResizing={traceSheetPanel.isResizing}
+                        resizeHandleProps={
+                            traceSheetPanel.resizeHandleProps
+                        }
+                    />
                 </SheetContent>
             </Sheet>
         </PageShell>

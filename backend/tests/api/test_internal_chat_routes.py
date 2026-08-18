@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import json
 import logging
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
+from dataclasses import dataclass
+from datetime import timedelta
 from typing import TYPE_CHECKING
 from uuid import UUID, uuid4
 
@@ -10,8 +12,11 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api import grounding_agent
+from app.api.deps import get_db_session
 from app.api.message_sources import MessageSourceUsed, build_canned_response_source
 from app.api.routes import chat as chat_routes
+from app.api.routes import messages as message_routes
 from app.api.routes import rag as rag_routes
 from app.chat import internal_summary
 from app.chat.engine import MessageMetadataOut, MessageOut, ModelSettings
@@ -26,19 +31,23 @@ from app.core.security import get_password_hash
 from app.main import app
 from app.models import (
     AssistantMessageMetadata,
+    ChatGenerationAttempt,
     Conversation,
     DocumentType,
     Message,
     MessageFeedback,
     OtelSpan,
+    RagBuildJob,
     User,
 )
 from app.models import Rating as MessageRating
+from app.rag import job_tracking as rag_job_tracking
 from app.rag.pipeline import RagPipelineProgressSnapshot, RagPipelineStepSnapshot
+from app.utils import current_time_utc
 from tests.api.auth_helpers import authenticate_client
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator, Awaitable, Callable
+    from collections.abc import AsyncGenerator, Awaitable, Callable, Generator
 
 
 async def _create_user(
@@ -56,6 +65,65 @@ async def _create_user(
     await session.commit()
     await session.refresh(user)
     return user
+
+
+@dataclass(frozen=True)
+class _BranchGraph:
+    conversation: Conversation
+    root: Message
+    current_answer: Message
+    alternate_answer: Message
+    follow_up: Message
+    alternate_root: Message
+    alternate_root_answer: Message
+
+
+async def _create_branch_graph(session: AsyncSession, *, user: User, title: str) -> _BranchGraph:
+    conversation = Conversation(
+        title=title, user=False, project="demo", user_id=user.id, is_public=False
+    )
+    session.add(conversation)
+    await session.flush()
+
+    root = Message(role="user", content="Question", conversation=conversation)
+    alternate_root = Message(role="user", content="Edited question", conversation=conversation)
+    session.add_all([root, alternate_root])
+    await session.flush()
+
+    current_answer = Message(
+        role="assistant", content="Current answer", conversation=conversation, parent_id=root.id
+    )
+    alternate_answer = Message(
+        role="assistant", content="Alternate answer", conversation=conversation, parent_id=root.id
+    )
+    alternate_root_answer = Message(
+        role="assistant",
+        content="Edited answer",
+        conversation=conversation,
+        parent_id=alternate_root.id,
+    )
+    session.add_all([current_answer, alternate_answer, alternate_root_answer])
+    await session.flush()
+
+    follow_up = Message(
+        role="user", content="Follow up", conversation=conversation, parent_id=alternate_answer.id
+    )
+    session.add(follow_up)
+    await session.flush()
+
+    conversation.active_root_message_id = root.id
+    root.active_child_id = current_answer.id
+    alternate_answer.active_child_id = follow_up.id
+    alternate_root.active_child_id = alternate_root_answer.id
+    return _BranchGraph(
+        conversation=conversation,
+        root=root,
+        current_answer=current_answer,
+        alternate_answer=alternate_answer,
+        follow_up=follow_up,
+        alternate_root=alternate_root,
+        alternate_root_answer=alternate_root_answer,
+    )
 
 
 def _parse_sse_events(payload: str) -> list[tuple[str, dict[str, object]]]:
@@ -83,17 +151,21 @@ async def test_public_message_ignores_staff_access_cookie(
         transactional_session, group_slug=SystemGroupSlug.ADMIN, email_prefix="public-cookie"
     )
     observed_user_ids: list[UUID | None] = []
+    observed_model_settings: list[tuple[ModelSettings, ModelSettings]] = []
 
     async def fake_handle_conversation_turn(
         *,
         user_prompt: str,
         user_id: UUID | None,
         session: AsyncSession,
+        chatbot_model_settings: ModelSettings,
+        guardrail_model_settings: ModelSettings,
         conversation_id: UUID | None = None,
         **_: object,
     ) -> tuple[UUID, MessageOut]:
         del conversation_id
         observed_user_ids.append(user_id)
+        observed_model_settings.append((chatbot_model_settings, guardrail_model_settings))
 
         conversation = Conversation(
             title=user_prompt, user=False, project="demo", user_id=None, is_public=True
@@ -146,6 +218,9 @@ async def test_public_message_ignores_staff_access_cookie(
 
     assert public_response.status_code == 200
     assert observed_user_ids == [None]
+    chatbot_settings, guardrail_settings = observed_model_settings[0]
+    assert chatbot_settings.azure_service_tier == settings.CHATBOT_AZURE_SERVICE_TIER
+    assert guardrail_settings.azure_service_tier == settings.GUARDRAIL_AZURE_SERVICE_TIER
 
 
 @pytest.mark.asyncio
@@ -211,6 +286,165 @@ async def test_public_message_ignores_authorization_header(
 
 
 @pytest.mark.asyncio
+async def test_public_message_route_enforces_continuation_contract(
+    transactional_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    owner = await _create_user(
+        transactional_session, group_slug=SystemGroupSlug.USER, email_prefix="chat-parent-contract"
+    )
+    public_conversation = Conversation(
+        title="Public branch", user=False, project="demo", user_id=owner.id, is_public=True
+    )
+    internal_conversation = Conversation(
+        title="Internal branch", user=False, project="demo", user_id=owner.id, is_public=False
+    )
+    public_investigation = Conversation(
+        title="Public investigation",
+        user=False,
+        project="demo",
+        user_id=owner.id,
+        is_public=True,
+        kind="investigation",
+    )
+    transactional_session.add_all(
+        [public_conversation, internal_conversation, public_investigation]
+    )
+    await transactional_session.flush()
+
+    public_root = Message(role="user", content="Public root", conversation=public_conversation)
+    transactional_session.add(public_root)
+    await transactional_session.flush()
+    public_leaf = Message(
+        role="assistant",
+        content="Public leaf",
+        conversation=public_conversation,
+        parent_id=public_root.id,
+    )
+    transactional_session.add(public_leaf)
+    await transactional_session.flush()
+    public_conversation.active_root_message_id = public_root.id
+    public_root.active_child_id = public_leaf.id
+    await transactional_session.commit()
+
+    observed_parents: list[UUID | None] = []
+
+    async def fake_handle_conversation_turn(
+        *, conversation_id: UUID, parent_message_id: UUID | None, **_: object
+    ) -> tuple[UUID, MessageOut]:
+        observed_parents.append(parent_message_id)
+        return public_root.id, MessageOut(
+            id=public_leaf.id,
+            role=public_leaf.role,
+            content=public_leaf.content,
+            created_at=public_leaf.created_at,
+            parent_id=parent_message_id,
+            conversation_id=conversation_id,
+        )
+
+    monkeypatch.setattr(chat_routes, "handle_conversation_turn", fake_handle_conversation_turn)
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://testserver"
+    ) as client:
+        omitted_parent = await client.post(
+            f"{settings.API_STR}/chat/public/message",
+            json={"user_prompt": "Continue public", "conversation_id": str(public_conversation.id)},
+        )
+        null_parent = await client.post(
+            f"{settings.API_STR}/chat/public/message",
+            json={
+                "user_prompt": "New public root",
+                "conversation_id": str(public_conversation.id),
+                "parent_message_id": None,
+            },
+        )
+        internal_conversation_response = await client.post(
+            f"{settings.API_STR}/chat/public/message",
+            json={
+                "user_prompt": "Continue an internal conversation publicly",
+                "conversation_id": str(internal_conversation.id),
+            },
+        )
+        investigation_response = await client.post(
+            f"{settings.API_STR}/chat/public/message",
+            json={
+                "user_prompt": "Continue an investigation publicly",
+                "conversation_id": str(public_investigation.id),
+            },
+        )
+
+    assert omitted_parent.status_code == 200
+    assert null_parent.status_code == 200
+    assert internal_conversation_response.status_code == 403
+    assert internal_conversation_response.json()["detail"] == "Access denied"
+    assert investigation_response.status_code == 400
+    assert investigation_response.json()["detail"] == "Conversation is not a chat"
+    assert observed_parents == [public_leaf.id, None]
+
+
+@pytest.mark.asyncio
+async def test_investigation_routes_require_effective_permission(
+    transactional_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    developer = await _create_user(
+        transactional_session,
+        group_slug=SystemGroupSlug.DEV,
+        email_prefix="investigation-authoring-permission",
+    )
+    await replace_user_permission_overrides(
+        transactional_session, developer, {PermissionKey.ACCESS_INVESTIGATIONS: False}
+    )
+    investigation = Conversation(
+        title="Protected investigation",
+        user=False,
+        project="demo",
+        user_id=developer.id,
+        is_public=False,
+        kind="investigation",
+    )
+    transactional_session.add(investigation)
+    await transactional_session.flush()
+    root_message = Message(role="user", content="Investigation root", conversation=investigation)
+    transactional_session.add(root_message)
+    await transactional_session.flush()
+    investigation.active_root_message_id = root_message.id
+    await transactional_session.commit()
+
+    async def unexpected_turn(**_: object) -> tuple[UUID, MessageOut]:
+        raise AssertionError("The route must authorize before starting an investigation turn")
+
+    monkeypatch.setattr("app.api.routes.messages.handle_investigation_turn", unexpected_turn)
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://testserver"
+    ) as client:
+        authenticate_client(client, developer.id)
+        response = await client.post(
+            f"{settings.API_STR}/messages/internal/stream",
+            json={
+                "user_prompt": "Continue the investigation",
+                "conversation_id": str(investigation.id),
+                "conversation_kind": "investigation",
+            },
+        )
+        branch_response = await client.put(
+            f"{settings.API_STR}/conversations/{investigation.id}/active-branch",
+            json={"message_id": str(root_message.id)},
+        )
+        tree_response = await client.get(
+            f"{settings.API_STR}/conversations/{investigation.id}/tree",
+            params={"source": "investigate"},
+        )
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Access denied"
+    assert branch_response.status_code == 403
+    assert branch_response.json()["detail"] == "Access denied"
+    assert tree_response.status_code == 403
+    assert tree_response.json()["detail"] == "Access denied"
+
+
+@pytest.mark.asyncio
 async def test_internal_message_stream_returns_expected_events(
     transactional_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -227,6 +461,7 @@ async def test_internal_message_stream_returns_expected_events(
         event_emitter: Callable[[str, dict[str, object]], Awaitable[None]] | None = None,
         **_: object,
     ) -> tuple[UUID, MessageOut]:
+        assert not session.in_transaction()
         if conversation_id is None:
             conversation = Conversation(
                 title=user_prompt, user=False, project="demo", user_id=user_id, is_public=False
@@ -352,10 +587,11 @@ async def test_internal_message_stream_returns_expected_events(
         user_prompt: str,
         assistant_message: str,
         *,
+        assistant_message_id: UUID,
         is_internal: bool,
         on_title: Callable[[str], Awaitable[None]] | None = None,
     ) -> None:
-        del user_prompt, assistant_message, is_internal
+        del user_prompt, assistant_message, assistant_message_id, is_internal
         if on_title is not None:
             await on_title(f"Updated {conversation_id}")
 
@@ -370,6 +606,19 @@ async def test_internal_message_stream_returns_expected_events(
         assert sources == [build_canned_response_source()]
         return [], "no_selection"
 
+    response_span_scope: set[object] = set()
+    waited_span_scopes: list[set[object] | None] = []
+
+    @contextmanager
+    def fake_span_persistence_scope() -> Generator[set[object]]:
+        yield response_span_scope
+
+    async def fake_wait_for_pending_spans(
+        *, trace_id: int | None = None, scope: set[object] | None = None
+    ) -> None:
+        assert trace_id is None
+        waited_span_scopes.append(scope)
+
     monkeypatch.setattr(
         "app.api.routes.messages.handle_conversation_turn", fake_handle_conversation_turn
     )
@@ -383,6 +632,12 @@ async def test_internal_message_stream_returns_expected_events(
     monkeypatch.setattr(
         "app.api.routes.messages._select_and_store_grounding_sources_in_background",
         fake_select_and_store_grounding_sources_in_background,
+    )
+    monkeypatch.setattr(
+        "app.api.routes.messages.span_persistence_scope", fake_span_persistence_scope
+    )
+    monkeypatch.setattr(
+        "app.api.routes.messages.wait_for_pending_spans", fake_wait_for_pending_spans
     )
 
     async with AsyncClient(
@@ -429,6 +684,7 @@ async def test_internal_message_stream_returns_expected_events(
     assert title_updates[0]["title"] == f"Initial {conversation_event['conversation_id']}"
     assert title_updates[1]["stage"] == "post_assistant"
     assert title_updates[1]["title"] == f"Updated {conversation_event['conversation_id']}"
+    assert waited_span_scopes == [response_span_scope]
 
 
 @pytest.mark.asyncio
@@ -452,9 +708,541 @@ async def test_internal_message_stream_rejects_invalid_reasoning_effort(
     assert "chatbot_reasoning_effort" in response.text
 
 
+def test_internal_model_settings_apply_role_tiers_and_exclude_investigations(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(settings, "CHATBOT_AZURE_SERVICE_TIER", "priority")
+    monkeypatch.setattr(settings, "GUARDRAIL_AZURE_SERVICE_TIER", "priority")
+    request = message_routes.ChatRequest(user_prompt="Hello")
+
+    chatbot, guardrail = message_routes._get_model_settings(  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+        request, conversation_kind="chat"
+    )
+    investigation, unused_guardrail = message_routes._get_model_settings(  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+        request, conversation_kind="investigation"
+    )
+
+    assert chatbot.azure_service_tier == "priority"
+    assert guardrail.azure_service_tier == "priority"
+    assert investigation.azure_service_tier is None
+    assert unused_guardrail.azure_service_tier == "priority"
+
+
 @pytest.mark.asyncio
-async def test_internal_message_stream_emits_assistant_before_grounding_sources(
+async def test_internal_message_stream_enforces_conversation_contract(
     transactional_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    user = await _create_user(
+        transactional_session,
+        group_slug=SystemGroupSlug.USER,
+        email_prefix="stream-cross-conversation-parent",
+    )
+    reviewer = await _create_user(
+        transactional_session, group_slug=SystemGroupSlug.ADMIN, email_prefix="stream-reviewer"
+    )
+    first_conversation = Conversation(
+        title="First chat", user=False, project="demo", user_id=user.id, is_public=False
+    )
+    second_conversation = Conversation(
+        title="Second chat", user=False, project="demo", user_id=user.id, is_public=False
+    )
+    public_conversation = Conversation(
+        title="Public chat", user=False, project="demo", user_id=reviewer.id, is_public=True
+    )
+    transactional_session.add_all([first_conversation, second_conversation, public_conversation])
+    await transactional_session.flush()
+    parent_message = Message(
+        role="assistant", content="First chat response", conversation=first_conversation
+    )
+    second_assistant_message = Message(
+        role="assistant", content="Second chat response", conversation=second_conversation
+    )
+    transactional_session.add_all([parent_message, second_assistant_message])
+    await transactional_session.commit()
+    observed_parents: list[UUID | None] = []
+
+    async def record_parent(
+        *, parent_message_id: UUID | None, **_: object
+    ) -> tuple[UUID, MessageOut]:
+        observed_parents.append(parent_message_id)
+        return second_assistant_message.id, MessageOut(
+            id=second_assistant_message.id,
+            role=second_assistant_message.role,
+            content=second_assistant_message.content,
+            created_at=second_assistant_message.created_at,
+            parent_id=parent_message_id,
+            conversation_id=second_conversation.id,
+        )
+
+    monkeypatch.setattr("app.api.routes.messages.handle_conversation_turn", record_parent)
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://testserver"
+    ) as client:
+        authenticate_client(client, user.id)
+        response = await client.post(
+            "/api/messages/internal/stream",
+            json={
+                "user_prompt": "Continue from the wrong chat",
+                "conversation_id": str(second_conversation.id),
+                "parent_message_id": str(parent_message.id),
+            },
+        )
+        missing_parent_response = await client.post(
+            "/api/messages/internal/stream",
+            json={
+                "user_prompt": "Continue from a missing message",
+                "conversation_id": str(second_conversation.id),
+                "parent_message_id": str(uuid4()),
+            },
+        )
+        new_conversation_response = await client.post(
+            "/api/messages/internal/stream",
+            json={
+                "user_prompt": "Start from an existing message",
+                "parent_message_id": str(parent_message.id),
+            },
+        )
+        regeneration_without_parent = await client.post(
+            "/api/messages/internal/stream",
+            json={
+                "user_prompt": "Regenerate without a parent",
+                "conversation_id": str(second_conversation.id),
+                "is_regeneration": True,
+            },
+        )
+        regeneration_with_assistant_parent = await client.post(
+            "/api/messages/internal/stream",
+            json={
+                "user_prompt": "Regenerate from an assistant",
+                "conversation_id": str(second_conversation.id),
+                "parent_message_id": str(second_assistant_message.id),
+                "is_regeneration": True,
+            },
+        )
+        root_response = await client.post(
+            "/api/messages/internal/stream",
+            json={
+                "user_prompt": "Start a new root",
+                "conversation_id": str(second_conversation.id),
+                "parent_message_id": None,
+            },
+        )
+
+        authenticate_client(client, reviewer.id)
+        non_owner_response = await client.post(
+            "/api/messages/internal/stream",
+            json={
+                "user_prompt": "Continue someone else's chat",
+                "conversation_id": str(second_conversation.id),
+            },
+        )
+        public_response = await client.post(
+            "/api/messages/internal/stream",
+            json={
+                "user_prompt": "Continue a public chat internally",
+                "conversation_id": str(public_conversation.id),
+            },
+        )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "Parent message is not in this conversation"
+    assert missing_parent_response.status_code == 404
+    assert missing_parent_response.json()["detail"] == "Parent message not found"
+    assert new_conversation_response.status_code == 400
+    assert (
+        new_conversation_response.json()["detail"]
+        == "A new conversation cannot have a parent message"
+    )
+    assert regeneration_without_parent.status_code == 400
+    assert regeneration_without_parent.json()["detail"] == (
+        "Regeneration requires an explicit parent message"
+    )
+    assert regeneration_with_assistant_parent.status_code == 400
+    assert regeneration_with_assistant_parent.json()["detail"] == (
+        "Regeneration parent must be a user message"
+    )
+    assert root_response.status_code == 200
+    assert observed_parents == [None]
+    assert non_owner_response.status_code == 403
+    assert non_owner_response.json()["detail"] == "Access denied"
+    assert public_response.status_code == 403
+    assert public_response.json()["detail"] == "Access denied"
+
+
+@pytest.mark.asyncio
+async def test_internal_message_stream_returns_safe_retryable_generation_error(
+    transactional_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    user = await _create_user(
+        transactional_session, group_slug=SystemGroupSlug.USER, email_prefix="generation-error"
+    )
+    conversation = Conversation(
+        title="Generation failure", user=False, project="demo", user_id=user.id, is_public=False
+    )
+    transactional_session.add(conversation)
+    await transactional_session.commit()
+    generation_attempt_id = uuid4()
+
+    partial_message_ids: list[UUID] = []
+
+    async def fail_conversation_turn(
+        *, user_prompt: str, session: AsyncSession, **_: object
+    ) -> tuple[UUID, MessageOut]:
+        user_message = Message(conversation_id=conversation.id, role="user", content=user_prompt)
+        assistant_message = Message(
+            conversation_id=conversation.id,
+            role="assistant",
+            content="Partial answer",
+            parent=user_message,
+        )
+        session.add_all([user_message, assistant_message])
+        await session.flush()
+        partial_message_ids.extend([user_message.id, assistant_message.id])
+        raise RuntimeError("secret provider failure")
+
+    monkeypatch.setattr(message_routes, "handle_conversation_turn", fail_conversation_turn)
+
+    connection = await transactional_session.connection()
+    original_override = app.dependency_overrides[get_db_session]
+    async with AsyncSession(
+        bind=connection, expire_on_commit=False, join_transaction_mode="create_savepoint"
+    ) as route_session:
+
+        async def override_get_db_session() -> AsyncGenerator[AsyncSession]:
+            yield route_session
+
+        app.dependency_overrides[get_db_session] = override_get_db_session
+        try:
+            async with AsyncClient(
+                transport=ASGITransport(app=app), base_url="http://testserver"
+            ) as client:
+                authenticate_client(client, user.id)
+                response = await client.post(
+                    "/api/messages/internal/stream",
+                    json={
+                        "generation_attempt_id": str(generation_attempt_id),
+                        "user_prompt": "Please answer",
+                        "conversation_id": str(conversation.id),
+                    },
+                )
+        finally:
+            app.dependency_overrides[get_db_session] = original_override
+
+    events = _parse_sse_events(response.text)
+    assert [name for name, _payload in events] == ["conversation", "error"]
+    error_payload = events[-1][1]
+    assert error_payload == {
+        "code": "message_generation_failed",
+        "message": "The response could not be completed.",
+        "retryable": True,
+    }
+    assert partial_message_ids
+    for message_id in partial_message_ids:
+        assert await transactional_session.get(Message, message_id) is None
+    attempt = await transactional_session.get(
+        ChatGenerationAttempt, generation_attempt_id, populate_existing=True
+    )
+    assert attempt is not None
+    assert attempt.status == "failed"
+    assert attempt.user_message_id is None
+    assert attempt.assistant_message_id is None
+
+
+@pytest.mark.asyncio
+async def test_internal_message_stream_recovers_committed_response_after_diagnostics_failure(
+    transactional_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    user = await _create_user(
+        transactional_session, group_slug=SystemGroupSlug.USER, email_prefix="delivery-error"
+    )
+    conversation = Conversation(
+        title="Delivery failure", user=False, project="demo", user_id=user.id, is_public=False
+    )
+    transactional_session.add(conversation)
+    await transactional_session.commit()
+
+    persisted_user_message_id: UUID | None = None
+    persisted_assistant_message_id: UUID | None = None
+
+    async def fake_handle_conversation_turn(
+        *, user_prompt: str, session: AsyncSession, **_: object
+    ) -> tuple[UUID, MessageOut]:
+        nonlocal persisted_user_message_id, persisted_assistant_message_id
+        user_message = Message(role="user", content=user_prompt, conversation=conversation)
+        assistant_message = Message(
+            role="assistant",
+            content="Persisted answer",
+            conversation=conversation,
+            parent=user_message,
+        )
+        session.add_all([user_message, assistant_message])
+        await session.flush()
+        user_message.active_child = assistant_message
+        conversation.active_root_message_id = user_message.id
+        metadata = AssistantMessageMetadata(
+            message_id=assistant_message.id, system_prompt_rendered="system", conversation_turn=1
+        )
+        session.add(metadata)
+        await session.flush()
+        persisted_user_message_id = user_message.id
+        persisted_assistant_message_id = assistant_message.id
+        return user_message.id, MessageOut(
+            id=assistant_message.id,
+            role="assistant",
+            content=assistant_message.content,
+            created_at=assistant_message.created_at,
+            parent_id=user_message.id,
+            conversation_id=conversation.id,
+            metadata=None,
+            guardrails_blocked=False,
+        )
+
+    async def fail_response_diagnostics(*_: object, **__: object) -> dict[str, object]:
+        raise RuntimeError("diagnostic projection failed")
+
+    monkeypatch.setattr(message_routes, "handle_conversation_turn", fake_handle_conversation_turn)
+    monkeypatch.setattr(
+        message_routes, "_get_message_response_diagnostics", fail_response_diagnostics
+    )
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://testserver"
+    ) as client:
+        authenticate_client(client, user.id)
+        response = await client.post(
+            "/api/messages/internal/stream",
+            json={"user_prompt": "Please answer", "conversation_id": str(conversation.id)},
+        )
+
+    assert persisted_user_message_id is not None
+    assert persisted_assistant_message_id is not None
+    events = _parse_sse_events(response.text)
+    assert [name for name, _payload in events] == ["conversation", "assistant_message"]
+    recovered_response = events[-1][1]
+    assert recovered_response["conversation_id"] == str(conversation.id)
+    assert recovered_response["user_message_id"] == str(persisted_user_message_id)
+    assert recovered_response["assistant_message_id"] == str(persisted_assistant_message_id)
+    assert recovered_response["assistant_message"] == "Persisted answer"
+    assert recovered_response["grounding_source_status"] is None
+    assert recovered_response["tool_sources_used"] == []
+    assert recovered_response["grounding_sources_used"] == []
+    assert await transactional_session.get(Message, persisted_user_message_id) is not None
+    assert await transactional_session.get(Message, persisted_assistant_message_id) is not None
+
+
+@pytest.mark.asyncio
+async def test_internal_message_generation_attempt_is_idempotent(
+    transactional_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    user = await _create_user(
+        transactional_session, group_slug=SystemGroupSlug.USER, email_prefix="generation-attempt"
+    )
+    conversation = Conversation(
+        title="Idempotent generation", user=False, project="demo", user_id=user.id, is_public=False
+    )
+    transactional_session.add(conversation)
+    await transactional_session.commit()
+
+    generation_attempt_id = uuid4()
+    turn_calls = 0
+
+    async def fake_handle_conversation_turn(
+        *, user_prompt: str, session: AsyncSession, **_: object
+    ) -> tuple[UUID, MessageOut]:
+        nonlocal turn_calls
+        turn_calls += 1
+        user_message = Message(role="user", content=user_prompt, conversation=conversation)
+        assistant_message = Message(
+            role="assistant",
+            content="One durable answer",
+            conversation=conversation,
+            parent=user_message,
+        )
+        session.add_all([user_message, assistant_message])
+        await session.flush()
+        user_message.active_child = assistant_message
+        conversation.active_root_message_id = user_message.id
+        metadata = AssistantMessageMetadata(
+            message_id=assistant_message.id, system_prompt_rendered="system", conversation_turn=1
+        )
+        session.add(metadata)
+        await session.flush()
+        return user_message.id, MessageOut(
+            id=assistant_message.id,
+            role="assistant",
+            content=assistant_message.content,
+            created_at=assistant_message.created_at,
+            parent_id=user_message.id,
+            conversation_id=conversation.id,
+            metadata=None,
+            guardrails_blocked=False,
+        )
+
+    async def finish_grounding(**_: object) -> tuple[list[MessageSourceUsed], str]:
+        return [], "no_selection"
+
+    async def noop_summary(_: UUID) -> None:
+        return None
+
+    monkeypatch.setattr(message_routes, "handle_conversation_turn", fake_handle_conversation_turn)
+    monkeypatch.setattr(
+        message_routes, "_select_and_store_grounding_sources_in_background", finish_grounding
+    )
+    monkeypatch.setattr(message_routes, "summarize_internal_conversation", noop_summary)
+
+    request_payload = {
+        "generation_attempt_id": str(generation_attempt_id),
+        "user_prompt": "Please answer once",
+        "conversation_id": str(conversation.id),
+    }
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://testserver"
+    ) as client:
+        authenticate_client(client, user.id)
+        first_response = await client.post("/api/messages/internal/stream", json=request_payload)
+        duplicate_response = await client.post(
+            "/api/messages/internal/stream", json=request_payload
+        )
+        status_response = await client.get(
+            f"/api/messages/internal/generation-attempts/{generation_attempt_id}"
+        )
+        mismatch_response = await client.post(
+            "/api/messages/internal/stream",
+            json={**request_payload, "user_prompt": "Different prompt"},
+        )
+
+    first_events = _parse_sse_events(first_response.text)
+    first_assistant = next(payload for name, payload in first_events if name == "assistant_message")
+
+    assert turn_calls == 1
+    assert duplicate_response.status_code == 409
+    assert duplicate_response.json()["detail"] == "Generation attempt is already completed"
+    assert status_response.status_code == 200
+    assert status_response.json() == {
+        "generation_attempt_id": str(generation_attempt_id),
+        "status": "completed",
+        "conversation_id": str(conversation.id),
+        "user_message_id": first_assistant["user_message_id"],
+        "assistant_message_id": first_assistant["assistant_message_id"],
+    }
+    assert mismatch_response.status_code == 409
+    assert mismatch_response.json()["detail"] == (
+        "Generation attempt payload does not match the original request"
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("attempt_status", "expected_detail"),
+    [
+        ("pending", "Generation attempt is still pending"),
+        ("failed", "Generation attempt has already failed"),
+    ],
+)
+async def test_existing_generation_attempt_never_runs_generation_again(
+    transactional_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    attempt_status: str,
+    expected_detail: str,
+) -> None:
+    user = await _create_user(
+        transactional_session,
+        group_slug=SystemGroupSlug.USER,
+        email_prefix=f"existing-{attempt_status}-attempt",
+    )
+    conversation = Conversation(
+        title="Existing attempt", user=False, project="demo", user_id=user.id, is_public=False
+    )
+    transactional_session.add(conversation)
+    await transactional_session.flush()
+    generation_attempt_id = uuid4()
+    request_payload = {
+        "generation_attempt_id": str(generation_attempt_id),
+        "user_prompt": "Do not run this twice",
+        "conversation_id": str(conversation.id),
+    }
+    request = message_routes.ChatRequest.model_validate(request_payload)
+    attempt = ChatGenerationAttempt(
+        id=generation_attempt_id,
+        user_id=user.id,
+        conversation_id=conversation.id,
+        request_fingerprint=message_routes.generation_request_fingerprint(request),
+        status=attempt_status,
+    )
+    transactional_session.add(attempt)
+    await transactional_session.commit()
+
+    async def unexpected_turn(**_: object) -> tuple[UUID, MessageOut]:
+        raise AssertionError("An existing attempt must not run generation again")
+
+    monkeypatch.setattr(message_routes, "handle_conversation_turn", unexpected_turn)
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://testserver"
+    ) as client:
+        authenticate_client(client, user.id)
+        response = await client.post("/api/messages/internal/stream", json=request_payload)
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == expected_detail
+
+
+@pytest.mark.asyncio
+async def test_internal_generation_attempt_status_and_detail_keep_pending_work_non_retryable(
+    transactional_session: AsyncSession,
+) -> None:
+    owner = await _create_user(
+        transactional_session,
+        group_slug=SystemGroupSlug.USER,
+        email_prefix="pending-generation-owner",
+    )
+    other_user = await _create_user(
+        transactional_session,
+        group_slug=SystemGroupSlug.USER,
+        email_prefix="pending-generation-other",
+    )
+    conversation = Conversation(
+        title="Pending generation", user=False, project="demo", user_id=owner.id, is_public=False
+    )
+    transactional_session.add(conversation)
+    await transactional_session.flush()
+    attempt = ChatGenerationAttempt(
+        user_id=owner.id,
+        conversation_id=conversation.id,
+        request_fingerprint="a" * 64,
+        status="pending",
+    )
+    transactional_session.add(attempt)
+    await transactional_session.commit()
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://testserver"
+    ) as client:
+        authenticate_client(client, owner.id)
+        owner_response = await client.get(
+            f"/api/messages/internal/generation-attempts/{attempt.id}"
+        )
+        owner_detail_response = await client.get(
+            f"/api/conversations/{conversation.id}", params={"source": "chat"}
+        )
+        authenticate_client(client, other_user.id)
+        other_response = await client.get(
+            f"/api/messages/internal/generation-attempts/{attempt.id}"
+        )
+
+    assert owner_response.status_code == 200
+    assert owner_response.json()["status"] == "pending"
+    assert owner_detail_response.status_code == 200
+    assert owner_detail_response.json()["has_pending_generation_attempt"] is True
+    assert other_response.status_code == 404
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("grounding_fails", [False, True], ids=["selected", "failed"])
+async def test_internal_message_stream_emits_assistant_before_grounding_result(
+    transactional_session: AsyncSession, monkeypatch: pytest.MonkeyPatch, *, grounding_fails: bool
 ) -> None:
     user = await _create_user(
         transactional_session, group_slug=SystemGroupSlug.USER, email_prefix="stream-grounding"
@@ -542,7 +1330,7 @@ async def test_internal_message_stream_emits_assistant_before_grounding_sources(
     ) -> tuple[list[MessageSourceUsed], str]:
         del assistant_message_id, user_message_id, assistant_answer
         assert sources == [source, canned_source]
-        return [source, canned_source], "selected"
+        return ([], "failed") if grounding_fails else ([source, canned_source], "selected")
 
     async def noop_summary(_: UUID) -> None:
         return None
@@ -586,11 +1374,273 @@ async def test_internal_message_stream_emits_assistant_before_grounding_sources(
     assert assistant_event["grounding_source_status"] == "pending"
     assert assistant_event["grounding_sources_used"] == []
     assert grounding_event["assistant_message_id"] == assistant_event["assistant_message_id"]
-    assert grounding_event["grounding_source_status"] == "selected"
-    assert grounding_event["grounding_sources_used"] == [
-        source.model_dump(mode="json"),
-        canned_source.model_dump(mode="json"),
-    ]
+    assert grounding_event["grounding_source_status"] == (
+        "failed" if grounding_fails else "selected"
+    )
+    assert grounding_event["grounding_sources_used"] == (
+        []
+        if grounding_fails
+        else [source.model_dump(mode="json"), canned_source.model_dump(mode="json")]
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "initial_status", ["failed", "stale_pending"], ids=["failed", "stale-pending"]
+)
+async def test_retry_internal_message_grounding_runs_only_for_retryable_status(
+    transactional_session: AsyncSession, monkeypatch: pytest.MonkeyPatch, *, initial_status: str
+) -> None:
+    user = await _create_user(
+        transactional_session, group_slug=SystemGroupSlug.USER, email_prefix="retry-grounding"
+    )
+    await replace_user_permission_overrides(
+        transactional_session, user, {PermissionKey.CHAT_VIEW_SOURCES: True}
+    )
+    conversation = Conversation(
+        title="Retry grounding", user=False, project="demo", user_id=user.id, is_public=False
+    )
+    user_message = Message(role="user", content="Where is tuition?", conversation=conversation)
+    assistant_message = Message(
+        role="assistant",
+        content="Tuition is listed online.",
+        conversation=conversation,
+        parent=user_message,
+    )
+    metadata = AssistantMessageMetadata(
+        message=assistant_message,
+        system_prompt_rendered="system",
+        conversation_turn=1,
+        grounding_source_keys=[] if initial_status == "failed" else None,
+        grounding_source_status="failed" if initial_status == "failed" else "pending",
+        updated_at=(
+            current_time_utc()
+            - grounding_agent.GROUNDING_PENDING_STALE_AFTER
+            - timedelta(seconds=1)
+            if initial_status == "stale_pending"
+            else current_time_utc()
+        ),
+    )
+    transactional_session.add_all([conversation, user_message, assistant_message, metadata])
+    await transactional_session.commit()
+
+    source = MessageSourceUsed(
+        key="tool-1:website_page:42:search:0",
+        type=DocumentType.WEBSITE_PAGE,
+        id=42,
+        title="Tuition and Fees",
+        url="https://demo-university.example.edu/tuition",
+        usage="search",
+        tool_call_id="tool-1",
+        tool_name="find_document_chunks",
+    )
+    canned_source = build_canned_response_source()
+    retry_calls = 0
+
+    async def fake_get_tool_sources_used_for_message(
+        session: AsyncSession, message_id: UUID, **_: object
+    ) -> list[MessageSourceUsed]:
+        del session
+        assert message_id == assistant_message.id
+        return [source]
+
+    async def fake_select_and_store_grounding_sources_in_background(
+        *,
+        assistant_message_id: UUID,
+        user_message_id: UUID,
+        assistant_answer: str,
+        sources: list[MessageSourceUsed],
+    ) -> tuple[list[MessageSourceUsed], str]:
+        nonlocal retry_calls
+        retry_calls += 1
+        assert assistant_message_id == assistant_message.id
+        assert user_message_id == user_message.id
+        assert assistant_answer == assistant_message.content
+        assert sources == [source, canned_source]
+        assert metadata.grounding_source_status == "pending"
+        metadata.grounding_source_keys = [source.key]
+        metadata.grounding_source_status = "selected"
+        await transactional_session.flush()
+        return [source], "selected"
+
+    monkeypatch.setattr(
+        message_routes, "get_tool_sources_used_for_message", fake_get_tool_sources_used_for_message
+    )
+    monkeypatch.setattr(
+        message_routes,
+        "_select_and_store_grounding_sources_in_background",
+        fake_select_and_store_grounding_sources_in_background,
+    )
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://testserver"
+    ) as client:
+        authenticate_client(client, user.id)
+        detail_response = await client.get(
+            f"/api/conversations/{conversation.id}", params={"source": "chat"}
+        )
+        assert detail_response.status_code == 200
+        detail_message = next(
+            item
+            for item in detail_response.json()["messages"]
+            if item["id"] == str(assistant_message.id)
+        )
+        assert detail_message["grounding_source_status"] == "failed"
+        assert metadata.grounding_source_status == (
+            "failed" if initial_status == "failed" else "pending"
+        )
+
+        response = await client.post(
+            f"/api/messages/internal/{assistant_message.id}/grounding/retry"
+        )
+        duplicate_response = await client.post(
+            f"/api/messages/internal/{assistant_message.id}/grounding/retry"
+        )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "assistant_message_id": str(assistant_message.id),
+        "grounding_sources_used": [source.model_dump(mode="json")],
+        "grounding_source_status": "selected",
+    }
+    assert metadata.grounding_source_keys == [source.key]
+    assert metadata.grounding_source_status == "selected"
+    assert retry_calls == 1
+    assert duplicate_response.status_code == 409
+    assert duplicate_response.json()["detail"] == "Source grounding is not retryable"
+
+
+@pytest.mark.asyncio
+async def test_retry_internal_message_grounding_terminalizes_background_failure(
+    transactional_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    user = await _create_user(
+        transactional_session,
+        group_slug=SystemGroupSlug.USER,
+        email_prefix="retry-grounding-failure",
+    )
+    await replace_user_permission_overrides(
+        transactional_session, user, {PermissionKey.CHAT_VIEW_SOURCES: True}
+    )
+    conversation = Conversation(
+        title="Retry grounding failure",
+        user=False,
+        project="demo",
+        user_id=user.id,
+        is_public=False,
+    )
+    user_message = Message(role="user", content="Where is tuition?", conversation=conversation)
+    assistant_message = Message(
+        role="assistant",
+        content="Tuition is listed online.",
+        conversation=conversation,
+        parent=user_message,
+    )
+    metadata = AssistantMessageMetadata(
+        message=assistant_message,
+        system_prompt_rendered="system",
+        conversation_turn=1,
+        grounding_source_keys=[],
+        grounding_source_status="failed",
+    )
+    transactional_session.add_all([conversation, user_message, assistant_message, metadata])
+    await transactional_session.commit()
+
+    async def no_tool_sources(*_: object, **__: object) -> list[MessageSourceUsed]:
+        return []
+
+    async def fail_before_selection_commit(**_: object) -> None:
+        raise RuntimeError("grounding setup failed")
+
+    @asynccontextmanager
+    async def use_test_session() -> AsyncGenerator[AsyncSession]:
+        try:
+            yield transactional_session
+            await transactional_session.commit()
+        except BaseException:
+            await transactional_session.rollback()
+            raise
+
+    monkeypatch.setattr(message_routes, "get_tool_sources_used_for_message", no_tool_sources)
+    monkeypatch.setattr(
+        message_routes, "select_and_store_grounding_sources", fail_before_selection_commit
+    )
+    monkeypatch.setattr(message_routes, "get_session", use_test_session)
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://testserver"
+    ) as client:
+        authenticate_client(client, user.id)
+        response = await client.post(
+            f"/api/messages/internal/{assistant_message.id}/grounding/retry"
+        )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "assistant_message_id": str(assistant_message.id),
+        "grounding_sources_used": [],
+        "grounding_source_status": "failed",
+    }
+    await transactional_session.refresh(metadata)
+    assert metadata.grounding_source_keys == []
+    assert metadata.grounding_source_status == "failed"
+
+
+@pytest.mark.asyncio
+async def test_retry_internal_message_grounding_requires_permission_and_ownership(
+    transactional_session: AsyncSession,
+) -> None:
+    owner = await _create_user(
+        transactional_session, group_slug=SystemGroupSlug.USER, email_prefix="retry-grounding-owner"
+    )
+    reviewer = await _create_user(
+        transactional_session,
+        group_slug=SystemGroupSlug.USER,
+        email_prefix="retry-grounding-reviewer",
+    )
+    await replace_user_permission_overrides(
+        transactional_session, owner, {PermissionKey.CHAT_VIEW_SOURCES: False}
+    )
+    await replace_user_permission_overrides(
+        transactional_session, reviewer, {PermissionKey.CHAT_VIEW_SOURCES: True}
+    )
+    conversation = Conversation(
+        title="Private grounding retry",
+        user=False,
+        project="demo",
+        user_id=owner.id,
+        is_public=False,
+    )
+    user_message = Message(role="user", content="Question", conversation=conversation)
+    assistant_message = Message(
+        role="assistant", content="Answer", conversation=conversation, parent=user_message
+    )
+    metadata = AssistantMessageMetadata(
+        message=assistant_message,
+        system_prompt_rendered="system",
+        conversation_turn=1,
+        grounding_source_keys=[],
+        grounding_source_status="failed",
+    )
+    transactional_session.add_all([conversation, user_message, assistant_message, metadata])
+    await transactional_session.commit()
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://testserver"
+    ) as client:
+        authenticate_client(client, owner.id)
+        missing_permission_response = await client.post(
+            f"/api/messages/internal/{assistant_message.id}/grounding/retry"
+        )
+        authenticate_client(client, reviewer.id)
+        non_owner_response = await client.post(
+            f"/api/messages/internal/{assistant_message.id}/grounding/retry"
+        )
+
+    assert missing_permission_response.status_code == 403
+    assert missing_permission_response.json()["detail"] == "Access denied"
+    assert non_owner_response.status_code == 403
+    assert non_owner_response.json()["detail"] == "Access denied"
 
 
 @pytest.mark.asyncio
@@ -1078,13 +2128,20 @@ async def test_rag_build_stream_resume_existing_replays_active_job_snapshot(
 
 
 @pytest.mark.asyncio
-async def test_rag_build_stream_supports_force_rebuild(
-    transactional_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize(
+    ("request_payload", "expected_options"),
+    [({}, {"force_rebuild": False}), ({"force_rebuild": True}, {"force_rebuild": True})],
+)
+async def test_rag_build_stream_forwards_build_options(
+    request_payload: dict[str, object],
+    expected_options: dict[str, object],
+    transactional_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     admin = await _create_user(
-        transactional_session, group_slug=SystemGroupSlug.ADMIN, email_prefix="rag-rebuild"
+        transactional_session, group_slug=SystemGroupSlug.ADMIN, email_prefix="rag-build-options"
     )
-    seen_force_rebuild: bool | None = None
+    seen_options: dict[str, object] | None = None
 
     async def fake_run_rag_sync_pipeline(
         *,
@@ -1095,12 +2152,12 @@ async def test_rag_build_stream_supports_force_rebuild(
         started_by_user_id: UUID | None = None,
         job_started_callback: Callable[[UUID], Awaitable[None]] | None = None,
     ) -> UUID:
-        nonlocal seen_force_rebuild
+        nonlocal seen_options
         assert job_name == "api_rag_build"
         assert callable(progress_callback)
         assert job_trigger == "manual"
         assert started_by_user_id == admin.id
-        seen_force_rebuild = force_rebuild
+        seen_options = {"force_rebuild": force_rebuild}
         if job_started_callback is not None:
             await job_started_callback(admin.id)
         return admin.id
@@ -1111,16 +2168,75 @@ async def test_rag_build_stream_supports_force_rebuild(
         transport=ASGITransport(app=app), base_url="http://testserver"
     ) as client:
         authenticate_client(client, admin.id)
-        response = await client.post("/api/rag/build/stream", json={"force_rebuild": True})
+        response = await client.post("/api/rag/build/stream", json=request_payload)
 
     assert response.status_code == 200
-    assert seen_force_rebuild is True
+    assert seen_options == expected_options
     last_event_name, last_event_payload = _parse_sse_events(response.text)[-1]
     assert last_event_name == "status"
     assert {key: value for key, value in last_event_payload.items() if key != "job_id"} == {
         "status": "complete",
         "exit_code": 0,
     }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("initial_status", ["running", "cancelling"])
+async def test_rag_build_cancel_clears_stale_manual_job(
+    initial_status: str, transactional_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    admin = await _create_user(
+        transactional_session, group_slug=SystemGroupSlug.ADMIN, email_prefix="rag-stale-cancel"
+    )
+    stale_job = RagBuildJob(
+        job_name="api_rag_build",
+        trigger="manual",
+        status=initial_status,
+        force_rebuild=False,
+        started_by_user_id=admin.id,
+    )
+    transactional_session.add(stale_job)
+    await transactional_session.commit()
+    await transactional_session.refresh(stale_job)
+    stale_job_id = stale_job.id
+
+    @asynccontextmanager
+    async def fake_get_session() -> AsyncGenerator[AsyncSession]:
+        yield transactional_session
+
+    async def fake_rag_pipeline_lock_is_held() -> bool:
+        return False
+
+    published_statuses: list[str] = []
+
+    async def fake_publish_rag_build_notification(event: str, payload: dict[str, object]) -> None:
+        assert event == "status"
+        assert payload["job_id"] == str(stale_job_id)
+        status = payload.get("status")
+        assert isinstance(status, str)
+        published_statuses.append(status)
+
+    monkeypatch.setattr(rag_job_tracking, "get_session", fake_get_session)
+    monkeypatch.setattr(rag_routes, "rag_pipeline_lock_is_held", fake_rag_pipeline_lock_is_held)
+    monkeypatch.setattr(
+        rag_routes, "publish_rag_build_notification", fake_publish_rag_build_notification
+    )
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://testserver"
+    ) as client:
+        authenticate_client(client, admin.id)
+        response = await client.post("/api/rag/build/cancel")
+
+    assert response.status_code == 200
+    assert response.json() == {"job_id": str(stale_job_id), "status": "cancelled"}
+    assert published_statuses == ["cancelling", "cancelled"]
+    transactional_session.expire_all()
+    reloaded_job = await transactional_session.get(RagBuildJob, stale_job_id)
+    assert reloaded_job is not None
+    assert reloaded_job.status == "cancelled"
+    assert reloaded_job.finished_at is not None
+    assert reloaded_job.error_message == "RAG build was cancelled"
 
 
 @pytest.mark.asyncio
@@ -1138,6 +2254,11 @@ async def test_conversation_routes_cover_internal_and_public_views(
     )
     peer_admin_user = await _create_user(
         transactional_session, group_slug=SystemGroupSlug.ADMIN, email_prefix="peer-admin"
+    )
+    await replace_user_permission_overrides(
+        transactional_session,
+        internal_user,
+        {PermissionKey.ACCESS_MESSAGES: True, PermissionKey.CHATS_VIEW_OWN: True},
     )
     await replace_user_permission_overrides(
         transactional_session, admin_user, {PermissionKey.ACCESS_MESSAGES: False}
@@ -1312,7 +2433,10 @@ async def test_conversation_routes_cover_internal_and_public_views(
                 end_time=first_assistant_message.created_at,
                 span_time=first_assistant_message.created_at,
                 duration_ms=100.0,
-                attributes={"app.conversation_id": str(internal_conversation.id)},
+                attributes={
+                    "app.conversation_id": str(internal_conversation.id),
+                    "gen_ai.usage.cache_read.input_tokens": 4,
+                },
                 events=None,
                 links=None,
                 resource={"attributes": {"service.name": "demo-va"}, "schema_url": None},
@@ -1320,7 +2444,7 @@ async def test_conversation_routes_cover_internal_and_public_views(
                 request_model="azure/gpt-4o",
                 provider_name="azure",
                 server_address=None,
-                input_tokens=1,
+                input_tokens=11,
                 output_tokens=1,
                 total_cost=0.1234,
                 is_ai=True,
@@ -1342,7 +2466,10 @@ async def test_conversation_routes_cover_internal_and_public_views(
                 end_time=public_assistant_message.created_at,
                 span_time=public_assistant_message.created_at,
                 duration_ms=100.0,
-                attributes={"app.conversation_id": str(public_conversation.id)},
+                attributes={
+                    "app.conversation_id": str(public_conversation.id),
+                    "gen_ai.usage.cache_read.input_tokens": 8,
+                },
                 events=None,
                 links=None,
                 resource={"attributes": {"service.name": "demo-va"}, "schema_url": None},
@@ -1350,7 +2477,7 @@ async def test_conversation_routes_cover_internal_and_public_views(
                 request_model="azure/gpt-4o",
                 provider_name="azure",
                 server_address=None,
-                input_tokens=1,
+                input_tokens=10,
                 output_tokens=1,
                 total_cost=0.0567,
                 is_ai=True,
@@ -1381,6 +2508,9 @@ async def test_conversation_routes_cover_internal_and_public_views(
         feedback_response = await internal_client.get(
             f"/api/conversations/messages/{first_assistant_message.id}/feedback"
         )
+        messages_without_cost_response = await internal_client.get(
+            "/api/messages", params={"limit": 20, "offset": 0}
+        )
 
     assert list_response.status_code == 200
     assert list_response.json()[0]["id"] == str(internal_conversation.id)
@@ -1409,13 +2539,25 @@ async def test_conversation_routes_cover_internal_and_public_views(
 
     assert tree_response.status_code == 200
     tree_body = tree_response.json()
-    assert tree_body["conversation_tree"]["current_branch_path"] == [
+    assert tree_body["current_branch_path"] == [
+        str(first_user_message.id),
+        str(first_assistant_message.id),
+    ]
+    assert [message["id"] for message in tree_body["messages"]] == [
         str(first_user_message.id),
         str(first_assistant_message.id),
     ]
 
     assert feedback_response.status_code == 200
     assert feedback_response.json()[0]["text"] == "Helpful"
+
+    assert messages_without_cost_response.status_code == 200
+    message_without_cost = next(
+        item
+        for item in messages_without_cost_response.json()["items"]
+        if item["id"] == str(first_assistant_message.id)
+    )
+    assert message_without_cost["response_cost"] is None
 
     async with AsyncClient(
         transport=ASGITransport(app=app), base_url="http://testserver"
@@ -1438,6 +2580,13 @@ async def test_conversation_routes_cover_internal_and_public_views(
     ) as dev_client:
         authenticate_client(dev_client, dev_user.id)
         messages_response = await dev_client.get("/api/messages", params={"limit": 20, "offset": 0})
+        diagnostic_sort_responses = [
+            await dev_client.get(
+                "/api/messages",
+                params={"limit": 20, "offset": 0, "sort_by": sort_by, "descending": True},
+            )
+            for sort_by in ("uncached_input_tokens", "cache_read_input_tokens", "response_cost")
+        ]
 
     assert admin_list_response.status_code == 200
     assert admin_list_response.json() == []
@@ -1461,7 +2610,10 @@ async def test_conversation_routes_cover_internal_and_public_views(
         item for item in paginated_items if item["id"] == str(public_conversation.id)
     )
     assert internal_item["feedback_up"] == 1
+    assert internal_item["message_count"] == 2
     assert internal_item["total_cost"] == 0.1234
+    assert public_item["user_message_count"] == 1
+    assert public_item["assistant_message_count"] == 1
     assert public_item["user_email"] is None
     assert public_item["is_public"] is True
     assert public_item["total_cost"] == 0.0567
@@ -1476,13 +2628,31 @@ async def test_conversation_routes_cover_internal_and_public_views(
     internal_message_item = next(
         item for item in message_items if item["id"] == str(first_assistant_message.id)
     )
+    public_message_item = next(
+        item for item in message_items if item["id"] == str(public_assistant_message.id)
+    )
     assert internal_message_item["conversation_id"] == str(internal_conversation.id)
     assert internal_message_item["role"] == "assistant"
     assert internal_message_item["content"] == "Sure, I can help with admissions"
     assert internal_message_item["content_length"] == len("Sure, I can help with admissions")
     assert internal_message_item["generation_time_ms"] == 1000
+    assert internal_message_item["input_tokens"] == 11
+    assert internal_message_item["uncached_input_tokens"] == 7
+    assert internal_message_item["cache_read_input_tokens"] == 4
+    assert internal_message_item["output_tokens"] == 1
+    assert internal_message_item["response_cost"] == 0.1234
     assert internal_message_item["trace_id"] == "internal-trace"
     assert internal_message_item["span_id"] == "internal-span"
+    assert public_message_item["uncached_input_tokens"] == 2
+    assert public_message_item["cache_read_input_tokens"] == 8
+    assert public_message_item["response_cost"] == 0.0567
+
+    assert all(response.status_code == 200 for response in diagnostic_sort_responses)
+    assert [response.json()["items"][0]["id"] for response in diagnostic_sort_responses] == [
+        str(first_assistant_message.id),
+        str(public_assistant_message.id),
+        str(first_assistant_message.id),
+    ]
 
     assert users_response.status_code == 200
     user_options = users_response.json()
@@ -1495,6 +2665,72 @@ async def test_conversation_routes_cover_internal_and_public_views(
         for option in user_options
     )
     assert all(option["platform"] != "public" for option in user_options)
+
+
+@pytest.mark.asyncio
+async def test_paginated_conversations_returns_and_sorts_role_message_counts(
+    transactional_session: AsyncSession,
+) -> None:
+    reviewer = await _create_user(
+        transactional_session, group_slug=SystemGroupSlug.DEV, email_prefix="message-count-reviewer"
+    )
+    first_conversation = Conversation(
+        title="More user messages", user=False, project="demo", user_id=reviewer.id, is_public=False
+    )
+    second_conversation = Conversation(
+        title="More assistant messages",
+        user=False,
+        project="demo",
+        user_id=reviewer.id,
+        is_public=False,
+    )
+    transactional_session.add_all([first_conversation, second_conversation])
+    await transactional_session.flush()
+    for conversation, roles in (
+        (first_conversation, ("user", "user", "assistant")),
+        (second_conversation, ("user", "assistant", "assistant")),
+    ):
+        transactional_session.add_all(
+            Message(role=role, content=f"{role} message", conversation=conversation)
+            for role in roles
+        )
+    await transactional_session.commit()
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://testserver"
+    ) as client:
+        authenticate_client(client, reviewer.id)
+        user_count_response = await client.get(
+            "/api/conversations/paginated",
+            params={"limit": 20, "offset": 0, "sort_by": "user_message_count", "descending": True},
+        )
+        assistant_count_response = await client.get(
+            "/api/conversations/paginated",
+            params={
+                "limit": 20,
+                "offset": 0,
+                "sort_by": "assistant_message_count",
+                "descending": True,
+            },
+        )
+
+    assert user_count_response.status_code == 200
+    assert assistant_count_response.status_code == 200
+    user_sorted_items = user_count_response.json()["items"]
+    assistant_sorted_items = assistant_count_response.json()["items"]
+    assert [
+        (
+            item["id"],
+            item["message_count"],
+            item["user_message_count"],
+            item["assistant_message_count"],
+        )
+        for item in user_sorted_items
+    ] == [(str(first_conversation.id), 3, 2, 1), (str(second_conversation.id), 3, 1, 2)]
+    assert [item["id"] for item in assistant_sorted_items] == [
+        str(second_conversation.id),
+        str(first_conversation.id),
+    ]
 
 
 @pytest.mark.asyncio
@@ -1982,6 +3218,12 @@ async def test_investigation_detail_splits_workbench_and_review_sources(
         messages_response = await owner_client.get(
             f"/api/conversations/{investigation.id}", params={"source": "messages"}
         )
+        owner_workbench_tree_response = await owner_client.get(
+            f"/api/conversations/{investigation.id}/tree", params={"source": "investigate"}
+        )
+        owner_review_tree_response = await owner_client.get(
+            f"/api/conversations/{investigation.id}/tree", params={"source": "investigations"}
+        )
 
     async with AsyncClient(
         transport=ASGITransport(app=app), base_url="http://testserver"
@@ -1993,14 +3235,24 @@ async def test_investigation_detail_splits_workbench_and_review_sources(
         peer_review_response = await peer_client.get(
             f"/api/conversations/{investigation.id}", params={"source": "investigations"}
         )
+        peer_workbench_tree_response = await peer_client.get(
+            f"/api/conversations/{investigation.id}/tree", params={"source": "investigate"}
+        )
+        peer_review_tree_response = await peer_client.get(
+            f"/api/conversations/{investigation.id}/tree", params={"source": "investigations"}
+        )
 
     assert owner_workbench_response.status_code == 200
     assert owner_review_response.status_code == 200
     assert default_response.status_code == 403
     assert chats_response.status_code == 403
     assert messages_response.status_code == 403
+    assert owner_workbench_tree_response.status_code == 200
+    assert owner_review_tree_response.status_code == 200
     assert peer_workbench_response.status_code == 403
     assert peer_review_response.status_code == 200
+    assert peer_workbench_tree_response.status_code == 403
+    assert peer_review_tree_response.status_code == 200
 
 
 @pytest.mark.asyncio
@@ -2101,67 +3353,73 @@ async def test_conversation_preview_and_search_use_guardrails_blocked_message(
 
 
 @pytest.mark.asyncio
-async def test_conversation_detail_target_message_extends_to_branch_leaf(
+async def test_review_branch_navigation_is_authorized_and_non_mutating(
     transactional_session: AsyncSession,
 ) -> None:
-    user = await _create_user(
-        transactional_session, group_slug=SystemGroupSlug.USER, email_prefix="target-path"
+    owner = await _create_user(
+        transactional_session, group_slug=SystemGroupSlug.USER, email_prefix="branch-owner"
     )
-    conversation = Conversation(
-        title="Target path chat", user=False, project="demo", user_id=user.id, is_public=False
+    reviewer = await _create_user(
+        transactional_session, group_slug=SystemGroupSlug.ADMIN, email_prefix="branch-reviewer"
     )
-    transactional_session.add(conversation)
-    await transactional_session.flush()
-
-    first_user_message = Message(role="user", content="First", conversation=conversation)
-    transactional_session.add(first_user_message)
-    await transactional_session.flush()
-    first_assistant_message = Message(
-        role="assistant",
-        content="First answer",
-        conversation=conversation,
-        parent_id=first_user_message.id,
+    graph = await _create_branch_graph(transactional_session, user=owner, title="Target path chat")
+    public_conversation = Conversation(
+        title="Public branch", user=False, project="demo", user_id=None, is_public=True
     )
-    transactional_session.add(first_assistant_message)
+    transactional_session.add(public_conversation)
     await transactional_session.flush()
-    first_user_message.active_child = first_assistant_message
-
-    second_user_message = Message(
-        role="user",
-        content="Second",
-        conversation=conversation,
-        parent_id=first_assistant_message.id,
-    )
-    transactional_session.add(second_user_message)
-    await transactional_session.flush()
-    first_assistant_message.active_child = second_user_message
-    second_assistant_message = Message(
-        role="assistant",
-        content="Second answer",
-        conversation=conversation,
-        parent_id=second_user_message.id,
-    )
-    transactional_session.add(second_assistant_message)
-    await transactional_session.flush()
-    second_user_message.active_child = second_assistant_message
+    public_root = Message(role="user", content="Public question", conversation=public_conversation)
+    transactional_session.add(public_root)
     await transactional_session.commit()
 
     async with AsyncClient(
         transport=ASGITransport(app=app), base_url="http://testserver"
     ) as client:
-        authenticate_client(client, user.id)
+        authenticate_client(client, reviewer.id)
         response = await client.get(
-            f"/api/conversations/{conversation.id}",
-            params={"target_message_id": str(first_assistant_message.id)},
+            f"/api/conversations/{graph.conversation.id}",
+            params={"source": "chats", "target_message_id": str(graph.alternate_answer.id)},
+        )
+        root_response = await client.get(
+            f"/api/conversations/{graph.conversation.id}",
+            params={"source": "chats", "target_message_id": str(graph.alternate_root.id)},
+        )
+        review_tree_response = await client.get(
+            f"/api/conversations/{graph.conversation.id}/tree", params={"source": "chats"}
+        )
+        author_tree_response = await client.get(f"/api/conversations/{graph.conversation.id}/tree")
+        private_update_response = await client.put(
+            f"/api/conversations/{graph.conversation.id}/active-branch",
+            json={"message_id": str(graph.root.id)},
+        )
+        public_update_response = await client.put(
+            f"/api/conversations/{public_conversation.id}/active-branch",
+            json={"message_id": str(public_root.id)},
         )
 
     assert response.status_code == 200
-    assert [message["content"] for message in response.json()["messages"]] == [
-        "First",
-        "First answer",
-        "Second",
-        "Second answer",
+    assert [message["id"] for message in response.json()["messages"]] == [
+        str(graph.root.id),
+        str(graph.alternate_answer.id),
+        str(graph.follow_up.id),
     ]
+    assert root_response.status_code == 200
+    assert [message["id"] for message in root_response.json()["messages"]] == [
+        str(graph.alternate_root.id),
+        str(graph.alternate_root_answer.id),
+    ]
+    assert review_tree_response.status_code == 200
+    assert author_tree_response.status_code == 403
+    assert private_update_response.status_code == 403
+    assert private_update_response.json()["detail"] == "Access denied"
+    assert public_update_response.status_code == 403
+    assert public_update_response.json()["detail"] == "Access denied"
+    await transactional_session.refresh(graph.root, attribute_names=["active_child_id"])
+    await transactional_session.refresh(
+        graph.conversation, attribute_names=["active_root_message_id"]
+    )
+    assert graph.root.active_child_id == graph.current_answer.id
+    assert graph.conversation.active_root_message_id == graph.root.id
 
 
 @pytest.mark.asyncio
@@ -2198,9 +3456,11 @@ async def test_internal_summary_uses_guardrails_blocked_message(
     await transactional_session.commit()
 
     captured_transcript: dict[str, str] = {}
+    captured_metadata: dict[str, object] = {}
 
-    async def fake_generate_summary(transcript: str) -> str:
+    async def fake_generate_summary(transcript: str, **metadata: object) -> str:
         captured_transcript["value"] = transcript
+        captured_metadata.update(metadata)
         return "Safe summary"
 
     @asynccontextmanager
@@ -2221,60 +3481,111 @@ async def test_internal_summary_uses_guardrails_blocked_message(
     assert raw_blocked_content not in captured_transcript["value"]
     assert canned_message in captured_transcript["value"]
     assert "blocked by guardrails" in captured_transcript["value"]
+    assert captured_metadata == {
+        "conversation_id": conversation.id,
+        "trigger_message_id": assistant_message.id,
+    }
     await transactional_session.refresh(conversation)
     assert conversation.summary == "Safe summary"
 
 
 @pytest.mark.asyncio
-async def test_update_message_active_child_returns_enrolment_agent_shape(
+async def test_active_branch_projection_failure_rolls_back_mutation(
+    transactional_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    user = await _create_user(
+        transactional_session, group_slug=SystemGroupSlug.USER, email_prefix="branch-rollback"
+    )
+    graph = await _create_branch_graph(transactional_session, user=user, title="Atomic branch")
+    await transactional_session.commit()
+    conversation_id = graph.conversation.id
+    root_id = graph.root.id
+    current_answer_id = graph.current_answer.id
+    alternate_answer_id = graph.alternate_answer.id
+
+    async def fail_detail_projection(*_: object, **__: object) -> None:
+        raise RuntimeError("detail projection failed")
+
+    monkeypatch.setattr(
+        "app.api.routes.conversations._build_internal_conversation_detail", fail_detail_projection
+    )
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app, raise_app_exceptions=False), base_url="http://testserver"
+    ) as client:
+        authenticate_client(client, user.id)
+        response = await client.put(
+            f"/api/conversations/{conversation_id}/active-branch",
+            json={"message_id": str(alternate_answer_id)},
+        )
+
+    assert response.status_code == 500
+    await transactional_session.refresh(
+        graph.conversation, attribute_names=["active_root_message_id"]
+    )
+    await transactional_session.refresh(graph.root, attribute_names=["active_child_id"])
+    assert graph.conversation.active_root_message_id == root_id
+    assert graph.root.active_child_id == current_answer_id
+
+
+@pytest.mark.asyncio
+async def test_update_conversation_active_branch_persists_canonical_path(
     transactional_session: AsyncSession,
 ) -> None:
     user = await _create_user(
-        transactional_session, group_slug=SystemGroupSlug.USER, email_prefix="branch"
+        transactional_session, group_slug=SystemGroupSlug.USER, email_prefix="branch-path"
     )
-
-    conversation = Conversation(
-        title="Branching chat", user=False, project="demo", user_id=user.id, is_public=False
+    graph = await _create_branch_graph(
+        transactional_session, user=user, title="Deep branching chat"
     )
-    transactional_session.add(conversation)
+    foreign_conversation = Conversation(
+        title="Foreign branch", user=False, project="demo", user_id=user.id, is_public=False
+    )
+    transactional_session.add(foreign_conversation)
     await transactional_session.flush()
-
-    parent_message = Message(role="user", content="Question", conversation=conversation)
-    transactional_session.add(parent_message)
-    await transactional_session.flush()
-
-    first_child = Message(
-        role="assistant",
-        content="First answer",
-        conversation=conversation,
-        parent_id=parent_message.id,
+    foreign_root = Message(
+        role="user", content="Foreign question", conversation=foreign_conversation
     )
-    second_child = Message(
-        role="assistant",
-        content="Second answer",
-        conversation=conversation,
-        parent_id=parent_message.id,
-    )
-    transactional_session.add_all([first_child, second_child])
-    await transactional_session.flush()
-    parent_message.active_child = first_child
-    parent_message_id = parent_message.id
-    second_child_id = second_child.id
+    transactional_session.add(foreign_root)
     await transactional_session.commit()
 
+    branch_path = [str(graph.root.id), str(graph.alternate_answer.id), str(graph.follow_up.id)]
+    root_path = [str(graph.alternate_root.id), str(graph.alternate_root_answer.id)]
     async with AsyncClient(
         transport=ASGITransport(app=app), base_url="http://testserver"
     ) as client:
         authenticate_client(client, user.id)
-        response = await client.put(
-            f"/api/conversations/messages/{parent_message_id}/active-child",
-            json={"active_child_id": str(second_child_id)},
+        foreign_response = await client.put(
+            f"/api/conversations/{graph.conversation.id}/active-branch",
+            json={"message_id": str(foreign_root.id)},
         )
+        update_response = await client.put(
+            f"/api/conversations/{graph.conversation.id}/active-branch",
+            json={"message_id": str(graph.follow_up.id)},
+        )
+        root_update_response = await client.put(
+            f"/api/conversations/{graph.conversation.id}/active-branch",
+            json={"message_id": str(graph.alternate_root.id)},
+        )
+        root_tree_response = await client.get(f"/api/conversations/{graph.conversation.id}/tree")
+        detail_response = await client.get(f"/api/conversations/{graph.conversation.id}")
 
-    assert response.status_code == 200
-    assert response.json() is None
+    assert foreign_response.status_code == 400
+    assert foreign_response.json()["detail"] == "Message is not in this conversation"
+    assert update_response.status_code == 200
+    assert [message["id"] for message in update_response.json()["messages"]] == branch_path
+    assert root_update_response.status_code == 200
+    assert [message["id"] for message in root_update_response.json()["messages"]] == root_path
+    assert root_tree_response.status_code == 200
+    assert root_tree_response.json()["current_branch_path"] == root_path
+    assert detail_response.status_code == 200
+    assert [message["id"] for message in detail_response.json()["messages"]] == root_path
 
-    transactional_session.expire_all()
-    reloaded_parent = await transactional_session.get(Message, parent_message_id)
-    assert reloaded_parent is not None
-    assert reloaded_parent.active_child_id == second_child_id
+    await transactional_session.refresh(
+        graph.conversation, attribute_names=["active_root_message_id"]
+    )
+    await transactional_session.refresh(graph.root, attribute_names=["active_child_id"])
+    await transactional_session.refresh(graph.alternate_answer, attribute_names=["active_child_id"])
+    assert graph.conversation.active_root_message_id == graph.alternate_root.id
+    assert graph.root.active_child_id == graph.alternate_answer.id
+    assert graph.alternate_answer.active_child_id == graph.follow_up.id

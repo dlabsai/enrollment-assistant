@@ -24,6 +24,10 @@ class PaginationParams(BaseModel):
     descending: Annotated[bool, Query()] = True
 
 
+class TracePaginationParams(PaginationParams):
+    limit: Annotated[int, Query(ge=1, le=200)] = 10
+
+
 # Authentication schemas
 class UserBase(BaseModel):
     email: str

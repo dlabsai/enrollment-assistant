@@ -9,8 +9,12 @@ from fastapi.routing import APIRoute
 from starlette.middleware.cors import CORSMiddleware
 
 from app.api.main import api_router
+from app.chat.provider_http import close_provider_http_clients
+from app.chat.tools.utils import close_embedding_client
 from app.core.config import settings
-from app.otel import configure_otel_span_processor
+from app.core.db import close_database_pools
+from app.db_observability import DatabaseObservabilityMiddleware
+from app.otel import close_telemetry_database_pool, configure_otel_span_processor
 from app.scheduler import configure_scheduler_jobs, scheduler
 from app.utils import configure_observability, logger
 
@@ -41,26 +45,44 @@ def custom_generate_unique_id(route: APIRoute) -> str:
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI) -> AsyncGenerator[None]:
-    logger.info("Starting scheduler")
+    scheduler_started = False
+    try:
+        if settings.SCHEDULER:
+            logger.info("Starting scheduler")
 
-    configure_scheduler_jobs()
+            configure_scheduler_jobs()
 
-    scheduler.start()
-    logger.info("Scheduler started successfully")
+            scheduler.start()
+            scheduler_started = True
+            logger.info("Scheduler started successfully")
 
-    yield
-
-    logger.info("Shutting down scheduler")
-    scheduler.shutdown()
-    logger.info("Scheduler stopped")
+        yield
+    finally:
+        try:
+            if scheduler_started:
+                logger.info("Shutting down scheduler")
+                scheduler.shutdown()
+                logger.info("Scheduler stopped")
+        finally:
+            try:
+                await close_embedding_client()
+            finally:
+                try:
+                    await close_provider_http_clients()
+                finally:
+                    try:
+                        await close_database_pools()
+                    finally:
+                        await close_telemetry_database_pool()
 
 
 app = FastAPI(
     title=settings.PROJECT_NAME,
-    lifespan=lifespan if settings.SCHEDULER else None,
+    lifespan=lifespan,
     openapi_url=f"{settings.API_STR}/openapi.json",
     generate_unique_id_function=custom_generate_unique_id,
 )
+app.add_middleware(DatabaseObservabilityMiddleware)
 
 if settings.ALL_CORS_ORIGINS:
     app.add_middleware(

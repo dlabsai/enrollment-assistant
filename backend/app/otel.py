@@ -17,16 +17,32 @@ from opentelemetry.sdk.trace import ReadableSpan, SpanProcessor, TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor
 from opentelemetry.trace import get_current_span, get_tracer_provider
 from opentelemetry.trace.span import format_span_id, format_trace_id
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
-from sqlalchemy.pool import NullPool
+from sqlalchemy.ext.asyncio import (
+    AsyncEngine,
+    AsyncSession,
+    async_sessionmaker,
+    create_async_engine,
+)
 
-from app.core.db import get_session
+from app.core.config import settings
+from app.db_observability import (
+    DATABASE_PERSISTENCE_FORCE_ATTRIBUTE,
+    TelemetryAsyncSession,
+    instrument_async_engine,
+)
 from app.models import OtelSpan
 
 logger = logging.getLogger("demo-va")
 
+type SpanPersistenceScope = set[asyncio.Task[None]]
+
 _background_tasks: set[asyncio.Task[None]] = set()
+_background_tasks_by_trace: dict[int, set[asyncio.Task[None]]] = {}
+_span_persistence_scope_tasks: ContextVar[SpanPersistenceScope | None] = ContextVar(
+    "span_persistence_scope_tasks", default=None
+)
 _span_processor_provider: object | None = None
+_telemetry_engine: AsyncEngine | None = None
 _telemetry_session_factory: async_sessionmaker[AsyncSession] | None = None
 _otel_session_factory_override: ContextVar[async_sessionmaker[AsyncSession] | None] = ContextVar(
     "otel_session_factory_override", default=None
@@ -155,13 +171,11 @@ def _format_span_name(span_name: str, attributes: Mapping[str, Any] | None) -> s
     return span_name
 
 
-def _build_telemetry_database_url() -> str | None:
-    url = os.getenv("TELEMETRY_DATABASE_URL")
-    if not url:
-        return None
-    if url.startswith("postgresql://"):
-        return url.replace("postgresql://", "postgresql+psycopg://", 1)
-    return url
+def _telemetry_database_url() -> str:
+    """Use the primary PostgreSQL database through an independently bounded engine."""
+    return str(settings.SQLALCHEMY_DATABASE_URI).replace(
+        "postgresql://", "postgresql+psycopg://", 1
+    )
 
 
 def _as_truthy(value: str | None) -> bool:
@@ -211,9 +225,16 @@ def _create_langfuse_span_processor() -> SpanProcessor | None:
 
 
 class _RouteTraceFilteringSpanProcessor(SpanProcessor):
-    def __init__(self, delegate: SpanProcessor, *, routes: Sequence[tuple[str, str]]) -> None:
+    def __init__(
+        self,
+        delegate: SpanProcessor,
+        *,
+        routes: Sequence[tuple[str, str]],
+        force_attributes: Sequence[str] = ("app.force_otel_export",),
+    ) -> None:
         self.delegate = delegate
         self.routes = frozenset((method.upper(), route) for method, route in routes)
+        self.force_attributes = frozenset(force_attributes)
         self._pending_by_trace: dict[int, list[ReadableSpan]] = {}
         self._allowed_trace_ids: set[int] = set()
         self._blocked_trace_ids: set[int] = set()
@@ -266,7 +287,9 @@ class _RouteTraceFilteringSpanProcessor(SpanProcessor):
             return
 
         attributes = _serialize_mapping(span.attributes)
-        if attributes is not None and attributes.get("app.force_otel_export") is True:
+        if attributes is not None and any(
+            attributes.get(attribute) is True for attribute in self.force_attributes
+        ):
             self.delegate.on_end(span)
             return
 
@@ -329,19 +352,23 @@ class _OtelSpanTaggingProcessor(SpanProcessor):
         return True
 
 
-def _get_telemetry_session_factory() -> async_sessionmaker[AsyncSession] | None:
-    global _telemetry_session_factory  # noqa: PLW0603
+def _get_telemetry_session_factory() -> async_sessionmaker[AsyncSession]:
+    global _telemetry_engine, _telemetry_session_factory  # noqa: PLW0603
 
     if _telemetry_session_factory is not None:
         return _telemetry_session_factory
 
-    telemetry_url = _build_telemetry_database_url()
-    if telemetry_url is None:
-        return None
-
-    engine = create_async_engine(telemetry_url, echo=False, poolclass=NullPool)
+    _telemetry_engine = create_async_engine(
+        _telemetry_database_url(),
+        echo=False,
+        pool_size=settings.OTEL_POSTGRES_POOL_SIZE,
+        max_overflow=settings.OTEL_POSTGRES_MAX_OVERFLOW,
+        pool_timeout=settings.OTEL_POSTGRES_POOL_TIMEOUT_SECONDS,
+        pool_pre_ping=True,
+    )
+    instrument_async_engine(_telemetry_engine, pool_name="otel")
     _telemetry_session_factory = async_sessionmaker(
-        engine, expire_on_commit=False, class_=AsyncSession
+        _telemetry_engine, expire_on_commit=False, class_=TelemetryAsyncSession
     )
     return _telemetry_session_factory
 
@@ -351,11 +378,6 @@ async def _get_otel_session() -> AsyncGenerator[AsyncSession]:
     session_factory = _otel_session_factory_override.get()
     if session_factory is None:
         session_factory = _get_telemetry_session_factory()
-
-    if session_factory is None:
-        async with get_session() as session:
-            yield session
-        return
 
     async with session_factory() as session:
         try:
@@ -396,12 +418,49 @@ def configure_otel_span_processor() -> None:
     if langfuse_span_processor is not None:
         add_processor(langfuse_span_processor)
 
-    add_processor(
-        _RouteTraceFilteringSpanProcessor(
-            _DatabaseSpanProcessor(), routes=_OTEL_EXPORT_TARGET_ROUTES
+    if settings.OTEL_DATABASE_PERSISTENCE_ENABLED:
+        add_processor(
+            _RouteTraceFilteringSpanProcessor(
+                _DatabaseSpanProcessor(),
+                routes=_OTEL_EXPORT_TARGET_ROUTES,
+                force_attributes=("app.force_otel_export", DATABASE_PERSISTENCE_FORCE_ATTRIBUTE),
+            )
         )
-    )
+    else:
+        logger.info("OTel database persistence is disabled")
     _span_processor_provider = tracer_provider
+
+
+@contextmanager
+def span_persistence_scope() -> Generator[SpanPersistenceScope]:
+    """Collect span-write tasks created by one logical operation and its child tasks."""
+    tasks: SpanPersistenceScope = set()
+    token = _span_persistence_scope_tasks.set(tasks)
+    try:
+        yield tasks
+    finally:
+        _span_persistence_scope_tasks.reset(token)
+
+
+def _track_span_persistence_task(task: asyncio.Task[None], *, trace_id: int) -> None:
+    _background_tasks.add(task)
+    _background_tasks_by_trace.setdefault(trace_id, set()).add(task)
+    scoped_tasks = _span_persistence_scope_tasks.get()
+    if scoped_tasks is not None:
+        scoped_tasks.add(task)
+
+    def discard(completed_task: asyncio.Task[None]) -> None:
+        _background_tasks.discard(completed_task)
+        if scoped_tasks is not None:
+            scoped_tasks.discard(completed_task)
+        trace_tasks = _background_tasks_by_trace.get(trace_id)
+        if trace_tasks is None:
+            return
+        trace_tasks.discard(completed_task)
+        if not trace_tasks:
+            _background_tasks_by_trace.pop(trace_id, None)
+
+    task.add_done_callback(discard)
 
 
 class _DatabaseSpanProcessor(SpanProcessor):
@@ -409,18 +468,18 @@ class _DatabaseSpanProcessor(SpanProcessor):
         del span, parent_context
 
     def on_end(self, span: ReadableSpan) -> None:
-        if span.end_time is None:
+        if span.end_time is None or span.context is None:
             return
 
         span_data = _span_to_payload(span)
+        trace_id = span.context.trace_id
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
             asyncio.run(_persist_span(span_data))
         else:
             task = loop.create_task(_persist_span(span_data))
-            _background_tasks.add(task)
-            task.add_done_callback(_background_tasks.discard)
+            _track_span_persistence_task(task, trace_id=trace_id)
 
     def shutdown(self) -> None:
         return None
@@ -582,7 +641,37 @@ async def persist_span(span_data: dict[str, Any]) -> None:
     await _persist_span(span_data)
 
 
-async def wait_for_pending_spans() -> None:
-    tasks = list(_background_tasks)
-    if tasks:
+async def wait_for_pending_spans(
+    *, trace_id: int | None = None, scope: SpanPersistenceScope | None = None
+) -> None:
+    """Drain persistence tasks globally, for one trace, or for one logical operation.
+
+    Request paths must pass a trace or operation scope so one response never waits for unrelated
+    requests. Shutdown and isolated CLI/eval cleanup intentionally omit both to drain the process.
+    """
+    if trace_id is not None and scope is not None:
+        raise ValueError("Specify either trace_id or scope, not both")
+
+    while True:
+        if scope is not None:
+            pending_tasks = scope
+        elif trace_id is not None:
+            pending_tasks = _background_tasks_by_trace.get(trace_id, set())
+        else:
+            pending_tasks = _background_tasks
+        tasks = list(pending_tasks)
+        if not tasks:
+            return
         await asyncio.gather(*tasks, return_exceptions=True)
+
+
+async def close_telemetry_database_pool() -> None:
+    """Drain span writes and dispose the process-local telemetry database pool."""
+    global _telemetry_engine, _telemetry_session_factory  # noqa: PLW0603
+
+    await wait_for_pending_spans()
+    engine = _telemetry_engine
+    _telemetry_session_factory = None
+    _telemetry_engine = None
+    if engine is not None:
+        await engine.dispose()

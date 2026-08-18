@@ -123,7 +123,7 @@ def test_internal_chatbot_prompt_treats_catalog_as_normal_content() -> None:
     prompt = _render_chatbot_prompt(deps)
 
     assert "catalog.demo-university.example.edu" in prompt
-    assert "list_catalog_programs" in prompt
+    assert "Use catalog tools or catalog document searches" in prompt
     assert "catalog_program_ids" in prompt
 
 
@@ -132,7 +132,7 @@ def test_public_chatbot_prompt_treats_catalog_as_normal_content() -> None:
     prompt = _render_chatbot_prompt(deps)
 
     assert "catalog.demo-university.example.edu" in prompt
-    assert "list_catalog_programs" in prompt
+    assert "Catalog list tools are useful" in prompt
     assert "catalog_program_ids" in prompt
 
 

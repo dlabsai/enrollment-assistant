@@ -51,6 +51,36 @@ interface UserFilterQueryParams {
     userGroup?: "staff" | "devs";
 }
 
+export const parseStoredUserFilter = (
+    value: unknown,
+): ChatUserOption | undefined => {
+    if (typeof value !== "object" || value === null) {
+        return undefined;
+    }
+
+    const email = "email" in value ? value.email : undefined;
+    const name = "name" in value ? value.name : undefined;
+    const platform = "platform" in value ? value.platform : undefined;
+    const ownerGroup = "ownerGroup" in value ? value.ownerGroup : undefined;
+    if (
+        typeof email !== "string" ||
+        email === "" ||
+        (platform !== "internal" && platform !== "public") ||
+        (ownerGroup !== undefined &&
+            ownerGroup !== "staff" &&
+            ownerGroup !== "devs")
+    ) {
+        return undefined;
+    }
+
+    return {
+        email,
+        name: typeof name === "string" ? name : undefined,
+        platform,
+        ownerGroup,
+    };
+};
+
 export const buildUserFilterParams = (
     selectedUser: ChatUserOption | undefined,
 ): UserFilterQueryParams => {

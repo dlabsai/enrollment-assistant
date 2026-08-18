@@ -12,7 +12,6 @@ import {
     useInstructionsActions,
     useInstructionsStore,
 } from "../contexts/instructions-store-context";
-import { EditorToolbar } from "./editor-toolbar";
 import { VersionDetailView } from "./version-detail-view";
 
 const jinja2Language = StreamLanguage.define(jinja2);
@@ -29,7 +28,11 @@ const EmptyState = (): JSX.Element => (
     </div>
 );
 
-const CodeEditor = (): JSX.Element => {
+interface TemplateEditorProps {
+    filename: string;
+}
+
+const CodeEditor = ({ filename }: TemplateEditorProps): JSX.Element => {
     const editedContent = useInstructionsStore((state) => state.editedContent);
     const wrapLines = useInstructionsStore((state) => state.wrapLines);
     const editorKey = useInstructionsStore((state) => state.editorKey);
@@ -47,7 +50,7 @@ const CodeEditor = (): JSX.Element => {
     );
 
     const handleChange = (value: string): void => {
-        updateContent(value);
+        updateContent(filename, value);
     };
 
     return (
@@ -71,11 +74,8 @@ const CodeEditor = (): JSX.Element => {
     );
 };
 
-const DiffEditor = (): JSX.Element => {
+const DiffEditor = ({ filename }: TemplateEditorProps): JSX.Element => {
     const editedContent = useInstructionsStore((state) => state.editedContent);
-    const selectedTemplate = useInstructionsStore(
-        (state) => state.selectedTemplate,
-    );
     const diskTemplates = useInstructionsStore((state) => state.diskTemplates);
     const wrapLines = useInstructionsStore((state) => state.wrapLines);
     const editorKey = useInstructionsStore((state) => state.editorKey);
@@ -93,18 +93,22 @@ const DiffEditor = (): JSX.Element => {
     );
 
     const originalContent = useMemo(() => {
-        if (selectedTemplate === undefined) {
-            return "";
-        }
         const template = diskTemplates.find(
-            (template) => template.filename === selectedTemplate,
+            (template) => template.filename === filename,
         );
         return template?.content ?? "";
-    }, [selectedTemplate, diskTemplates]);
+    }, [filename, diskTemplates]);
 
     const handleChange = (value: string): void => {
-        updateContent(value);
+        updateContent(filename, value);
     };
+
+    const editorInstanceKey = [
+        filename,
+        editorKey,
+        wrapLines ? "wrap" : "nowrap",
+        isDarkMode ? "dark" : "light",
+    ].join(":");
 
     return (
         <CodeMirrorMerge
@@ -113,7 +117,8 @@ const DiffEditor = (): JSX.Element => {
                 margin: 3,
                 minSize: 4,
             }}
-            key={editorKey}
+            destroyRerender={false}
+            key={editorInstanceKey}
             revertControls="a-to-b"
             theme={isDarkMode ? githubDark : githubLight}
         >
@@ -131,12 +136,16 @@ const DiffEditor = (): JSX.Element => {
     );
 };
 
-const TemplateEditor = (): JSX.Element => {
+const TemplateEditor = ({ filename }: TemplateEditorProps): JSX.Element => {
     const showDiff = useInstructionsStore((state) => state.showDiff);
 
     return (
         <div className="flex-1 overflow-hidden">
-            {showDiff ? <DiffEditor /> : <CodeEditor />}
+            {showDiff ? (
+                <DiffEditor filename={filename} />
+            ) : (
+                <CodeEditor filename={filename} />
+            )}
         </div>
     );
 };
@@ -151,7 +160,6 @@ export const EditorArea = (): JSX.Element => {
 
     return (
         <div className="flex flex-1 flex-col overflow-hidden">
-            <EditorToolbar />
             {selectedTemplate === undefined ? (
                 selectedVersionDetail === undefined ? (
                     <EmptyState />
@@ -159,7 +167,7 @@ export const EditorArea = (): JSX.Element => {
                     <VersionDetailView />
                 )
             ) : (
-                <TemplateEditor />
+                <TemplateEditor filename={selectedTemplate} />
             )}
         </div>
     );

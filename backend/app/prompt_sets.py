@@ -1,4 +1,6 @@
 import collections.abc  # noqa: TC003
+import hashlib
+import json
 import pathlib  # noqa: TC003
 from dataclasses import dataclass
 
@@ -61,3 +63,12 @@ def read_disk_templates(template_dir: pathlib.Path) -> dict[str, str]:
         for file_path in template_dir.glob("*.j2")
         if file_path.is_file()
     }
+
+
+def hash_prompt_templates(templates: collections.abc.Mapping[str, str]) -> str:
+    """Return a stable SHA-256 hash for a filename-to-content mapping."""
+    payload = [
+        {"filename": filename, "content": templates[filename]} for filename in sorted(templates)
+    ]
+    serialized = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()

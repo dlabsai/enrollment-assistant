@@ -17,8 +17,11 @@ import {
 import type { JSX } from "react";
 
 import { formatTableTimestamp } from "../../lib/date-format";
-import { formatLocaleNumber } from "../../lib/number-format";
-import { formatUsageCost, formatUsageDuration } from "../lib/formatters";
+import {
+    formatLocaleNumber,
+    formatUsdCost,
+} from "../../lib/number-format";
+import { formatUsageDuration } from "../lib/formatters";
 import type { UsageTraceBasic } from "../types";
 
 interface UsageTableProps {
@@ -85,7 +88,7 @@ export const UsageTable = ({ traces }: UsageTableProps): JSX.Element => (
                                             {formatLocaleNumber(totalTokens)}
                                         </TableCell>
                                         <TableCell className="text-right tabular-nums">
-                                            {formatUsageCost(trace.cost)}
+                                            {formatUsdCost(trace.cost)}
                                         </TableCell>
                                         <TableCell className="text-right tabular-nums">
                                             {formatUsageDuration(trace.duration)}

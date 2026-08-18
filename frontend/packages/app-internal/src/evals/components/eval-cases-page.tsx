@@ -44,6 +44,7 @@ import { isDataTablePageSize } from "../../components/data-table-constants";
 import { PageHeader, PageHeaderGroup } from "../../components/page-header";
 import { PageSection, PageShell } from "../../components/page-shell";
 import { InlineError, PageError } from "../../components/page-state";
+import { useAsyncData } from "../../lib/hooks/use-async-data";
 import {
     createEvalCaseDefinition,
     deleteEvalCaseDefinition,
@@ -55,6 +56,8 @@ import {
     isEvalCasesSortBy,
 } from "../lib/case-search-state";
 import type { EvalCaseDefinition, EvalSuite } from "../types";
+
+const initialEvalCases: EvalCaseDefinition[] = [];
 
 const evalSuiteOptions: { label: string; value: EvalSuite }[] = [
     { label: "Chatbot", value: "chatbot" },
@@ -68,6 +71,7 @@ interface EvalCaseDraft {
     chatbotResponse: string;
     expectedValid: boolean;
     isInternal: boolean;
+    verified: boolean;
 }
 
 const emptyDraft = (): EvalCaseDraft => ({
@@ -77,6 +81,7 @@ const emptyDraft = (): EvalCaseDraft => ({
     chatbotResponse: "",
     expectedValid: true,
     isInternal: true,
+    verified: false,
 });
 
 const stringValue = (
@@ -99,6 +104,7 @@ const booleanValue = (
 const draftFromPayload = (
     suite: EvalSuite,
     payload: Record<string, unknown> | null | undefined,
+    verified?: boolean,
 ): EvalCaseDraft => ({
     testCaseId: stringValue(payload, "test_case_id"),
     userInput: suite === "chatbot" ? stringValue(payload, "user_input") : "",
@@ -111,7 +117,14 @@ const draftFromPayload = (
             : true,
     isInternal:
         suite === "chatbot" ? booleanValue(payload, "is_internal", true) : true,
+    verified: verified ?? booleanValue(payload, "verified", false),
 });
+
+const draftFromCase = (
+    suite: EvalSuite,
+    caseDefinition: EvalCaseDefinition,
+): EvalCaseDraft =>
+    draftFromPayload(suite, caseDefinition.payload, caseDefinition.verified);
 
 const payloadFromDraft = (
     suite: EvalSuite,
@@ -120,6 +133,7 @@ const payloadFromDraft = (
     const common = {
         test_case_id: draft.testCaseId.trim(),
         criteria: draft.criteria.trim(),
+        verified: draft.verified,
     };
     if (suite === "chatbot") {
         return {
@@ -152,13 +166,17 @@ const caseListCriteria = (payload: Record<string, unknown>): string =>
 const caseListExpected = (payload: Record<string, unknown>): string =>
     booleanValue(payload, "expected_valid", true) ? "Valid" : "Invalid";
 
+const caseListVerified = (caseDefinition: EvalCaseDefinition): string =>
+    caseDefinition.verified ? "Yes" : "No";
+
 const draftsEqual = (left: EvalCaseDraft, right: EvalCaseDraft): boolean =>
     left.testCaseId === right.testCaseId &&
     left.userInput === right.userInput &&
     left.criteria === right.criteria &&
     left.chatbotResponse === right.chatbotResponse &&
     left.expectedValid === right.expectedValid &&
-    left.isInternal === right.isInternal;
+    left.isInternal === right.isInternal &&
+    left.verified === right.verified;
 
 const buildCaseColumns = (
     suite: EvalSuite,
@@ -186,6 +204,13 @@ const buildCaseColumns = (
                     {caseListMessage(suite, row.original.payload) || "—"}
                 </span>
             ),
+        },
+        {
+            id: "verified",
+            accessorFn: (caseDefinition) => caseListVerified(caseDefinition),
+            header: "Verified",
+            enableSorting: true,
+            cell: ({ row }) => caseListVerified(row.original),
         },
     ];
 
@@ -285,6 +310,10 @@ const CaseForm = ({
                         />
                     </>
                 )}
+                <CaseReadOnlyField
+                    label="Verified"
+                    value={draft.verified ? "Yes" : "No"}
+                />
                 <CaseReadOnlyField
                     className="min-h-40"
                     label="Evaluation criteria"
@@ -400,6 +429,25 @@ const CaseForm = ({
                 </>
             )}
 
+            <div className="flex items-center gap-3 rounded-md border px-3 py-2">
+                <Switch
+                    checked={draft.verified}
+                    disabled={saving}
+                    onCheckedChange={(checked) => {
+                        onDraftChange({
+                            ...draft,
+                            verified: checked,
+                        });
+                    }}
+                />
+                <div className="flex flex-col gap-0.5">
+                    <span className="text-sm font-medium">Verified</span>
+                    <span className="text-muted-foreground text-xs">
+                        SME-authored or SME-approved eval case.
+                    </span>
+                </div>
+            </div>
+
             <div className="flex flex-col gap-1.5">
                 <Label htmlFor="eval-case-criteria">Evaluation criteria</Label>
                 <Textarea
@@ -419,7 +467,7 @@ const CaseForm = ({
     );
 };
 
-export const EvalCasesPage = (): JSX.Element => {
+const EvalCasesPageContent = (): JSX.Element => {
     const api = useAuthenticatedApi();
     const searchState = useSearch({ from: "/eval-cases" });
     const navigate = useNavigate({ from: "/eval-cases" });
@@ -432,9 +480,21 @@ export const EvalCasesPage = (): JSX.Element => {
         sortBy,
         suite,
     } = searchState;
-    const [cases, setCases] = useState<EvalCaseDefinition[]>([]);
-    const [loading, setLoading] = useState(true);
-    const [error, setError] = useState<string | undefined>();
+    const loadCases = useCallback(
+        async (signal: AbortSignal) =>
+            fetchEvalCaseDefinitions(api, suite, signal),
+        [api, suite],
+    );
+    const {
+        data: cases,
+        loading,
+        error,
+        refresh: refreshCases,
+    } = useAsyncData<EvalCaseDefinition[]>({
+        errorMessage: "Failed to load eval cases",
+        initialData: initialEvalCases,
+        load: loadCases,
+    });
     const [mode, setMode] = useState<"view" | "edit" | "new">("view");
     const [draft, setDraft] = useState<EvalCaseDraft>(() => emptyDraft());
     const [draftBaseline, setDraftBaseline] = useState<EvalCaseDraft>(() =>
@@ -463,41 +523,6 @@ export const EvalCasesPage = (): JSX.Element => {
         },
         [navigate],
     );
-
-    const loadCases = useCallback(async (): Promise<void> => {
-        setLoading(true);
-        setError(undefined);
-        try {
-            const response = await fetchEvalCaseDefinitions(api, suite);
-            setCases(response);
-        } catch (error_) {
-            setError(
-                error_ instanceof Error
-                    ? error_.message
-                    : "Failed to load eval cases",
-            );
-        } finally {
-            setLoading(false);
-        }
-    }, [api, suite]);
-
-    useEffect(() => {
-        const timeout = setTimeout(() => {
-            setMode("view");
-            setDraft(emptyDraft());
-            setDraftBaseline(emptyDraft());
-            setActionError(undefined);
-            setDiscardDialogOpen(false);
-        }, 0);
-
-        return (): void => {
-            clearTimeout(timeout);
-        };
-    }, [suite]);
-
-    useEffect(() => {
-        void loadCases();
-    }, [loadCases]);
 
     const activeCases = useMemo(
         () => cases.filter((caseDefinition) => caseDefinition.active),
@@ -543,23 +568,10 @@ export const EvalCasesPage = (): JSX.Element => {
         [activeCases, selectedCaseId],
     );
 
-    useEffect(() => {
-        const timeout = setTimeout(() => {
-            if (mode !== "view") {
-                return;
-            }
-            const nextDraft =
-                selectedCase === undefined
-                    ? emptyDraft()
-                    : draftFromPayload(suite, selectedCase.payload);
-            setDraft(nextDraft);
-            setDraftBaseline(nextDraft);
-        }, 0);
-
-        return (): void => {
-            clearTimeout(timeout);
-        };
-    }, [mode, selectedCase, suite]);
+    const displayedDraft =
+        mode === "view" && selectedCase !== undefined
+            ? draftFromCase(suite, selectedCase)
+            : draft;
 
     const filteredCases = useMemo(() => {
         const query = searchValue.trim().toLowerCase();
@@ -639,7 +651,7 @@ export const EvalCasesPage = (): JSX.Element => {
         if (selectedCase === undefined) {
             return;
         }
-        const nextDraft = draftFromPayload(suite, selectedCase.payload);
+        const nextDraft = draftFromCase(suite, selectedCase);
         setMode("edit");
         setDraft(nextDraft);
         setDraftBaseline(nextDraft);
@@ -655,7 +667,7 @@ export const EvalCasesPage = (): JSX.Element => {
             setDraft(nextDraft);
             setDraftBaseline(nextDraft);
         } else {
-            const nextDraft = draftFromPayload(suite, selectedCase.payload);
+            const nextDraft = draftFromCase(suite, selectedCase);
             setDraft(nextDraft);
             setDraftBaseline(nextDraft);
         }
@@ -689,11 +701,11 @@ export const EvalCasesPage = (): JSX.Element => {
                 );
             };
             const saved = await saveDraft();
-            const savedDraft = draftFromPayload(suite, saved.payload);
+            const savedDraft = draftFromCase(suite, saved);
             toast.success(
                 mode === "new" ? "Eval case created" : "Eval case saved",
             );
-            await loadCases();
+            refreshCases();
             setMode("view");
             navigateWithSearch(() => ({ caseId: saved.caseId }));
             setDraft(savedDraft);
@@ -722,7 +734,7 @@ export const EvalCasesPage = (): JSX.Element => {
             navigateWithSearch(() => ({ caseId: undefined }));
             setDraft(emptyDraft());
             setDraftBaseline(emptyDraft());
-            await loadCases();
+            refreshCases();
         } catch (error_) {
             setActionError(
                 error_ instanceof Error
@@ -738,7 +750,7 @@ export const EvalCasesPage = (): JSX.Element => {
         return (
             <PageError
                 message={error}
-                onRetry={() => void loadCases()}
+                onRetry={refreshCases}
             />
         );
     }
@@ -784,7 +796,7 @@ export const EvalCasesPage = (): JSX.Element => {
                         </SelectContent>
                     </Select>
                     <Button
-                        onClick={() => void loadCases()}
+                        onClick={refreshCases}
                         variant="outline"
                     >
                         <RefreshCw data-icon="inline-start" />
@@ -801,7 +813,7 @@ export const EvalCasesPage = (): JSX.Element => {
                 <PageSection>
                     <InlineError
                         message={error}
-                        onRetry={() => void loadCases()}
+                        onRetry={refreshCases}
                     />
                 </PageSection>
             )}
@@ -867,7 +879,7 @@ export const EvalCasesPage = (): JSX.Element => {
                                 pagination={pagination}
                                 rowCount={filteredCases.length}
                                 sorting={sorting}
-                                tableClassName="min-w-[760px] table-fixed"
+                                tableClassName="min-w-[860px] table-fixed"
                             />
                         </section>
                     </ResizablePanel>
@@ -940,7 +952,7 @@ export const EvalCasesPage = (): JSX.Element => {
                                     ) : (
                                         <>
                                             <CaseForm
-                                                draft={draft}
+                                                draft={displayedDraft}
                                                 editing={isEditing}
                                                 existingCase={existingCase}
                                                 onDraftChange={setDraft}
@@ -1035,4 +1047,9 @@ export const EvalCasesPage = (): JSX.Element => {
             </AlertDialog>
         </PageShell>
     );
+};
+
+export const EvalCasesPage = (): JSX.Element => {
+    const { suite } = useSearch({ from: "/eval-cases" });
+    return <EvalCasesPageContent key={suite} />;
 };

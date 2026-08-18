@@ -13,13 +13,14 @@ import { fetchTraceDetailByMessageId } from "../../traces/lib/api";
 import type {
     Chat,
     ChatDetailResponse,
-    ChatListItem,
-    ConversationDetailTreeResponse,
     Message,
     MessageFeedback,
+    MessageRetryRequest,
+    MessageSendOptions,
     ModelOverrides,
     Rating,
 } from "../types";
+import { createActiveRequestTracker } from "./active-request-tracker";
 import {
     type ChatCollectionKind,
     deleteChat as apiDeleteChat,
@@ -27,26 +28,49 @@ import {
     fetchChatDetail,
     fetchChats,
     fetchConversationTree,
+    fetchGenerationAttempt,
     fetchMessageFeedback as apiFetchMessageFeedback,
     regenerateChatTitle as apiRegenerateChatTitle,
     renameChatTitle as apiRenameChatTitle,
+    retryGroundingSources as apiRetryGroundingSources,
     sendMessageStream as apiSendMessageStream,
     submitMessageFeedback as apiSubmitMessageFeedback,
-    updateMessageActiveChild as apiUpdateMessageActiveChild,
+    updateConversationActiveBranch as apiUpdateConversationActiveBranch,
 } from "./api";
+import { mergeChatListItems } from "./chat-list-state";
+import {
+    CONVERSATION_BRANCH_LOAD_ERROR,
+    type ConversationTreeState,
+    convertConversationTree,
+    createLatestRequestCoordinator,
+    type LatestRequestCoordinator,
+} from "./conversation-tree";
+import { reconcileGenerationAttempt } from "./generation-attempt";
 import { mapServerGuardrailsFailures } from "./guardrails";
+import {
+    createMessageRetryRequest,
+    trimMessagesToMessageId,
+} from "./message-retry";
+import {
+    type PrimaryMessageStreamOutcome,
+    recordPrimaryMessageStreamOutcome,
+} from "./message-stream-lifecycle";
 import {
     buildActivityLogFromTrace,
     mergeActivityLogWithStoredToolCalls,
 } from "./trace-activity";
+
+interface ConversationTreeResult {
+    tree?: ConversationTreeState;
+    error?: string;
+}
 
 interface ChatState {
     chats: Map<string, Chat>;
     chatsLoaded: boolean;
     chatsError?: string;
 
-    conversationTrees: Map<string, ConversationTreeState>;
-    conversationTreeLoading: Set<string>;
+    conversationTreeResults: Map<string, ConversationTreeResult>;
 
     messageFeedback: Map<string, MessageFeedback[]>;
     messageFeedbackLoading: Set<string>;
@@ -62,12 +86,6 @@ interface ChatState {
     activityLogCounter: number;
 }
 
-interface ConversationTreeState {
-    messagesById: Map<string, Message>;
-    childrenByParent: Map<string, string[]>;
-    currentBranchPath: string[];
-}
-
 type SortedChatsSelectorState = Pick<ChatState, "chats">;
 
 type CurrentChatSelectorState = Pick<ChatState, "chats" | "currentChatId">;
@@ -78,24 +96,18 @@ export interface ChatActions {
     loadChats: () => Promise<void>;
 
     selectChat: (chatId?: string) => Promise<void>;
-    reloadChat: (chatId: string) => Promise<void>;
     loadConversationTree: (chatId: string) => Promise<void>;
-    setActiveChild: (
-        chatId: string,
-        messageId: string,
-        activeChildId: string,
-    ) => Promise<void>;
+    setActiveBranch: (chatId: string, messageId: string) => Promise<void>;
     clearCurrentChat: () => void;
+    abortChat: (chatId?: string) => void;
 
     sendMessage: (
         content: string,
         modelOverrides?: ModelOverrides,
-        options?: {
-            parentMessageId?: string;
-            isRegeneration?: boolean;
-            trimToMessageId?: string;
-        },
+        options?: MessageSendOptions,
     ) => Promise<void>;
+    retryMessage: (errorMessageId: string) => Promise<void>;
+    retryGroundingSources: (messageId: string) => Promise<void>;
 
     deleteChat: (chatId: string) => Promise<void>;
 
@@ -182,34 +194,24 @@ const toToolState = (
     return "output-available";
 };
 
-const createErrorMessage = (content: string): Message =>
+const GENERATION_FAILED_MESSAGE = "The response could not be completed.";
+const UNKNOWN_RESPONSE_OUTCOME_MESSAGE =
+    "The response status could not be confirmed. Refresh the conversation before trying again.";
+const GENERATION_PENDING_MESSAGE =
+    "The response is still being processed. Refresh the conversation to check again.";
+
+const createErrorMessage = (
+    content: string,
+    retryRequest?: MessageRetryRequest,
+): Message =>
     ({
         id: `error-${nanoid(7)}`,
         role: "assistant",
         content,
         createdAt: Date.now(),
         isError: true,
+        retryRequest,
     }) satisfies Message;
-
-const convertServerChat = (item: ChatListItem): Chat => ({
-    id: item.id,
-    title: item.title ?? undefined,
-    summary: item.summary ?? undefined,
-    lastMessagePreview: item.last_message_preview ?? undefined,
-    updatedAt: new Date(item.updated_at).getTime(),
-    isPublic: item.is_public,
-    userName: item.user_name ?? undefined,
-    userEmail: item.user_email ?? undefined,
-    investigationSourceConversationId: undefined,
-    investigationSourceMessageId: undefined,
-    investigationSourceFeedbackId: undefined,
-    messages: [],
-    isLoading: false,
-    hasUnread: false,
-    loadingActivity: [],
-    loadingActivityLog: [],
-    parentMessageId: undefined,
-});
 
 const getDisplayContent = (message: {
     content: string;
@@ -232,32 +234,45 @@ const convertServerMessages = (
         createdAt: new Date(message.created_at).getTime(),
         parentId: message.parent_id ?? undefined,
         guardrailsBlocked: message.guardrails_blocked ?? false,
-        guardrailsBlockedMessage: message.guardrails_blocked_message ?? undefined,
+        guardrailsBlockedMessage:
+            message.guardrails_blocked_message ?? undefined,
         assistantToolCalls: message.assistant_tool_calls ?? undefined,
         generationTimeMs: message.generation_time_ms ?? undefined,
         responseCost: message.response_cost ?? undefined,
         responseUsage:
-            message.response_usage === undefined || message.response_usage === null
+            message.response_usage === undefined ||
+            message.response_usage === null
                 ? undefined
                 : {
-                      inputTokens: message.response_usage.input_tokens ?? undefined,
+                      inputTokens:
+                          message.response_usage.input_tokens ?? undefined,
                       uncachedInputTokens:
-                          message.response_usage.uncached_input_tokens ?? undefined,
+                          message.response_usage.uncached_input_tokens ??
+                          undefined,
                       cacheReadInputTokens:
-                          message.response_usage.cache_read_input_tokens ?? undefined,
-                      outputTokens: message.response_usage.output_tokens ?? undefined,
+                          message.response_usage.cache_read_input_tokens ??
+                          undefined,
+                      outputTokens:
+                          message.response_usage.output_tokens ?? undefined,
                   },
         responseCostBreakdown:
             message.response_cost_breakdown === undefined ||
             message.response_cost_breakdown === null
                 ? undefined
                 : {
-                      inputCost: message.response_cost_breakdown.input_cost ?? undefined,
+                      inputCost:
+                          message.response_cost_breakdown.input_cost ??
+                          undefined,
                       cacheReadInputCost:
-                          message.response_cost_breakdown.cache_read_input_cost ?? undefined,
-                      outputCost: message.response_cost_breakdown.output_cost ?? undefined,
+                          message.response_cost_breakdown
+                              .cache_read_input_cost ?? undefined,
+                      outputCost:
+                          message.response_cost_breakdown.output_cost ??
+                          undefined,
                   },
-        guardrailsFailures: mapServerGuardrailsFailures(message.guardrails_failures),
+        guardrailsFailures: mapServerGuardrailsFailures(
+            message.guardrails_failures,
+        ),
         toolSourcesUsed: message.tool_sources_used,
         groundingSourcesUsed: message.grounding_sources_used,
         groundingSourceStatus: message.grounding_source_status,
@@ -287,69 +302,9 @@ const convertServerMessages = (
                   },
     }));
 
-    const lastAssistant = response.messages.findLast(
-        (message) => message.role === "assistant",
-    );
-
     return {
         messages,
-        parentMessageId: lastAssistant?.id ?? undefined,
-    };
-};
-
-type ConversationTreeNode =
-    ConversationDetailTreeResponse["conversation_tree"]["message_tree_nodes"][string];
-
-const convertConversationTree = (
-    response: ConversationDetailTreeResponse,
-): ConversationTreeState => {
-    const messagesById = new Map<string, Message>();
-    const childrenByParent = new Map<string, string[]>();
-
-    const addNode = (node: ConversationTreeNode): void => {
-        const { message, message_tree_nodes: messageTreeNodes } = node;
-        const messageId = message.id;
-        messagesById.set(messageId, {
-            id: messageId,
-            role: message.role,
-            content: getDisplayContent(message),
-            createdAt: new Date(message.created_at).getTime(),
-            parentId: message.parent_id ?? undefined,
-            guardrailsBlocked: message.guardrails_blocked ?? false,
-            guardrailsBlockedMessage: message.guardrails_blocked_message ?? undefined,
-        });
-
-        const childIds = messageTreeNodes.map((child) => child.message.id);
-        if (childIds.length > 0) {
-            childrenByParent.set(messageId, childIds);
-        }
-
-        for (const child of messageTreeNodes) {
-            addNode(child);
-        }
-    };
-
-    const { conversation_tree: conversationTree } = response;
-
-    for (const rootNode of Object.values(conversationTree.message_tree_nodes)) {
-        addNode(rootNode);
-    }
-
-    for (const [parentId, childIds] of childrenByParent.entries()) {
-        const sorted = childIds.toSorted((left, right) => {
-            const leftMessage = messagesById.get(left);
-            const rightMessage = messagesById.get(right);
-            const leftTime = leftMessage?.createdAt ?? 0;
-            const rightTime = rightMessage?.createdAt ?? 0;
-            return leftTime - rightTime;
-        });
-        childrenByParent.set(parentId, sorted);
-    }
-
-    return {
-        messagesById,
-        childrenByParent,
-        currentBranchPath: conversationTree.current_branch_path,
+        parentMessageId: response.messages.at(-1)?.id,
     };
 };
 
@@ -405,8 +360,7 @@ const createInitialChatState = (): ChatState => ({
     chatsLoaded: false,
     chatsError: undefined,
 
-    conversationTrees: new Map(),
-    conversationTreeLoading: new Set(),
+    conversationTreeResults: new Map(),
 
     messageFeedback: new Map(),
     messageFeedbackLoading: new Set(),
@@ -430,6 +384,25 @@ const createChatActions = (
     options: ChatStoreOptions = {},
 ): ChatActions => {
     const collectionKind = options.collectionKind ?? "chat";
+    const authorSource =
+        collectionKind === "investigation" ? "investigate" : "chat";
+    const chatDetailRequests = createLatestRequestCoordinator();
+    const messageStreamRequests = createActiveRequestTracker();
+    const conversationTreeRequests = new Map<
+        string,
+        LatestRequestCoordinator
+    >();
+    const getConversationTreeRequests = (
+        chatId: string,
+    ): LatestRequestCoordinator => {
+        const existing = conversationTreeRequests.get(chatId);
+        if (existing !== undefined) {
+            return existing;
+        }
+        const coordinator = createLatestRequestCoordinator();
+        conversationTreeRequests.set(chatId, coordinator);
+        return coordinator;
+    };
     const getStoredToolCallsForMessage = (
         messageId: string,
     ): Message["assistantToolCalls"] | undefined => {
@@ -494,7 +467,15 @@ const createChatActions = (
         chatId: string,
         detail: ChatDetailResponse,
     ): void => {
-        const { messages, parentMessageId } = convertServerMessages(detail);
+        const converted = convertServerMessages(detail);
+        const hasPendingGeneration =
+            detail.has_pending_generation_attempt === true;
+        const messages = hasPendingGeneration
+            ? [
+                  ...converted.messages,
+                  createErrorMessage(GENERATION_PENDING_MESSAGE),
+              ]
+            : converted.messages;
 
         const nextMessageFeedback = new Map(get().messageFeedback);
         for (const message of detail.messages) {
@@ -511,6 +492,7 @@ const createChatActions = (
             lastMessagePreview: chat?.lastMessagePreview,
             updatedAt: new Date(detail.updated_at).getTime(),
             isPublic: detail.is_public,
+            promptSource: detail.prompt_source ?? undefined,
             userName: detail.user_name ?? undefined,
             userEmail: detail.user_email ?? undefined,
             investigationSourceConversationId:
@@ -520,7 +502,8 @@ const createChatActions = (
             investigationSourceFeedbackId:
                 detail.investigation_source_feedback_id ?? undefined,
             messages,
-            parentMessageId,
+            parentMessageId: converted.parentMessageId,
+            hasPendingGeneration,
             isLoading: false,
             hasUnread: false,
             loadingActivity: [],
@@ -529,8 +512,48 @@ const createChatActions = (
         set({
             chats: newChats,
             messageFeedback: nextMessageFeedback,
-            currentSummary: detail.summary ?? undefined,
+            ...(get().currentChatId === chatId
+                ? { currentSummary: detail.summary ?? undefined }
+                : {}),
         });
+    };
+
+    const clearConversationTreeState = (chatId: string): void => {
+        const results = new Map(get().conversationTreeResults);
+        results.delete(chatId);
+        set({ conversationTreeResults: results });
+    };
+
+    const fetchAndApplyConversationTree = async (
+        chatId: string,
+    ): Promise<void> => {
+        if (chatId.startsWith("__temp_")) {
+            return;
+        }
+
+        const requests = getConversationTreeRequests(chatId);
+        const requestResult = await requests
+            .run(async () =>
+                convertConversationTree(
+                    await fetchConversationTree(api, chatId, {
+                        source: authorSource,
+                    }),
+                ),
+            )
+            .catch((error: unknown) => {
+                const results = new Map(get().conversationTreeResults);
+                results.set(chatId, {
+                    error: CONVERSATION_BRANCH_LOAD_ERROR,
+                });
+                set({ conversationTreeResults: results });
+                throw error;
+            });
+        if (requestResult.status === "stale") {
+            return;
+        }
+        const results = new Map(get().conversationTreeResults);
+        results.set(chatId, { tree: requestResult.value });
+        set({ conversationTreeResults: results });
     };
 
     return {
@@ -539,11 +562,7 @@ const createChatActions = (
 
             try {
                 const items = await fetchChats(api, collectionKind);
-                const chats = new Map<string, Chat>();
-
-                for (const item of items) {
-                    chats.set(item.id, convertServerChat(item));
-                }
+                const chats = mergeChatListItems(items, get().chats);
 
                 set({
                     chats,
@@ -560,6 +579,7 @@ const createChatActions = (
 
         selectChat: async (chatId?: string): Promise<void> => {
             const { chats } = get();
+            chatDetailRequests.invalidate();
 
             if (chatId === undefined) {
                 set({
@@ -578,7 +598,7 @@ const createChatActions = (
             set({ currentChatId: chatId });
             get().markCurrentAsRead();
 
-            if (!get().conversationTrees.has(chatId)) {
+            if (!get().conversationTreeResults.has(chatId)) {
                 void get().loadConversationTree(chatId);
             }
 
@@ -589,71 +609,40 @@ const createChatActions = (
             }
 
             try {
-                const detail = await fetchChatDetail(api, chatId, {
-                    source: collectionKind === "investigation" ? "investigate" : "chat",
-                });
-                applyChatDetail(chatId, detail);
+                const result = await chatDetailRequests.run(async () =>
+                    fetchChatDetail(api, chatId, { source: authorSource }),
+                );
+                if (result.status === "current") {
+                    applyChatDetail(chatId, result.value);
+                }
             } catch (error) {
                 logger.error("Failed to load chat detail:", error);
             }
         },
 
-        reloadChat: async (chatId: string): Promise<void> => {
-            if (chatId.startsWith("__temp_")) {
-                return;
-            }
-
-            try {
-                const detail = await fetchChatDetail(api, chatId, {
-                    source: collectionKind === "investigation" ? "investigate" : "chat",
-                });
-                applyChatDetail(chatId, detail);
-            } catch (error) {
-                logger.error("Failed to reload chat detail:", error);
-            }
-        },
-
         loadConversationTree: async (chatId: string): Promise<void> => {
-            if (chatId.startsWith("__temp_")) {
-                return;
-            }
-
-            const state = get();
-            if (state.conversationTreeLoading.has(chatId)) {
-                return;
-            }
-
-            const loading = new Set(state.conversationTreeLoading);
-            loading.add(chatId);
-            set({ conversationTreeLoading: loading });
-
+            clearConversationTreeState(chatId);
             try {
-                const detail = await fetchConversationTree(api, chatId);
-                const tree = convertConversationTree(detail);
-                const nextTrees = new Map(get().conversationTrees);
-                nextTrees.set(chatId, tree);
-                set({ conversationTrees: nextTrees });
+                await fetchAndApplyConversationTree(chatId);
             } catch (error) {
                 logger.error("Failed to load conversation tree:", error);
-            } finally {
-                const nextLoading = new Set(get().conversationTreeLoading);
-                nextLoading.delete(chatId);
-                set({ conversationTreeLoading: nextLoading });
             }
         },
 
-        setActiveChild: async (
+        setActiveBranch: async (
             chatId: string,
             messageId: string,
-            activeChildId: string,
         ): Promise<void> => {
+            chatDetailRequests.invalidate();
+            getConversationTreeRequests(chatId).invalidate();
+
             try {
-                await apiUpdateMessageActiveChild(
+                const detail = await apiUpdateConversationActiveBranch(
                     api,
+                    chatId,
                     messageId,
-                    activeChildId,
                 );
-                await get().reloadChat(chatId);
+                applyChatDetail(chatId, detail);
                 await get().loadConversationTree(chatId);
             } catch (error) {
                 logger.error("Failed to switch branch:", error);
@@ -662,23 +651,50 @@ const createChatActions = (
         },
 
         clearCurrentChat: (): void => {
+            chatDetailRequests.invalidate();
             set({ currentChatId: undefined, currentSummary: undefined });
+        },
+
+        abortChat: (chatId?: string): void => {
+            const targetChatId = chatId ?? get().currentChatId;
+            if (targetChatId === undefined) {
+                return;
+            }
+
+            messageStreamRequests.invalidate(targetChatId);
+            const controller = get().abortControllers.get(targetChatId);
+            if (controller !== undefined) {
+                controller.abort();
+            }
+
+            const nextControllers = new Map(get().abortControllers);
+            nextControllers.delete(targetChatId);
+            set({ abortControllers: nextControllers });
+
+            get().updateChat(targetChatId, (chat) => ({
+                ...chat,
+                isLoading: false,
+                loadingActivity: [],
+            }));
         },
 
         sendMessage: async (
             content: string,
             modelOverrides?: ModelOverrides,
-            options?: {
-                parentMessageId?: string;
-                isRegeneration?: boolean;
-                trimToMessageId?: string;
-            },
+            options?: MessageSendOptions,
         ): Promise<void> => {
             const { currentChatId, chats, abortControllers } = get();
+            if (
+                currentChatId !== undefined &&
+                chats.get(currentChatId)?.hasPendingGeneration === true
+            ) {
+                return;
+            }
 
             const isRegeneration = options?.isRegeneration === true;
             const trimToMessageId = options?.trimToMessageId;
             const overrideParentMessageId = options?.parentMessageId;
+            const draftPromptTemplates = options?.draftPromptTemplates;
 
             const isNewChat = currentChatId === undefined;
             const targetId = currentChatId ?? generateTempId();
@@ -687,11 +703,24 @@ const createChatActions = (
                 return;
             }
 
-            const inferredParentMessageId = isNewChat
+            // Ownership outlives the primary answer so late errors from this
+            // stream cannot clobber a follow-up turn that starts meanwhile.
+            const streamRequest = messageStreamRequests.start(targetId);
+            const requestParentMessageId = isNewChat
                 ? undefined
-                : (overrideParentMessageId ??
-                  get().chats.get(targetId)?.parentMessageId ??
-                  undefined);
+                : overrideParentMessageId === undefined
+                  ? get().chats.get(targetId)?.parentMessageId
+                  : overrideParentMessageId;
+            const inferredParentMessageId = requestParentMessageId ?? undefined;
+            const generationAttemptId = crypto.randomUUID();
+            const retryRequest = createMessageRetryRequest({
+                content,
+                modelOverrides,
+                parentMessageId: requestParentMessageId,
+                isRegeneration,
+                trimToMessageId,
+                draftPromptTemplates,
+            });
 
             const existingController = abortControllers.get(targetId);
             if (existingController) {
@@ -712,19 +741,6 @@ const createChatActions = (
                 parentId: inferredParentMessageId,
             };
 
-            const trimMessages = (messages: Message[]): Message[] => {
-                if (trimToMessageId === undefined) {
-                    return messages;
-                }
-                const trimIndex = messages.findIndex(
-                    (message) => message.id === trimToMessageId,
-                );
-                if (trimIndex === -1) {
-                    return messages;
-                }
-                return messages.slice(0, trimIndex + 1);
-            };
-
             const newChats = new Map(chats);
 
             if (isNewChat) {
@@ -735,6 +751,10 @@ const createChatActions = (
                     lastMessagePreview: undefined,
                     updatedAt: Date.now(),
                     isPublic: false,
+                    promptSource:
+                        draftPromptTemplates === undefined
+                            ? undefined
+                            : "draft",
                     messages: [userMessage],
                     isLoading: true,
                     hasUnread: false,
@@ -750,7 +770,10 @@ const createChatActions = (
             } else {
                 const existing = newChats.get(targetId);
                 if (existing) {
-                    const trimmedMessages = trimMessages(existing.messages);
+                    const trimmedMessages = trimMessagesToMessageId(
+                        existing.messages,
+                        trimToMessageId,
+                    );
                     const nextMessages = isRegeneration
                         ? trimmedMessages
                         : [...trimmedMessages, userMessage];
@@ -768,10 +791,69 @@ const createChatActions = (
                 }
             }
 
-            // These variables are set in callbacks but TypeScript control flow doesn't track this
-            // Start with the optimistic (local) id, then replace it if the API returns a real id.
+            // This is set in a callback, which TypeScript control flow does not track.
+            // Start with the optimistic id, then replace it when the API returns the real id.
             let realChatId = targetId;
-            let newParentMessageId = "";
+
+            const adoptRealChatId = (
+                chatId: string,
+                chatTitle?: string,
+            ): boolean => {
+                if (!streamRequest.isCurrent()) {
+                    return false;
+                }
+                if (!streamRequest.moveTo(chatId)) {
+                    return false;
+                }
+                realChatId = chatId;
+
+                if (isNewChat && chatId !== targetId) {
+                    const currentChats = get().chats;
+                    const tempChat = currentChats.get(targetId);
+                    if (tempChat === undefined) {
+                        return false;
+                    }
+
+                    const updatedChats = new Map(currentChats);
+                    updatedChats.delete(targetId);
+                    updatedChats.set(chatId, {
+                        ...tempChat,
+                        id: chatId,
+                        title: chatTitle ?? tempChat.title,
+                    });
+
+                    const controllers = get().abortControllers;
+                    const controller = controllers.get(targetId);
+                    if (controller !== undefined) {
+                        const nextControllers = new Map(controllers);
+                        nextControllers.delete(targetId);
+                        nextControllers.set(chatId, controller);
+                        set({ abortControllers: nextControllers });
+                    }
+
+                    const { drafts } = get();
+                    const tempDraft = drafts.get(targetId);
+                    if (tempDraft !== undefined) {
+                        const nextDrafts = new Map(drafts);
+                        nextDrafts.delete(targetId);
+                        nextDrafts.set(chatId, tempDraft);
+                        set({ drafts: nextDrafts });
+                    }
+
+                    set({
+                        chats: updatedChats,
+                        ...(get().currentChatId === targetId
+                            ? { currentChatId: chatId }
+                            : {}),
+                    });
+                } else if (chatTitle !== undefined) {
+                    get().updateChat(chatId, (chat) => ({
+                        ...chat,
+                        title: chatTitle,
+                    }));
+                }
+                return true;
+            };
 
             const clearCurrentAbortController = (): void => {
                 const controllers = get().abortControllers;
@@ -785,6 +867,90 @@ const createChatActions = (
                     set({ abortControllers: newControllers });
                 }
             };
+
+            const appendGenerationError = (
+                content: string,
+                retry?: MessageRetryRequest,
+                hasPendingGeneration = false,
+            ): void => {
+                const finalChatId = realChatId;
+                const errorMessage = createErrorMessage(content, retry);
+                get().updateChat(finalChatId, (chat) => ({
+                    ...chat,
+                    messages: [...chat.messages, errorMessage],
+                    isLoading: false,
+                    hasPendingGeneration,
+                    loadingActivity: [],
+                    hasUnread: get().currentChatId !== finalChatId,
+                }));
+            };
+
+            const applyReconciledDetail = (
+                detail: ChatDetailResponse,
+            ): void => {
+                if (!streamRequest.isCurrent()) {
+                    return;
+                }
+                applyChatDetail(realChatId, detail);
+                clearCurrentAbortController();
+                void get().loadConversationTree(realChatId);
+            };
+
+            const reconcileUnknownOutcome = async (): Promise<void> => {
+                if (!streamRequest.isCurrent()) {
+                    return;
+                }
+
+                const reconciliation = await reconcileGenerationAttempt(
+                    async () =>
+                        fetchGenerationAttempt(api, generationAttemptId),
+                    async (conversationId, assistantMessageId) =>
+                        fetchChatDetail(api, conversationId, {
+                            source: authorSource,
+                            targetMessageId: assistantMessageId,
+                        }),
+                );
+                if (!streamRequest.isCurrent()) {
+                    return;
+                }
+                if (
+                    reconciliation.conversationId !== undefined &&
+                    !adoptRealChatId(reconciliation.conversationId)
+                ) {
+                    return;
+                }
+
+                if (reconciliation.status === "recovered") {
+                    applyReconciledDetail(reconciliation.detail);
+                    return;
+                }
+                if (reconciliation.status === "retryable") {
+                    appendGenerationError(
+                        GENERATION_FAILED_MESSAGE,
+                        retryRequest,
+                    );
+                    return;
+                }
+                if (reconciliation.status === "pending") {
+                    appendGenerationError(
+                        GENERATION_PENDING_MESSAGE,
+                        undefined,
+                        true,
+                    );
+                    return;
+                }
+                logger.debug(
+                    "Could not reconcile a failed message stream",
+                    reconciliation.error,
+                );
+                appendGenerationError(
+                    UNKNOWN_RESPONSE_OUTCOME_MESSAGE,
+                    undefined,
+                    true,
+                );
+            };
+
+            let primaryOutcome: PrimaryMessageStreamOutcome = "pending";
 
             const getActivityItem = (
                 chatId: string,
@@ -867,77 +1033,21 @@ const createChatActions = (
             const thinkingLogIds = new Map<string, string>();
 
             try {
-                const parentMessageId = inferredParentMessageId;
-
                 await apiSendMessageStream(
                     api,
                     {
                         userMessage: content,
+                        generationAttemptId,
                         chatId: isNewChat ? undefined : currentChatId,
-                        parentMessageId,
+                        parentMessageId: requestParentMessageId,
                         modelOverrides,
                         isRegeneration,
                         conversationKind: collectionKind,
+                        draftPromptTemplates,
                     },
                     {
-                        onChatId: (chatId, parentMsgId, chatTitle) => {
-                            realChatId = chatId;
-                            newParentMessageId = parentMsgId ?? "";
-
-                            if (isNewChat && chatId !== targetId) {
-                                const currentChats = get().chats;
-                                const tempChat = currentChats.get(targetId);
-
-                                if (tempChat) {
-                                    const updatedChats = new Map(currentChats);
-                                    updatedChats.delete(targetId);
-                                    updatedChats.set(chatId, {
-                                        ...tempChat,
-                                        id: chatId,
-                                        title: chatTitle ?? tempChat.title,
-                                    });
-
-                                    const controllers = get().abortControllers;
-                                    const controller =
-                                        controllers.get(targetId);
-                                    if (controller) {
-                                        const newControllers = new Map(
-                                            controllers,
-                                        );
-                                        newControllers.delete(targetId);
-                                        newControllers.set(chatId, controller);
-                                        set({
-                                            abortControllers: newControllers,
-                                        });
-                                    }
-
-                                    const { drafts } = get();
-                                    const tempDraft = drafts.get(targetId);
-                                    if (tempDraft !== undefined) {
-                                        const newDrafts = new Map(drafts);
-                                        newDrafts.delete(targetId);
-                                        newDrafts.set(chatId, tempDraft);
-                                        set({ drafts: newDrafts });
-                                    }
-
-                                    const currentId = get().currentChatId;
-                                    if (currentId === targetId) {
-                                        set({
-                                            chats: updatedChats,
-                                            currentChatId: chatId,
-                                        });
-                                    } else {
-                                        set({
-                                            chats: updatedChats,
-                                        });
-                                    }
-                                }
-                            } else if (chatTitle !== undefined) {
-                                get().updateChat(chatId, (chat) => ({
-                                    ...chat,
-                                    title: chatTitle,
-                                }));
-                            }
+                        onChatId: (chatId, chatTitle) => {
+                            adoptRealChatId(chatId, chatTitle);
                         },
 
                         onTitleUpdate: (chatId, title, stage) => {
@@ -949,6 +1059,9 @@ const createChatActions = (
                         },
 
                         onAgentStage: (event) => {
+                            if (!streamRequest.isCurrent()) {
+                                return;
+                            }
                             const label = AGENT_STAGE_LABELS[event.stage];
                             const activityId =
                                 event.iteration === undefined
@@ -989,6 +1102,9 @@ const createChatActions = (
                         },
 
                         onToolCall: (event) => {
+                            if (!streamRequest.isCurrent()) {
+                                return;
+                            }
                             const activityId = `tool:${event.toolCallId}`;
                             const existing = getActivityItem(
                                 event.chatId,
@@ -1035,6 +1151,9 @@ const createChatActions = (
                             };
 
                             const applyUpdate = (): void => {
+                                if (!streamRequest.isCurrent()) {
+                                    return;
+                                }
                                 upsertLoadingActivity(event.chatId, nextItem);
                                 upsertActivityLog(event.chatId, {
                                     id: activityId,
@@ -1079,6 +1198,9 @@ const createChatActions = (
                         },
 
                         onThinking: (event) => {
+                            if (!streamRequest.isCurrent()) {
+                                return;
+                            }
                             const activityId = `thinking:${event.thinkingId}`;
                             const existing = getActivityItem(
                                 event.chatId,
@@ -1159,6 +1281,13 @@ const createChatActions = (
                             groundingSourcesUsed,
                             groundingSourceStatus,
                         }) => {
+                            if (!streamRequest.isCurrent()) {
+                                return;
+                            }
+                            primaryOutcome = recordPrimaryMessageStreamOutcome(
+                                primaryOutcome,
+                                "assistant",
+                            );
                             const finalChatId = realChatId;
                             const activeChat = get().chats.get(finalChatId);
                             if (
@@ -1204,20 +1333,17 @@ const createChatActions = (
                                 groundingSourceStatus,
                             };
 
-                            if (newParentMessageId === "") {
-                                newParentMessageId = assistantMessageId;
-                            }
-
                             get().updateChat(finalChatId, (chat) => ({
                                 ...chat,
                                 messages: [...chat.messages, assistantMessage],
                                 isLoading: false,
+                                hasPendingGeneration: false,
                                 hasUnread: get().currentChatId !== finalChatId,
                                 lastMessagePreview: truncate(
                                     messageContent,
                                     50,
                                 ),
-                                parentMessageId: newParentMessageId,
+                                parentMessageId: assistantMessageId,
                                 updatedAt: Date.now(),
                             }));
 
@@ -1249,6 +1375,8 @@ const createChatActions = (
                             void get().loadConversationTree(finalChatId);
                         },
 
+                        // Grounding is message-scoped, so an older stream may
+                        // safely patch its own assistant message.
                         onGroundingSources: ({
                             assistantMessageId,
                             groundingSourcesUsed,
@@ -1269,15 +1397,27 @@ const createChatActions = (
                             }));
                         },
 
-                        onError: (errorMessage) => {
-                            const finalChatId = realChatId;
-                            const errorMsg = createErrorMessage(errorMessage);
-                            get().updateChat(finalChatId, (chat) => ({
-                                ...chat,
-                                messages: [...chat.messages, errorMsg],
-                                isLoading: false,
-                                hasUnread: get().currentChatId !== finalChatId,
-                            }));
+                        onError: (streamError) => {
+                            if (!streamRequest.isCurrent()) {
+                                logger.debug(
+                                    "Ignoring error from superseded message stream",
+                                    streamError.code,
+                                );
+                                return;
+                            }
+                            primaryOutcome = recordPrimaryMessageStreamOutcome(
+                                primaryOutcome,
+                                "generation_failure",
+                            );
+                            appendGenerationError(
+                                streamError.retryable
+                                    ? GENERATION_FAILED_MESSAGE
+                                    : UNKNOWN_RESPONSE_OUTCOME_MESSAGE,
+                                streamError.retryable
+                                    ? retryRequest
+                                    : undefined,
+                                !streamError.retryable,
+                            );
                         },
                     },
                     abortController.signal,
@@ -1288,19 +1428,112 @@ const createChatActions = (
                 if (!isAbortError) {
                     logger.error("Error sending message:", error);
 
-                    const finalChatId = realChatId;
-                    const errorMsg = createErrorMessage(
-                        "Sorry, I encountered an error processing your request. Please try again.",
-                    );
-                    get().updateChat(finalChatId, (chat) => ({
-                        ...chat,
-                        messages: [...chat.messages, errorMsg],
-                        isLoading: false,
-                        hasUnread: get().currentChatId !== finalChatId,
-                    }));
+                    if (primaryOutcome === "pending") {
+                        await reconcileUnknownOutcome();
+                    }
                 }
             } finally {
                 clearCurrentAbortController();
+                streamRequest.finish();
+            }
+        },
+
+        retryMessage: async (errorMessageId: string): Promise<void> => {
+            const chatId = get().currentChatId;
+            const retryRequest =
+                chatId === undefined
+                    ? undefined
+                    : get()
+                          .chats.get(chatId)
+                          ?.messages.find(
+                              (message) => message.id === errorMessageId,
+                          )?.retryRequest;
+            if (chatId === undefined || retryRequest === undefined) {
+                return;
+            }
+
+            if (chatId.startsWith("__temp_")) {
+                const chats = new Map(get().chats);
+                chats.delete(chatId);
+                const drafts = new Map(get().drafts);
+                drafts.delete(chatId);
+                const abortControllers = new Map(get().abortControllers);
+                abortControllers.delete(chatId);
+                set({
+                    chats,
+                    drafts,
+                    abortControllers,
+                    currentChatId: undefined,
+                    currentSummary: undefined,
+                });
+            }
+
+            await get().sendMessage(
+                retryRequest.content,
+                retryRequest.modelOverrides,
+                retryRequest.options,
+            );
+        },
+
+        retryGroundingSources: async (messageId: string): Promise<void> => {
+            const chatId = get().currentChatId;
+            const targetMessage =
+                chatId === undefined
+                    ? undefined
+                    : get()
+                          .chats.get(chatId)
+                          ?.messages.find(
+                              (message) => message.id === messageId,
+                          );
+            if (
+                chatId === undefined ||
+                targetMessage?.groundingSourceStatus !== "failed"
+            ) {
+                return;
+            }
+
+            const updateGrounding = (
+                groundingSourceStatus: Message["groundingSourceStatus"],
+                groundingSourcesUsed: Message["groundingSourcesUsed"],
+                options?: { onlyWhilePending?: boolean },
+            ): void => {
+                get().updateChat(chatId, (chat) => ({
+                    ...chat,
+                    messages: chat.messages.map((message) => {
+                        if (
+                            message.id !== messageId ||
+                            (options?.onlyWhilePending === true &&
+                                message.groundingSourceStatus !== "pending")
+                        ) {
+                            return message;
+                        }
+                        return {
+                            ...message,
+                            groundingSourcesUsed,
+                            groundingSourceStatus,
+                        };
+                    }),
+                }));
+            };
+
+            updateGrounding("pending", []);
+            try {
+                const response = await apiRetryGroundingSources(api, messageId);
+                if (response.assistant_message_id !== messageId) {
+                    throw new TypeError(
+                        "Grounding retry returned a different assistant message",
+                    );
+                }
+                updateGrounding(
+                    response.grounding_source_status,
+                    response.grounding_sources_used,
+                );
+                if (response.grounding_source_status === "failed") {
+                    throw new Error("Source check failed");
+                }
+            } catch (error) {
+                updateGrounding("failed", [], { onlyWhilePending: true });
+                throw error;
             }
         },
 
@@ -1314,19 +1547,21 @@ const createChatActions = (
             const newDrafts = new Map(drafts);
             newDrafts.delete(chatId);
 
-            const newTrees = new Map(get().conversationTrees);
-            newTrees.delete(chatId);
-
-            const nextTreeLoading = new Set(get().conversationTreeLoading);
-            nextTreeLoading.delete(chatId);
+            const conversationTreeResults = new Map(
+                get().conversationTreeResults,
+            );
+            conversationTreeResults.delete(chatId);
+            const treeRequests = conversationTreeRequests.get(chatId);
+            treeRequests?.invalidate();
+            conversationTreeRequests.delete(chatId);
             set({
                 chats: newChats,
                 drafts: newDrafts,
-                conversationTrees: newTrees,
-                conversationTreeLoading: nextTreeLoading,
+                conversationTreeResults,
             });
 
             if (currentChatId === chatId) {
+                chatDetailRequests.invalidate();
                 set({
                     currentChatId: undefined,
                     currentSummary: undefined,

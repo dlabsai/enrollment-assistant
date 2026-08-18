@@ -2,7 +2,7 @@ name: demo-va
 
 services:
   db:
-    image: pgvector/pgvector:pg17
+    image: pgvector/pgvector:pg18
     restart: always
     healthcheck:
       test: [ "CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}" ]
@@ -13,17 +13,16 @@ services:
     env_file:
       - .env
     environment:
-      - PGDATA=/var/lib/postgresql/data/pgdata
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD?Variable not set}
       - POSTGRES_USER=${POSTGRES_USER?Variable not set}
       - POSTGRES_DB=${POSTGRES_DB?Variable not set}
     ports:
       - 5432:5432
     volumes:
-      - postgres-data:/var/lib/postgresql/data/pgdata
+      - postgres-data:/var/lib/postgresql
 
   ensure-test-db:
-    image: pgvector/pgvector:pg17
+    image: pgvector/pgvector:pg18
     depends_on:
       db:
         condition: service_healthy
@@ -99,6 +98,7 @@ services:
       - POSTGRES_DB=${POSTGRES_DB}
       - POSTGRES_USER=${POSTGRES_USER?Variable not set}
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD?Variable not set}
+      - WEB_CONCURRENCY=${WEB_CONCURRENCY:-2}
       - SCHEDULER=false
     build:
       context: ./backend

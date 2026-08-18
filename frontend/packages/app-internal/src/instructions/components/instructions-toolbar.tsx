@@ -14,12 +14,6 @@ import {
 } from "@va/shared/components/ui/sheet";
 import { useSidebar } from "@va/shared/components/ui/sidebar";
 import {
-    Tooltip,
-    TooltipContent,
-    TooltipProvider,
-    TooltipTrigger,
-} from "@va/shared/components/ui/tooltip";
-import {
     GitCompareArrows,
     Menu,
     MessageSquareText,
@@ -30,19 +24,19 @@ import {
 } from "lucide-react";
 import { type JSX, useMemo } from "react";
 
+import { HelpButton } from "../../components/help-dialog";
 import {
     useInstructionsActions,
     useInstructionsStore,
 } from "../contexts/instructions-store-context";
 import { isAssistantSectionId } from "../lib/sections";
-import { HelpButton } from "./help-guide";
 import { InstructionsSidebar } from "./instructions-sidebar";
 import { SaveDialog } from "./save-panel";
 import { StatusBadges } from "./status-badges";
 
 const DEFAULT_VERSION_OPTION = "default";
 
-export const EditorToolbar = (): JSX.Element | undefined => {
+export const InstructionsToolbar = (): JSX.Element | undefined => {
     const selectedTemplate = useInstructionsStore(
         (state) => state.selectedTemplate,
     );
@@ -93,6 +87,7 @@ export const EditorToolbar = (): JSX.Element | undefined => {
         undeployVersion,
         requestDeleteVersion,
         toggleChatPanel,
+        showGuidePanel,
     } = useInstructionsActions();
 
     const selectedVersion = versions.find(
@@ -143,24 +138,24 @@ export const EditorToolbar = (): JSX.Element | undefined => {
                 <Button
                     className="md:hidden"
                     onClick={toggleSidebar}
-                    size="icon-sm"
+                    size="sm"
                     type="button"
                     variant="outline"
                 >
-                    <PanelLeft />
-                    <span className="sr-only">Open sidebar</span>
+                    <PanelLeft data-icon="inline-start" />
+                    Sidebar
                 </Button>
                 <Sheet>
                     <SheetTrigger
                         render={
                             <Button
                                 className="md:hidden"
-                                size="icon-sm"
+                                size="sm"
                                 type="button"
                                 variant="outline"
                             >
-                                <Menu />
-                                <span className="sr-only">Open navigation</span>
+                                <Menu data-icon="inline-start" />
+                                Navigation
                             </Button>
                         }
                     />
@@ -187,7 +182,7 @@ export const EditorToolbar = (): JSX.Element | undefined => {
                         value={versionValue}
                     >
                         <SelectTrigger className="w-48">
-                            <SelectValue placeholder="Select version">
+                            <SelectValue placeholder="Select saved version">
                                 {selectedVersionLabel}
                             </SelectValue>
                         </SelectTrigger>
@@ -234,7 +229,7 @@ export const EditorToolbar = (): JSX.Element | undefined => {
                         variant="outline"
                     >
                         <Rocket data-icon="inline-start" />
-                        Deploy
+                        Revert to Default
                     </Button>
                 )}
                 {showVersionControls &&
@@ -253,49 +248,25 @@ export const EditorToolbar = (): JSX.Element | undefined => {
                         </Button>
                     )}
                 {selectedTemplate !== undefined && (
-                    <TooltipProvider>
-                        <Tooltip>
-                            <TooltipTrigger
-                                render={
-                                    <Button
-                                        disabled={!isModified}
-                                        onClick={toggleDiff}
-                                        size="icon-sm"
-                                        variant={
-                                            showDiff ? "secondary" : "outline"
-                                        }
-                                    >
-                                        <GitCompareArrows />
-                                    </Button>
-                                }
-                            />
-                            <TooltipContent>
-                                {showDiff ? "Hide" : "Show"} diff
-                            </TooltipContent>
-                        </Tooltip>
-                    </TooltipProvider>
+                    <Button
+                        disabled={!isModified && !showDiff}
+                        onClick={toggleDiff}
+                        size="sm"
+                        variant={showDiff ? "secondary" : "outline"}
+                    >
+                        <GitCompareArrows data-icon="inline-start" />
+                        {showDiff ? "Hide diff" : "Show diff"}
+                    </Button>
                 )}
                 {selectedTemplate !== undefined && (
-                    <TooltipProvider>
-                        <Tooltip>
-                            <TooltipTrigger
-                                render={
-                                    <Button
-                                        onClick={toggleWrapLines}
-                                        size="icon-sm"
-                                        variant={
-                                            wrapLines ? "secondary" : "outline"
-                                        }
-                                    >
-                                        <WrapText />
-                                    </Button>
-                                }
-                            />
-                            <TooltipContent>
-                                {wrapLines ? "Disable" : "Enable"} line wrapping
-                            </TooltipContent>
-                        </Tooltip>
-                    </TooltipProvider>
+                    <Button
+                        onClick={toggleWrapLines}
+                        size="sm"
+                        variant={wrapLines ? "secondary" : "outline"}
+                    >
+                        <WrapText data-icon="inline-start" />
+                        {wrapLines ? "Disable wrap" : "Enable wrap"}
+                    </Button>
                 )}
                 {selectedTemplate !== undefined && isModified && (
                     <Button
@@ -308,28 +279,14 @@ export const EditorToolbar = (): JSX.Element | undefined => {
                 )}
                 <SaveDialog />
                 {showTestChatToggle && (
-                    <TooltipProvider>
-                        <Tooltip>
-                            <TooltipTrigger
-                                render={
-                                    <Button
-                                        onClick={toggleChatPanel}
-                                        size="icon-sm"
-                                        variant={
-                                            isChatPanelOpen
-                                                ? "secondary"
-                                                : "outline"
-                                        }
-                                    >
-                                        <MessageSquareText />
-                                    </Button>
-                                }
-                            />
-                            <TooltipContent>
-                                {isChatPanelOpen ? "Hide" : "Show"} test chat
-                            </TooltipContent>
-                        </Tooltip>
-                    </TooltipProvider>
+                    <Button
+                        onClick={toggleChatPanel}
+                        size="sm"
+                        variant={isChatPanelOpen ? "secondary" : "outline"}
+                    >
+                        <MessageSquareText data-icon="inline-start" />
+                        {isChatPanelOpen ? "Hide test chat" : "Show test chat"}
+                    </Button>
                 )}
                 <div className="flex flex-wrap items-center gap-2 md:ml-auto">
                     {selectedTemplate === undefined &&
@@ -342,7 +299,7 @@ export const EditorToolbar = (): JSX.Element | undefined => {
                             </div>
                         )}
                     <StatusBadges />
-                    <HelpButton />
+                    <HelpButton onClick={showGuidePanel} />
                 </div>
             </div>
         </div>

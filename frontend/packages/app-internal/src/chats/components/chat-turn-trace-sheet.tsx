@@ -14,10 +14,13 @@ import {
 } from "@va/shared/components/ui/tooltip";
 import { cn } from "@va/shared/lib/utils";
 import { ExternalLink, Maximize2, Minimize2, RefreshCw } from "lucide-react";
-import { type JSX, useState } from "react";
+import type { JSX } from "react";
 
+import { TraceSheetResizeHandle } from "../../traces/components/trace-sheet-resize-handle";
 import { TraceTurnDebugView } from "../../traces/components/trace-turn-debug-view";
 import { useTraceDetailByMessage } from "../../traces/hooks/use-trace-detail-by-message";
+import { useTraceSheetPanel } from "../../traces/hooks/use-trace-sheet-panel";
+import { TRACE_SHEET_WIDTH_CLASS } from "../../traces/lib/trace-layout";
 
 interface ChatTurnTraceSheetProps {
     messageId: string | undefined;
@@ -36,12 +39,19 @@ export const ChatTurnTraceSheet = ({
     open,
     source = "chats_trace",
 }: ChatTurnTraceSheetProps): JSX.Element => {
-    const [expanded, setExpanded] = useState(false);
+    const traceSheetPanel = useTraceSheetPanel();
     const { detail, loading, error, refresh } = useTraceDetailByMessage(
         messageId,
         source,
     );
     const hasMessageId = messageId !== undefined && messageId.trim() !== "";
+
+    const handleOpenChange = (nextOpen: boolean): void => {
+        if (!nextOpen) {
+            traceSheetPanel.handleCancelResize();
+        }
+        onOpenChange(nextOpen);
+    };
 
     const openTraceInNewTab = (): void => {
         if (detail?.trace_id === undefined || detail.trace_id === "") {
@@ -53,17 +63,18 @@ export const ChatTurnTraceSheet = ({
 
     return (
         <Sheet
-            onOpenChange={onOpenChange}
+            onOpenChange={handleOpenChange}
             open={open}
         >
             <SheetContent
                 className={cn(
                     "flex flex-col gap-4 p-0",
-                    expanded
-                        ? "!w-screen !max-w-none"
-                        : "!w-[min(100vw,1200px)] !max-w-[min(100vw,1200px)]",
+                    TRACE_SHEET_WIDTH_CLASS,
+                    traceSheetPanel.isResizing &&
+                        "select-none !transition-none",
                 )}
                 initialFocus={false}
+                style={traceSheetPanel.panelStyle}
             >
                 <SheetHeader className="border-b px-4 py-4">
                     <div className="flex items-start justify-between gap-4">
@@ -82,20 +93,18 @@ export const ChatTurnTraceSheet = ({
                                         render={
                                             <Button
                                                 aria-label={
-                                                    expanded
+                                                    traceSheetPanel.isExpanded
                                                         ? "Collapse trace sheet"
                                                         : "Expand trace sheet"
                                                 }
-                                                onClick={() => {
-                                                    setExpanded(
-                                                        (value) => !value,
-                                                    );
-                                                }}
+                                                onClick={
+                                                    traceSheetPanel.handleToggleExpanded
+                                                }
                                                 size="icon-sm"
                                                 type="button"
                                                 variant="outline"
                                             >
-                                                {expanded ? (
+                                                {traceSheetPanel.isExpanded ? (
                                                     <Minimize2 className="size-4" />
                                                 ) : (
                                                     <Maximize2 className="size-4" />
@@ -104,7 +113,7 @@ export const ChatTurnTraceSheet = ({
                                         }
                                     />
                                     <TooltipContent>
-                                        {expanded
+                                        {traceSheetPanel.isExpanded
                                             ? "Collapse sheet"
                                             : "Expand to full viewport"}
                                     </TooltipContent>
@@ -137,9 +146,7 @@ export const ChatTurnTraceSheet = ({
                                         render={
                                             <Button
                                                 aria-label="Refresh trace"
-                                                onClick={() => {
-                                                    void refresh();
-                                                }}
+                                                onClick={refresh}
                                                 size="icon-sm"
                                                 type="button"
                                                 variant="outline"
@@ -160,10 +167,15 @@ export const ChatTurnTraceSheet = ({
                     <TraceTurnDebugView
                         detail={detail}
                         error={error}
+                        key={detail?.trace_id}
+                        layoutScope="peek"
                         loading={loading}
-                        summaryOnly
                     />
                 </div>
+                <TraceSheetResizeHandle
+                    isResizing={traceSheetPanel.isResizing}
+                    resizeHandleProps={traceSheetPanel.resizeHandleProps}
+                />
             </SheetContent>
         </Sheet>
     );

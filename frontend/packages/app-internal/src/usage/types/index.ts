@@ -40,7 +40,7 @@ export interface UsageSummary {
     avgDuration: number;
 }
 
-export interface UsageDailyApi {
+interface UsageDailyApi {
     date: string;
     requests: number;
     tokens: number;
@@ -52,14 +52,14 @@ export interface UsageDailyApi {
     avg_duration: number | null;
 }
 
-export interface UsageModelApi {
+interface UsageModelApi {
     model: string;
     requests: number;
     tokens: number;
     cost: number;
 }
 
-export interface UsageSummaryApi {
+interface UsageSummaryApi {
     total_requests: number;
     total_tokens: number;
     total_cost: number;

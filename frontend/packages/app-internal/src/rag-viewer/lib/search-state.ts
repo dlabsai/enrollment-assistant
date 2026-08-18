@@ -144,7 +144,7 @@ export const validateRagViewerSearch = (
             typeof search.exclusion === "string" &&
             isRagViewerExclusionFilter(search.exclusion)
                 ? search.exclusion
-                : "all",
+                : "included",
         sortBy:
             typeof search.sortBy === "string" && isSortBy(search.sortBy)
                 ? search.sortBy

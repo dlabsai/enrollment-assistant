@@ -1,6 +1,7 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback } from "react";
 
 import { useAuthenticatedApi } from "../../auth/hooks/use-authenticated-api";
+import { useAsyncData } from "../../lib/hooks/use-async-data";
 import type { CustomTimeRange, TimeRangeValue } from "../../lib/time-range";
 import { fetchUsageOverview, type UsagePlatformFilter } from "../lib/api";
 import type {
@@ -16,6 +17,8 @@ interface UsageDataParams {
     timeRange: TimeRangeValue;
     customRange: CustomTimeRange;
     modelFilters: string[];
+    userEmail?: string;
+    userGroup?: "staff" | "devs";
     referenceDate?: Date;
 }
 
@@ -30,7 +33,7 @@ interface UseUsageDataResult extends UsageDataState {
     loading: boolean;
     hasLoaded: boolean;
     error: string | undefined;
-    refresh: () => Promise<void>;
+    refresh: () => void;
 }
 
 const emptySummary: UsageSummary = {
@@ -90,41 +93,41 @@ export const useUsageData = ({
     timeRange,
     customRange,
     modelFilters,
+    userEmail,
+    userGroup,
     referenceDate,
 }: UsageDataParams): UseUsageDataResult => {
     const api = useAuthenticatedApi();
-    const [data, setData] = useState(emptyState);
-    const [loading, setLoading] = useState(true);
-    const [hasLoaded, setHasLoaded] = useState(false);
-    const [error, setError] = useState<string | undefined>();
-
-    const refresh = useCallback(async () => {
-        setLoading(true);
-        setError(undefined);
-        try {
-            const response = await fetchUsageOverview(api, {
-                platform,
-                timeRange,
-                customRange,
-                modelFilters,
-                referenceDate,
-            });
-            setData(mapOverviewResponse(response));
-        } catch (error_) {
-            setError(
-                error_ instanceof Error
-                    ? error_.message
-                    : "Failed to fetch usage data",
-            );
-        } finally {
-            setLoading(false);
-            setHasLoaded(true);
-        }
-    }, [api, customRange, modelFilters, platform, referenceDate, timeRange]);
-
-    useEffect(() => {
-        void refresh();
-    }, [refresh]);
+    const load = useCallback(
+        async (signal: AbortSignal): Promise<UsageDataState> =>
+            mapOverviewResponse(
+                await fetchUsageOverview(api, {
+                    platform,
+                    timeRange,
+                    customRange,
+                    modelFilters,
+                    userEmail,
+                    userGroup,
+                    referenceDate,
+                    signal,
+                }),
+            ),
+        [
+            api,
+            customRange,
+            modelFilters,
+            platform,
+            referenceDate,
+            timeRange,
+            userEmail,
+            userGroup,
+        ],
+    );
+    const { data, loading, hasLoaded, error, refresh } = useAsyncData({
+        errorMessage: "Failed to fetch usage data",
+        initialData: emptyState,
+        load,
+    });
 
     return { ...data, loading, hasLoaded, error, refresh };
 };

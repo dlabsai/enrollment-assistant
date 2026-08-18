@@ -13,7 +13,7 @@ def main() -> None:
     message = sys.argv[1] if len(sys.argv) > 1 else "auto_migration"
 
     print("Starting PostgreSQL container...")
-    with PostgresContainer("pgvector/pgvector:pg17") as postgres:
+    with PostgresContainer("pgvector/pgvector:pg18") as postgres:
         # Set environment variables for alembic
         os.environ["POSTGRES_SERVER"] = postgres.get_container_host_ip()
         os.environ["POSTGRES_PORT"] = str(postgres.get_exposed_port(5432))

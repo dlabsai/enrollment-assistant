@@ -12,6 +12,8 @@ from app.core.config import settings
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+    from app.evals.instructions import EvalInstructionsSnapshot
+
 
 class EvalSuite(StrEnum):
     """Supported chat eval suites."""
@@ -32,6 +34,7 @@ class EvalRunRequestConfig:
     max_concurrency: int = 5
     test_cases: tuple[str, ...] = ()
     case_payloads: tuple[dict[str, Any], ...] | None = None
+    instructions: EvalInstructionsSnapshot | None = None
     pass_threshold: float = 0.9
     rebuild_rag: bool = False
     chatbot_model: str | None = None
@@ -49,6 +52,7 @@ class EvalRunConfig:
     max_concurrency: int = 5
     test_cases: tuple[str, ...] = ()
     case_payloads: tuple[dict[str, Any], ...] | None = None
+    instructions: EvalInstructionsSnapshot | None = None
     pass_threshold: float = 0.9
     rebuild_rag: bool = False
     chatbot_model: str | None = None

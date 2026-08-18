@@ -22,7 +22,7 @@ from app.evals.test_db import create_test_db_engine, load_eval_database_url
 from app.models import EvalCaseResult, EvalCaseRunResult, EvalRunRecord
 from app.utils import current_time_utc
 
-_EXCLUDED_STORED_OUTPUT_FIELDS = {"retrieved_tool_context"}
+_EXCLUDED_STORED_OUTPUT_FIELDS = {"retrieved_tool_context", "system_prompt"}
 
 EvalReportSortBy = Literal[
     "audience",
@@ -101,7 +101,7 @@ def threshold_failed_case_names(
 
 def eval_run_config_payload(config: EvalRunConfig | EvalRunRequestConfig) -> dict[str, Any]:
     """Serialize eval run config for structured report storage."""
-    return {
+    payload: dict[str, Any] = {
         "suite": config.suite.value,
         "repeat": config.repeat,
         "max_concurrency": config.max_concurrency,
@@ -112,6 +112,9 @@ def eval_run_config_payload(config: EvalRunConfig | EvalRunRequestConfig) -> dic
         "guardrail_model": config.guardrail_model,
         "evaluation_model": config.evaluation_model,
     }
+    if config.instructions is not None:
+        payload["instructions"] = config.instructions.report_metadata()
+    return payload
 
 
 async def save_eval_report(
@@ -124,7 +127,7 @@ async def save_eval_report(
     log_id: str | None,
     config: Mapping[str, Any],
 ) -> EvalRunRecord:
-    """Persist an eval report as structured rows, not rendered markdown."""
+    """Persist an eval report as structured rows."""
     generated_at = current_time_utc()
     report_id = report.report_id(generated_at)
     model_configs = report.model_configs or report.models

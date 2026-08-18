@@ -8,7 +8,10 @@ from typing import Any, Literal, cast
 from pydantic import BaseModel
 
 from app.api.response_costs import cost_breakdown_from_metrics, uncached_input_tokens
+from app.api.trace_costs import span_display_costs
 from app.models import OtelSpan
+
+TraceOverviewOutcome = Literal["pass", "fail", "error"]
 
 TraceOverviewItemType = Literal[
     "agent",
@@ -35,25 +38,30 @@ class TraceOverviewItemOut(BaseModel):
     start_time: dt.datetime | None = None
     duration_ms: float | None = None
     status_code: str | None = None
+    outcome: TraceOverviewOutcome | None = None
+    failed_result_count: int = 0
     data: dict[str, Any]
 
 
 def build_trace_overview(spans: list[OtelSpan]) -> list[TraceOverviewItemOut]:
     grouped_operations = _group_tool_child_operations(spans)
     guardrail_counts = _count_guardrails_by_conversation_turn(spans)
+    costs_by_span_id = span_display_costs(spans)
 
     overview: list[TraceOverviewItemOut] = []
     for span in spans:
         if span.span_id in grouped_operations.hidden_span_ids:
             continue
-        overview.append(
-            _project_span(
-                span,
-                embedding_spans=grouped_operations.embeddings_by_tool_span_id.get(span.span_id, []),
-                guardrail_counts=guardrail_counts.get(span.span_id),
-            )
+        item = _project_span(
+            span,
+            embedding_spans=grouped_operations.embeddings_by_tool_span_id.get(span.span_id, []),
+            guardrail_counts=guardrail_counts.get(span.span_id),
         )
+        if (total_cost := costs_by_span_id.get(span.span_id)) is not None:
+            item.data["total_cost"] = total_cost
+        overview.append(item)
 
+    _annotate_trace_outcomes(overview, spans)
     return overview
 
 
@@ -67,6 +75,80 @@ class _GroupedToolOperations:
 class _GuardrailCounts:
     checks: int = 0
     failures: int = 0
+
+
+def _ancestor_span_ids(span_id: str, spans_by_id: dict[str, OtelSpan]) -> list[str]:
+    ancestor_ids: list[str] = []
+    seen = {span_id}
+    span = spans_by_id.get(span_id)
+    parent_span_id = span.parent_span_id if span is not None else None
+    while parent_span_id and parent_span_id not in seen:
+        seen.add(parent_span_id)
+        ancestor_ids.append(parent_span_id)
+        parent_span = spans_by_id.get(parent_span_id)
+        if parent_span is None:
+            break
+        parent_span_id = parent_span.parent_span_id
+    return ancestor_ids
+
+
+def _annotate_trace_outcomes(overview: list[TraceOverviewItemOut], spans: list[OtelSpan]) -> None:
+    items_by_span_id = {item.span_id: item for item in overview}
+    spans_by_id = {span.span_id: span for span in spans}
+    failed_results_by_ancestor: dict[str, int] = {}
+    evaluations_with_cases: set[str] = set()
+    error_ancestor_ids: set[str] = set()
+
+    for item in overview:
+        if item.status_code == "ERROR":
+            item.outcome = "error"
+
+        if item.type == "evaluation_result":
+            result_kind = _string_value(item.data.get("result_kind"))
+            score_label = _string_value(item.data.get("score_label"))
+            if result_kind == "assertion":
+                if score_label == "fail":
+                    item.failed_result_count = 1
+                    if item.outcome != "error":
+                        item.outcome = "fail"
+                elif score_label == "pass" and item.outcome != "error":
+                    item.outcome = "pass"
+
+            for ancestor_id in _ancestor_span_ids(item.span_id, spans_by_id):
+                ancestor = items_by_span_id.get(ancestor_id)
+                if ancestor is None or ancestor.type not in {"evaluation", "evaluation_case"}:
+                    continue
+                failed_results_by_ancestor[ancestor_id] = (
+                    failed_results_by_ancestor.get(ancestor_id, 0) + item.failed_result_count
+                )
+        elif item.type == "evaluation_case":
+            for ancestor_id in _ancestor_span_ids(item.span_id, spans_by_id):
+                ancestor = items_by_span_id.get(ancestor_id)
+                if ancestor is not None and ancestor.type == "evaluation":
+                    evaluations_with_cases.add(ancestor_id)
+
+    for span in spans:
+        if span.status_code != "ERROR":
+            continue
+        for ancestor_id in _ancestor_span_ids(span.span_id, spans_by_id):
+            ancestor = items_by_span_id.get(ancestor_id)
+            if ancestor is not None and ancestor.type in {"evaluation", "evaluation_case"}:
+                error_ancestor_ids.add(ancestor_id)
+
+    for item in overview:
+        if item.type not in {"evaluation", "evaluation_case"}:
+            continue
+        item.failed_result_count = failed_results_by_ancestor.get(item.span_id, 0)
+        if item.outcome == "error" or item.span_id in error_ancestor_ids:
+            item.outcome = "error"
+        elif item.failed_result_count > 0:
+            item.outcome = "fail"
+        elif (
+            item.type == "evaluation_case"
+            or item.span_id in evaluations_with_cases
+            or item.span_id in failed_results_by_ancestor
+        ):
+            item.outcome = "pass"
 
 
 def _group_tool_child_operations(spans: list[OtelSpan]) -> _GroupedToolOperations:
@@ -337,6 +419,24 @@ def _llm_usage_data(span: OtelSpan, attributes: dict[str, Any]) -> dict[str, Any
     }
 
 
+def _service_tier_data(span: OtelSpan, attributes: dict[str, Any]) -> dict[str, Any]:
+    return _compact(
+        {
+            "service_tier_requested": _string_value(attributes.get("openai.request.service_tier")),
+            "service_tier_applied": _string_value(attributes.get("openai.response.service_tier")),
+            "service_tier_applied_counts": _json_attribute(
+                span, attributes, "app.openai.response.service_tier.counts"
+            ),
+            "service_tier_missing_count": _json_attribute(
+                span, attributes, "app.openai.response.service_tier.missing_count"
+            ),
+            "service_tier_fallback_count": _json_attribute(
+                span, attributes, "app.openai.response.service_tier.fallback_count"
+            ),
+        }
+    )
+
+
 def _agent_item(span: OtelSpan, attributes: dict[str, Any]) -> TraceOverviewItemOut:
     agent_name = _string_value(attributes.get("gen_ai.agent.name"))
     model = _model_value(span, attributes)
@@ -357,8 +457,8 @@ def _agent_item(span: OtelSpan, attributes: dict[str, Any]) -> TraceOverviewItem
                 "provider_name": span.provider_name
                 or _string_value(attributes.get("gen_ai.provider.name")),
                 "reasoning_effort": _string_value(attributes.get("app.reasoning_effort")),
+                **_service_tier_data(span, attributes),
                 **_llm_usage_data(span, attributes),
-                "total_cost": span.total_cost,
                 "cost_breakdown": cost_breakdown_from_metrics(
                     llm_response_metrics, genai_request_timestamp=span.created_at
                 ),
@@ -389,8 +489,8 @@ def _llm_item(span: OtelSpan, attributes: dict[str, Any]) -> TraceOverviewItemOu
                 or _string_value(attributes.get("gen_ai.provider.name")),
                 "server_address": span.server_address,
                 "reasoning_effort": _string_value(attributes.get("app.reasoning_effort")),
+                **_service_tier_data(span, attributes),
                 **_llm_usage_data(span, attributes),
-                "total_cost": span.total_cost,
                 "cost_breakdown": cost_breakdown_from_metrics(
                     llm_response_metrics, genai_request_timestamp=span.created_at
                 ),

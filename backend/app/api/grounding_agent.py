@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import json
-from typing import TYPE_CHECKING, Any
+from datetime import timedelta
+from typing import TYPE_CHECKING, Any, Final, Literal
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -21,14 +22,19 @@ from app.chat.engine_utils import ModelSettings, run_agent
 from app.chat.template_utils import get_runtime_jinja_environment
 from app.core.config import settings
 from app.models import AssistantMessageMetadata, Message, PromptSetScope
+from app.utils import current_time_utc, logger
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
     from uuid import UUID
 
-GROUNDING_SOURCE_STATUS_PENDING = "pending"
-GROUNDING_SOURCE_STATUS_SELECTED = "selected"
-GROUNDING_SOURCE_STATUS_NO_SELECTION = "no_selection"
+GroundingSourceResultStatus = Literal["selected", "no_selection", "failed"]
+
+GROUNDING_SOURCE_STATUS_PENDING: Final = "pending"
+GROUNDING_SOURCE_STATUS_SELECTED: Final = "selected"
+GROUNDING_SOURCE_STATUS_NO_SELECTION: Final = "no_selection"
+GROUNDING_SOURCE_STATUS_FAILED: Final = "failed"
+GROUNDING_PENDING_STALE_AFTER: Final = timedelta(minutes=30)
 
 
 def _source_prompt_payload(sources: Sequence[MessageSourceUsed]) -> list[dict[str, Any]]:
@@ -173,8 +179,9 @@ async def select_grounding_source_keys(
     model_settings = ModelSettings(
         model=settings.GROUNDING_MODEL,
         temperature=0.0,
-        max_tokens=0,
+        max_tokens=settings.GROUNDING_MODEL_MAX_TOKENS,
         reasoning_effort=settings.GROUNDING_REASONING_EFFORT,
+        azure_service_tier=settings.GROUNDING_AZURE_SERVICE_TIER,
     )
     jinja_env = await get_runtime_jinja_environment(
         TEMPLATES_DIR, is_internal=True, scope=PromptSetScope.GROUNDING
@@ -247,6 +254,32 @@ async def mark_grounding_sources_pending(
     metadata.grounding_source_status = GROUNDING_SOURCE_STATUS_PENDING
 
 
+def effective_grounding_source_status(metadata: AssistantMessageMetadata) -> str | None:
+    if (
+        metadata.grounding_source_status == GROUNDING_SOURCE_STATUS_PENDING
+        and metadata.updated_at <= current_time_utc() - GROUNDING_PENDING_STALE_AFTER
+    ):
+        return GROUNDING_SOURCE_STATUS_FAILED
+    return metadata.grounding_source_status
+
+
+async def mark_grounding_sources_failed(
+    session: AsyncSession, *, assistant_message_id: UUID
+) -> None:
+    metadata = await session.scalar(
+        select(AssistantMessageMetadata).where(
+            AssistantMessageMetadata.message_id == assistant_message_id
+        )
+    )
+    if metadata is None:
+        msg = f"Assistant message metadata not found for grounding: {assistant_message_id}"
+        raise ValueError(msg)
+    if metadata.grounding_source_status != GROUNDING_SOURCE_STATUS_PENDING:
+        return
+    metadata.grounding_source_keys = []
+    metadata.grounding_source_status = GROUNDING_SOURCE_STATUS_FAILED
+
+
 async def select_and_store_grounding_sources(
     session: AsyncSession,
     *,
@@ -254,7 +287,7 @@ async def select_and_store_grounding_sources(
     user_message_id: UUID,
     assistant_answer: str,
     sources: Sequence[MessageSourceUsed],
-) -> tuple[list[GroundingSourceSelection], str]:
+) -> tuple[list[GroundingSourceSelection], GroundingSourceResultStatus]:
     metadata = await session.scalar(
         select(AssistantMessageMetadata).where(
             AssistantMessageMetadata.message_id == assistant_message_id
@@ -269,21 +302,36 @@ async def select_and_store_grounding_sources(
         msg = f"User message not found for grounding: {user_message_id}"
         raise ValueError(msg)
 
-    selected_keys = await select_grounding_source_keys(
-        user_question=user_message.content,
-        assistant_answer=assistant_answer,
-        sources=sources,
-        chatbot_system_prompt=metadata.system_prompt_rendered,
-        tool_calls=metadata.tool_calls,
-        trace_metadata={
-            "conversation_id": str(user_message.conversation_id),
-            "message_id": str(assistant_message_id),
-            "is_internal": True,
-        },
-    )
-    status = (
-        GROUNDING_SOURCE_STATUS_SELECTED if selected_keys else GROUNDING_SOURCE_STATUS_NO_SELECTION
-    )
+    # All model inputs are loaded and sessions use expire_on_commit=False. End the
+    # read transaction before the provider wait, then persist the selection in a
+    # fresh short transaction when the surrounding session context commits.
+    await session.commit()
+
+    try:
+        selected_keys = await select_grounding_source_keys(
+            user_question=user_message.content,
+            assistant_answer=assistant_answer,
+            sources=sources,
+            chatbot_system_prompt=metadata.system_prompt_rendered,
+            tool_calls=metadata.tool_calls,
+            trace_metadata={
+                "conversation_id": str(user_message.conversation_id),
+                "message_id": str(assistant_message_id),
+                "is_internal": True,
+            },
+        )
+    except Exception:
+        logger.exception(
+            "Grounding source selection failed for assistant message %s", assistant_message_id
+        )
+        selected_keys = []
+        status = GROUNDING_SOURCE_STATUS_FAILED
+    else:
+        status = (
+            GROUNDING_SOURCE_STATUS_SELECTED
+            if selected_keys
+            else GROUNDING_SOURCE_STATUS_NO_SELECTION
+        )
     metadata.grounding_source_keys = selected_keys
     metadata.grounding_source_status = status
     return selected_keys, status

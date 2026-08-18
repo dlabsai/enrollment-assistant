@@ -1,7 +1,6 @@
 from dataclasses import dataclass, field
 from typing import Any
 
-import httpx
 from jinja2 import Template
 from pydantic import BaseModel, Field
 from pydantic_ai import Agent, RunContext
@@ -10,6 +9,8 @@ from pydantic_ai.models.openai import OpenAIResponsesModel
 from pydantic_ai.providers.azure import AzureProvider
 from pydantic_ai.providers.openai import OpenAIProvider
 
+from app.chat.buffered_model import BufferedResponseModel
+from app.chat.provider_http import get_provider_http_client
 from app.chat.tools import Deps
 from app.core.config import settings
 
@@ -38,18 +39,19 @@ def _get_azure_resource(deployment_name: str) -> tuple[str, str, str]:
     return (settings.AZURE_API_BASE_1, settings.AZURE_API_VERSION_1, settings.AZURE_API_KEY_1)
 
 
-def _get_http_client() -> httpx.AsyncClient:
-    return httpx.AsyncClient(timeout=settings.LLM_REQUEST_TIMEOUT)
-
-
 def get_pydantic_ai_model_name(model_name: str) -> Model | str:
-    """Convert litellm-style model names to PydanticAI models.
+    """Convert configured model names to PydanticAI models.
 
     Supports:
+    - stress/role -> deterministic token-free model outside production
     - azure/deployment-name -> OpenAIResponsesModel with AzureProvider
     - openrouter/model-name -> OpenAIResponsesModel with OpenAIProvider (openrouter base URL)
     - Standard PydanticAI format (provider:model) is passed through
     """
+    if model_name.startswith("stress/"):
+        from app.stress.fake_model import create_stress_model  # noqa: PLC0415
+
+        return create_stress_model(model_name)
     if model_name.startswith("azure/"):
         # Azure OpenAI - use the Responses API with AzureProvider
         deployment_name = model_name.split("azure/")[1]
@@ -61,7 +63,7 @@ def get_pydantic_ai_model_name(model_name: str) -> Model | str:
                 azure_endpoint=api_base,
                 api_version=api_version,
                 api_key=api_key,
-                http_client=_get_http_client(),
+                http_client=get_provider_http_client(api_base),
             ),
         )
     if model_name.startswith("openrouter/"):
@@ -74,7 +76,7 @@ def get_pydantic_ai_model_name(model_name: str) -> Model | str:
             provider=OpenAIProvider(
                 base_url=openrouter_base,
                 api_key=settings.OPENROUTER_API_KEY,
-                http_client=_get_http_client(),
+                http_client=get_provider_http_client(openrouter_base),
             ),
         )
     if "/" in model_name and ":" not in model_name:
@@ -89,6 +91,8 @@ def create_chatbot_agent(
     model: str, tools: list[Any] | None = None, system_prompt: str = ""
 ) -> Agent[Deps, str]:
     pydantic_model = get_pydantic_ai_model_name(model)
+    if not settings.PROVIDER_MODEL_STREAMING_ENABLED:
+        pydantic_model = BufferedResponseModel(pydantic_model)
 
     return Agent(
         pydantic_model,

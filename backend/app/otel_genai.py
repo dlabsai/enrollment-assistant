@@ -36,6 +36,34 @@ def start_span(
 
 
 @contextmanager
+def genai_helper_trace_scope(
+    agent_name: str,
+    *,
+    model: str | None = None,
+    conversation_id: str | None = None,
+    trigger_message_id: str | None = None,
+    is_internal: bool | None = None,
+) -> Generator[Span]:
+    """Correlate one directly instrumented helper-model request trace."""
+    attributes: dict[str, Any] = {"gen_ai.agent.name": agent_name}
+    if model is not None:
+        attributes["app.is_ai"] = True
+        attributes["gen_ai.request.model"] = model
+    if conversation_id is not None:
+        attributes["app.conversation_id"] = conversation_id
+    if trigger_message_id is not None:
+        attributes["app.trigger_message_id"] = trigger_message_id
+    if is_internal is not None:
+        attributes["app.is_internal"] = is_internal
+
+    with (
+        start_span(f"invoke_agent {agent_name}", attributes=attributes) as span,
+        genai_agent_name_scope(agent_name),
+    ):
+        yield span
+
+
+@contextmanager
 def start_genai_tool_span(name: str, *, tool_type: str) -> Generator[Span]:
     with start_span(
         f"execute_tool {name}",

@@ -61,6 +61,7 @@ class EvalCaseDefinition:
     active: bool
     payload: dict[str, Any]
     payload_hash: str
+    verified: bool
     canonical_payload: dict[str, Any] | None
     disk_hash: str | None
     overlay_base_disk_hash: str | None
@@ -69,8 +70,19 @@ class EvalCaseDefinition:
     updated_at: datetime | None
 
 
+def _payload_without_verification(payload: dict[str, Any]) -> dict[str, Any]:
+    comparable = dict(payload)
+    comparable.pop("verified", None)
+    return comparable
+
+
 def _payload_hash(payload: dict[str, Any]) -> str:
-    canonical = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    canonical = json.dumps(
+        _payload_without_verification(payload),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
     return sha256(canonical.encode("utf-8")).hexdigest()
 
 
@@ -133,6 +145,7 @@ def _definition_from_parts(
             active=True,
             payload=disk_case.payload,
             payload_hash=disk_case.payload_hash,
+            verified=bool(disk_case.payload["verified"]),
             canonical_payload=disk_case.payload,
             disk_hash=disk_case.payload_hash,
             overlay_base_disk_hash=None,
@@ -142,6 +155,7 @@ def _definition_from_parts(
         )
 
     base_disk_hash = row.base_disk_hash
+    row_verified = bool(row.verified)
     disk_hash = disk_case.payload_hash if disk_case is not None else None
     has_disk_changes = base_disk_hash is not None and disk_hash != base_disk_hash
 
@@ -153,6 +167,7 @@ def _definition_from_parts(
             active=False,
             payload=disk_case.payload,
             payload_hash=disk_case.payload_hash,
+            verified=bool(disk_case.payload["verified"]),
             canonical_payload=disk_case.payload,
             disk_hash=disk_hash,
             overlay_base_disk_hash=base_disk_hash,
@@ -171,6 +186,7 @@ def _definition_from_parts(
             active=True,
             payload=disk_case.payload,
             payload_hash=disk_case.payload_hash,
+            verified=bool(disk_case.payload["verified"]),
             canonical_payload=disk_case.payload,
             disk_hash=disk_hash,
             overlay_base_disk_hash=base_disk_hash,
@@ -179,7 +195,31 @@ def _definition_from_parts(
             updated_at=row.updated_at,
         )
 
-    payload = validate_eval_case_payload(suite, row.case_data, expected_case_id=case_id)
+    payload = {
+        **validate_eval_case_payload(suite, row.case_data, expected_case_id=case_id),
+        "verified": row_verified,
+    }
+    if (
+        disk_case is not None
+        and base_disk_hash is None
+        and _payload_without_verification(payload)
+        == _payload_without_verification(disk_case.payload)
+    ):
+        return EvalCaseDefinition(
+            suite=suite,
+            case_id=case_id,
+            status="disk",
+            active=True,
+            payload=disk_case.payload,
+            payload_hash=disk_case.payload_hash,
+            verified=bool(disk_case.payload["verified"]),
+            canonical_payload=disk_case.payload,
+            disk_hash=disk_hash,
+            overlay_base_disk_hash=None,
+            has_disk_changes=False,
+            created_at=None,
+            updated_at=None,
+        )
     return EvalCaseDefinition(
         suite=suite,
         case_id=case_id,
@@ -187,6 +227,7 @@ def _definition_from_parts(
         active=True,
         payload=payload,
         payload_hash=_payload_hash(payload),
+        verified=row_verified,
         canonical_payload=disk_case.payload if disk_case is not None else None,
         disk_hash=disk_hash,
         overlay_base_disk_hash=base_disk_hash,
@@ -273,7 +314,8 @@ async def create_eval_case_overlay(
         raise EvalCaseConflictError("A DB-backed case already uses this test_case_id")
 
     row = existing or EvalTestCaseOverlay(suite=suite.value, case_id=case_id)
-    row.case_data = normalized
+    row.case_data = _payload_without_verification(normalized)
+    row.verified = bool(normalized["verified"])
     row.is_deleted = False
     row.base_disk_hash = None
     row.updated_by_user_id = user_id
@@ -303,7 +345,8 @@ async def update_eval_case_overlay(
         raise EvalCaseNotFoundError("Eval test case not found")
 
     row = existing or EvalTestCaseOverlay(suite=suite.value, case_id=case_id)
-    row.case_data = normalized
+    row.case_data = _payload_without_verification(normalized)
+    row.verified = bool(normalized["verified"])
     row.is_deleted = False
     row.base_disk_hash = disk_case.payload_hash if disk_case is not None else None
     row.updated_by_user_id = user_id
@@ -338,6 +381,7 @@ async def delete_eval_case_overlay(
 
     row = existing or EvalTestCaseOverlay(suite=suite.value, case_id=case_id)
     row.case_data = None
+    row.verified = bool(disk_case.payload["verified"])
     row.is_deleted = True
     row.base_disk_hash = disk_case.payload_hash
     row.updated_by_user_id = user_id

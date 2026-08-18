@@ -6,6 +6,7 @@ export interface TraceSummary {
     root_span_name: string | null;
     model: string | null;
     is_error: boolean;
+    failed_result_count?: number;
     is_public: boolean | null;
     conversation_id: string | null;
     is_ai: boolean;
@@ -18,7 +19,7 @@ export interface TraceSummaryPage {
 
 export type TracePlatformFilter = "both" | "internal" | "public";
 
-export type TraceOverviewItemType =
+type TraceOverviewItemType =
     | "agent"
     | "llm"
     | "tool"
@@ -31,6 +32,8 @@ export type TraceOverviewItemType =
     | "evaluation_result"
     | "other";
 
+export type TraceOutcome = "pass" | "fail" | "error";
+
 export interface TraceOverviewItem {
     id: string;
     span_id: string;
@@ -41,6 +44,8 @@ export interface TraceOverviewItem {
     start_time: string | null;
     duration_ms: number | null;
     status_code: string | null;
+    outcome: TraceOutcome | null;
+    failed_result_count: number;
     data: Record<string, unknown>;
 }
 
@@ -66,6 +71,7 @@ export interface TraceDetail {
     started_at: string | null;
     duration_ms: number | null;
     span_count: number;
+    total_cost: number | null;
     is_public: boolean | null;
     conversation_id: string | null;
     spans: TraceSpan[];

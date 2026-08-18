@@ -26,6 +26,7 @@ import { isDataTablePageSize } from "../../components/data-table-constants";
 import { PageHeader } from "../../components/page-header";
 import { PageSection, PageShell } from "../../components/page-shell";
 import { InlineError, PageError } from "../../components/page-state";
+import { useAsyncData } from "../../lib/hooks/use-async-data";
 import { fetchEvalReport, fetchEvalReports } from "../lib/api";
 import { sortReportsByGenerated } from "../lib/report-utils";
 import {
@@ -40,6 +41,45 @@ import { EvalsReportTrendsView } from "./evals-report-trends-view";
 import type { EvalsReportViewMode } from "./evals-report-view-mode-toggle";
 import { EvalsReportsList } from "./evals-reports-list";
 
+interface EvalReportsData {
+    reports: EvalReportSummary[];
+    total: number;
+}
+
+interface CompareReportSelectionState {
+    groupKey: string;
+    reportIds: string[];
+}
+
+const initialEvalReportsData: EvalReportsData = {
+    reports: [],
+    total: 0,
+};
+const initialReportOptions: EvalReportSummary[] = [];
+
+const getCompareGroupKey = (reports: EvalReportSummary[]): string =>
+    JSON.stringify(reports.map((report) => report.id));
+
+const getDefaultCompareReportIds = (
+    reports: EvalReportSummary[],
+): string[] =>
+    reports.slice(0, 5).map((report) => report.id);
+
+const resolveCompareReportIds = (
+    state: CompareReportSelectionState,
+    groupKey: string,
+    reports: EvalReportSummary[],
+): string[] => {
+    if (state.groupKey === groupKey) {
+        return state.reportIds;
+    }
+    const availableIds = new Set(reports.map((report) => report.id));
+    const retainedIds = state.reportIds.filter((id) => availableIds.has(id));
+    return retainedIds.length > 0
+        ? retainedIds
+        : getDefaultCompareReportIds(reports);
+};
+
 export const EvalsReportsPage = (): JSX.Element => {
     const api = useAuthenticatedApi();
     const search = useSearch({ from: "/eval-reports" });
@@ -52,39 +92,80 @@ export const EvalsReportsPage = (): JSX.Element => {
         report: reportIdFromSearch,
         sortBy,
     } = search;
-    const [reports, setReports] = useState<EvalReportSummary[]>([]);
-    const [reportsTotal, setReportsTotal] = useState(0);
-    const [reportOptions, setReportOptions] = useState<EvalReportSummary[]>(
-        [],
+    const loadReports = useCallback(
+        async (signal: AbortSignal): Promise<EvalReportsData> => {
+            const response = await fetchEvalReports(api, {
+                descending: desc,
+                limit: pageSize,
+                offset: (currentPage - 1) * pageSize,
+                search: searchValue,
+                signal,
+                sortBy,
+            });
+            return { reports: response.items, total: response.total };
+        },
+        [api, currentPage, desc, pageSize, searchValue, sortBy],
     );
-    const [loading, setLoading] = useState(true);
-    const [hasLoaded, setHasLoaded] = useState(false);
-    const [error, setError] = useState<string | undefined>();
+    const {
+        data: { reports, total: reportsTotal },
+        loading,
+        hasSucceeded,
+        error,
+        refresh: refreshReports,
+    } = useAsyncData({
+        errorMessage: "Failed to load eval reports",
+        initialData: initialEvalReportsData,
+        load: loadReports,
+    });
+    const loadReportOptions = useCallback(
+        async (signal: AbortSignal) => {
+            const response = await fetchEvalReports(api, {
+                descending: true,
+                limit: 200,
+                offset: 0,
+                search: "",
+                signal,
+                sortBy: "generated_at",
+            });
+            return response.items;
+        },
+        [api],
+    );
+    const { data: reportOptions, refresh: refreshReportOptions } = useAsyncData(
+        {
+            clearDataOnError: true,
+            errorMessage: "Failed to load report options",
+            initialData: initialReportOptions,
+            load: loadReportOptions,
+        },
+    );
     const [reportDetails, setReportDetails] = useState<
         Record<string, EvalReportDetail | undefined>
     >({});
-    const [detailLoadingId, setDetailLoadingId] = useState<
+    const [detailErrors, setDetailErrors] = useState<
+        Record<string, string | undefined>
+    >({});
+    const [viewMode, setViewMode] = useState<EvalsReportViewMode>("report");
+    const [compareTypeState, setCompareTypeState] =
+        useState<string | undefined>();
+    const [compareLeftIdState, setCompareLeftIdState] = useState<
         string | undefined
     >();
-    const [detailError, setDetailError] = useState<string | undefined>();
-    const [viewMode, setViewMode] =
-        useState<EvalsReportViewMode>("report");
-    const [compareType, setCompareType] = useState<string | undefined>();
-    const [compareLeftId, setCompareLeftId] = useState<string | undefined>();
-    const [compareRightId, setCompareRightId] = useState<string | undefined>();
-    const [compareSelectedIds, setCompareSelectedIds] = useState<string[]>([]);
+    const [compareRightIdState, setCompareRightIdState] = useState<
+        string | undefined
+    >();
+    const [compareSelection, setCompareSelection] =
+        useState<CompareReportSelectionState>({
+            groupKey: "",
+            reportIds: [],
+        });
     const [compareReportsOpen, setCompareReportsOpen] = useState(false);
     const [compareReportsSearch, setCompareReportsSearch] = useState("");
     const [modelGroupKey, setModelGroupKey] = useState<string | undefined>();
-    const reportsRequestIdRef = useRef(0);
-    const reportsAbortControllerRef = useRef<AbortController | undefined>(
-        undefined,
-    );
     const reportSearchDebounceTimeoutRef = useRef<number | undefined>(
         undefined,
     );
-    const reportDetailRequestGenerationRef = useRef(0);
-    const reportDetailRequestsRef = useRef(new Map<string, number>());
+    const reportDetailRequestsRef = useRef(new Map<string, AbortController>());
     const [reportSearchInputState, setReportSearchInputState] = useState(
         () => ({
             syncedSearchValue: searchValue,
@@ -115,128 +196,77 @@ export const EvalsReportsPage = (): JSX.Element => {
         [navigate],
     );
 
-    const loadReports = useCallback(async () => {
-        const requestId = reportsRequestIdRef.current + 1;
-        reportsRequestIdRef.current = requestId;
-        reportsAbortControllerRef.current?.abort();
-        const abortController = new AbortController();
-        reportsAbortControllerRef.current = abortController;
-        setLoading(true);
-        setError(undefined);
-        try {
-            const response = await fetchEvalReports(api, {
-                descending: desc,
-                limit: pageSize,
-                offset: (currentPage - 1) * pageSize,
-                search: searchValue,
-                signal: abortController.signal,
-                sortBy,
-            });
-            if (reportsRequestIdRef.current !== requestId) {
-                return;
-            }
-            setReports(response.items);
-            setReportsTotal(response.total);
-            setHasLoaded(true);
-        } catch (error_) {
-            if (
-                reportsRequestIdRef.current !== requestId ||
-                isAbortError(error_)
-            ) {
-                return;
-            }
-            setError(
-                error_ instanceof Error
-                    ? error_.message
-                    : "Failed to load eval reports",
-            );
-        } finally {
-            if (reportsAbortControllerRef.current === abortController) {
-                reportsAbortControllerRef.current = undefined;
-            }
-            if (reportsRequestIdRef.current === requestId) {
-                setLoading(false);
-            }
+    const abortReportDetailRequests = useCallback((): void => {
+        for (const controller of reportDetailRequestsRef.current.values()) {
+            controller.abort();
         }
-    }, [api, currentPage, desc, pageSize, searchValue, sortBy]);
+        reportDetailRequestsRef.current.clear();
+    }, []);
 
-    const loadReportOptions = useCallback(async () => {
-        try {
-            const response = await fetchEvalReports(api, {
-                descending: true,
-                limit: 200,
-                offset: 0,
-                search: "",
-                sortBy: "generated_at",
-            });
-            setReportOptions(response.items);
-        } catch {
-            setReportOptions([]);
-        }
-    }, [api]);
-
-    const loadReportDetail = useCallback(
-        async (reportId: string) => {
+    const requestReportDetail = useCallback(
+        (reportId: string): void => {
             if (reportDetailRequestsRef.current.has(reportId)) {
                 return;
             }
 
-            const requestGeneration = reportDetailRequestGenerationRef.current;
-            reportDetailRequestsRef.current.set(reportId, requestGeneration);
-            setDetailLoadingId(reportId);
-            setDetailError(undefined);
-            try {
-                const response = await fetchEvalReport(api, reportId);
-                if (
-                    reportDetailRequestGenerationRef.current !==
-                    requestGeneration
-                ) {
-                    return;
-                }
-                setReportDetails((prev) => ({
-                    ...prev,
-                    [reportId]: response,
-                }));
-            } catch (error_) {
-                if (
-                    reportDetailRequestGenerationRef.current !==
-                    requestGeneration
-                ) {
-                    return;
-                }
-                if (isApiError(error_) && error_.status === 404) {
-                    navigateWithSearch(
-                        (previous) =>
-                            previous.report === reportId
-                                ? { report: undefined }
-                                : {},
-                        { replace: true },
-                    );
-                    return;
-                }
-                setDetailError(
-                    error_ instanceof Error
-                        ? error_.message
-                        : "Failed to load report",
-                );
-            } finally {
-                if (
-                    reportDetailRequestsRef.current.get(reportId) ===
-                    requestGeneration
-                ) {
-                    reportDetailRequestsRef.current.delete(reportId);
-                }
-                if (
-                    reportDetailRequestGenerationRef.current ===
-                    requestGeneration
-                ) {
-                    setDetailLoadingId((current) =>
-                        current === reportId ? undefined : current,
-                    );
-                }
-            }
+            const controller = new AbortController();
+            reportDetailRequestsRef.current.set(reportId, controller);
+            void fetchEvalReport(api, reportId, controller.signal)
+                .then(
+                    (response) => {
+                        if (!controller.signal.aborted) {
+                            setReportDetails((current) => ({
+                                ...current,
+                                [reportId]: response,
+                            }));
+                        }
+                    },
+                    (error: unknown) => {
+                        if (controller.signal.aborted || isAbortError(error)) {
+                            return;
+                        }
+                        setDetailErrors((current) => ({
+                            ...current,
+                            [reportId]:
+                                error instanceof Error && error.message !== ""
+                                    ? error.message
+                                    : "Failed to load report",
+                        }));
+                        if (isApiError(error) && error.status === 404) {
+                            navigateWithSearch(
+                                (previous) =>
+                                    previous.report === reportId
+                                        ? { report: undefined }
+                                        : {},
+                                { replace: true },
+                            );
+                        }
+                    },
+                )
+                .finally(() => {
+                    if (
+                        reportDetailRequestsRef.current.get(reportId) ===
+                        controller
+                    ) {
+                        reportDetailRequestsRef.current.delete(reportId);
+                    }
+                });
         },
         [api, navigateWithSearch],
+    );
+
+    const retryReportDetail = useCallback(
+        (reportId: string): void => {
+            if (detailErrors[reportId] === undefined) {
+                return;
+            }
+            setDetailErrors((current) => ({
+                ...current,
+                [reportId]: undefined,
+            }));
+            requestReportDetail(reportId);
+        },
+        [detailErrors, requestReportDetail],
     );
 
     const selectedReportId = reportIdFromSearch;
@@ -250,19 +280,14 @@ export const EvalsReportsPage = (): JSX.Element => {
         [navigateWithSearch],
     );
 
-    useEffect(() => {
-        void loadReports();
-    }, [loadReports]);
-
     useEffect(
         () => (): void => {
-            reportsRequestIdRef.current += 1;
-            reportsAbortControllerRef.current?.abort();
+            abortReportDetailRequests();
             if (reportSearchDebounceTimeoutRef.current !== undefined) {
                 window.clearTimeout(reportSearchDebounceTimeoutRef.current);
             }
         },
-        [],
+        [abortReportDetailRequests],
     );
 
     useEffect(() => {
@@ -271,10 +296,6 @@ export const EvalsReportsPage = (): JSX.Element => {
             reportSearchDebounceTimeoutRef.current = undefined;
         }
     }, [searchValue]);
-
-    useEffect(() => {
-        void loadReportOptions();
-    }, [loadReportOptions]);
 
     const sorting = useMemo<SortingState>(
         () => [{ desc, id: sortBy }],
@@ -335,13 +356,13 @@ export const EvalsReportsPage = (): JSX.Element => {
     );
 
     useEffect(() => {
-        if (loading || !hasLoaded) {
+        if (loading || !hasSucceeded) {
             return;
         }
         if (currentPage > pageCount) {
             navigateWithSearch(() => ({ page: pageCount }), { replace: true });
         }
-    }, [currentPage, hasLoaded, loading, navigateWithSearch, pageCount]);
+    }, [currentPage, hasSucceeded, loading, navigateWithSearch, pageCount]);
 
     const groupedCompareReports = useMemo(() => {
         const groups = new Map<string, EvalReportSummary[]>();
@@ -370,106 +391,47 @@ export const EvalsReportsPage = (): JSX.Element => {
         return entries.map((entry) => entry.name);
     }, [groupedCompareReports]);
 
-    const compareGroupReports = useMemo(() => {
-        if (compareType === undefined) {
-            return [];
-        }
-        return groupedCompareReports.get(compareType) ?? [];
-    }, [compareType, groupedCompareReports]);
-
-    useEffect(() => {
-        const timeout = setTimeout(() => {
-            if (compareTypeOptions.length === 0) {
-                setCompareType(undefined);
-                return;
-            }
-            setCompareType((current) =>
-                current !== undefined &&
-                current !== "" &&
-                compareTypeOptions.includes(current)
-                    ? current
-                    : compareTypeOptions[0],
-            );
-        }, 0);
-
-        return (): void => {
-            clearTimeout(timeout);
-        };
-    }, [compareTypeOptions]);
-
-    useEffect(() => {
-        const timeout = setTimeout(() => {
-            if (compareGroupReports.length === 0) {
-                setCompareLeftId(undefined);
-                return;
-            }
-            setCompareLeftId((current) => {
-                if (
-                    current !== undefined &&
-                    compareGroupReports.some((report) => report.id === current)
-                ) {
-                    return current;
-                }
-                return compareGroupReports[0].id;
-            });
-        }, 0);
-
-        return (): void => {
-            clearTimeout(timeout);
-        };
-    }, [compareGroupReports]);
-
-    useEffect(() => {
-        const timeout = setTimeout(() => {
-            if (compareGroupReports.length <= 1) {
-                setCompareRightId(undefined);
-                return;
-            }
-            setCompareRightId((current) => {
-                if (
-                    current !== undefined &&
-                    current !== compareLeftId &&
-                    compareGroupReports.some((report) => report.id === current)
-                ) {
-                    return current;
-                }
-                const fallbackReport = compareGroupReports.find(
-                    (report) => report.id !== compareLeftId,
-                );
-                return fallbackReport
-                    ? fallbackReport.id
-                    : compareGroupReports[0].id;
-            });
-        }, 0);
-
-        return (): void => {
-            clearTimeout(timeout);
-        };
-    }, [compareGroupReports, compareLeftId]);
-
-    useEffect(() => {
-        const timeout = setTimeout(() => {
-            if (compareGroupReports.length === 0) {
-                setCompareSelectedIds([]);
-                return;
-            }
-            setCompareSelectedIds((current) => {
-                const filtered = current.filter((id) =>
-                    compareGroupReports.some((report) => report.id === id),
-                );
-                if (filtered.length > 0) {
-                    return filtered;
-                }
-                return compareGroupReports
-                    .slice(0, Math.min(5, compareGroupReports.length))
-                    .map((report) => report.id);
-            });
-        }, 0);
-
-        return (): void => {
-            clearTimeout(timeout);
-        };
-    }, [compareGroupReports]);
+    const compareType =
+        compareTypeState !== undefined &&
+        compareTypeOptions.includes(compareTypeState)
+            ? compareTypeState
+            : compareTypeOptions[0];
+    const compareGroupReports = useMemo(
+        () =>
+            compareType === undefined
+                ? []
+                : (groupedCompareReports.get(compareType) ?? []),
+        [compareType, groupedCompareReports],
+    );
+    const compareGroupKey = useMemo(
+        () => getCompareGroupKey(compareGroupReports),
+        [compareGroupReports],
+    );
+    const compareLeftId =
+        compareLeftIdState !== undefined &&
+        compareGroupReports.some(
+            (report) => report.id === compareLeftIdState,
+        )
+            ? compareLeftIdState
+            : compareGroupReports[0]?.id;
+    const compareRightId =
+        compareRightIdState !== undefined &&
+        compareRightIdState !== compareLeftId &&
+        compareGroupReports.some(
+            (report) => report.id === compareRightIdState,
+        )
+            ? compareRightIdState
+            : compareGroupReports.find((report) => report.id !== compareLeftId)
+                  ?.id;
+    const compareSelectedIds = useMemo(
+        () =>
+            resolveCompareReportIds(
+                compareSelection,
+                compareGroupKey,
+                compareGroupReports,
+            ),
+        [compareGroupKey, compareGroupReports, compareSelection],
+    );
 
     useEffect(() => {
         const ids = new Set<string>();
@@ -485,28 +447,36 @@ export const EvalsReportsPage = (): JSX.Element => {
             }
         }
         for (const reportId of ids) {
-            if (reportDetails[reportId] === undefined) {
-                void loadReportDetail(reportId);
+            if (
+                reportDetails[reportId] === undefined &&
+                detailErrors[reportId] === undefined
+            ) {
+                requestReportDetail(reportId);
             }
         }
     }, [
         compareLeftId,
         compareRightId,
-        loadReportDetail,
+        detailErrors,
         reportDetails,
+        requestReportDetail,
         selectedReportId,
         viewMode,
     ]);
 
-    useEffect(() => {
-        const timeout = setTimeout(() => {
-            setDetailError(undefined);
-        }, 0);
-
-        return (): void => {
-            clearTimeout(timeout);
-        };
-    }, [compareLeftId, compareRightId, selectedReportId, viewMode]);
+    const detailError =
+        viewMode === "report"
+            ? selectedReportId === undefined
+                ? undefined
+                : detailErrors[selectedReportId]
+            : viewMode === "compare"
+              ? ((compareLeftId === undefined
+                    ? undefined
+                    : detailErrors[compareLeftId]) ??
+                (compareRightId === undefined
+                    ? undefined
+                    : detailErrors[compareRightId]))
+              : undefined;
 
     const selectedReportDetail =
         selectedReportId === undefined
@@ -525,8 +495,8 @@ export const EvalsReportsPage = (): JSX.Element => {
     );
     const detailLoading =
         selectedReportId !== undefined &&
-        detailLoadingId === selectedReportId &&
-        selectedReportDetail === undefined;
+        selectedReportDetail === undefined &&
+        detailError === undefined;
     const reportMeta = selectedReportDetail ?? selectedReportSummary;
 
     const compareLeftSummary = useMemo(
@@ -559,28 +529,47 @@ export const EvalsReportsPage = (): JSX.Element => {
         if (!canSwapCompare) {
             return;
         }
-        setCompareLeftId(compareRightId);
-        setCompareRightId(compareLeftId);
+        setCompareLeftIdState(compareRightId);
+        setCompareRightIdState(compareLeftId);
     }, [canSwapCompare, compareLeftId, compareRightId]);
 
-    const toggleCompareReport = useCallback((reportId: string): void => {
-        setCompareSelectedIds((current) =>
-            current.includes(reportId)
-                ? current.filter((id) => id !== reportId)
-                : [...current, reportId],
-        );
-    }, []);
+    const toggleCompareReport = useCallback(
+        (reportId: string): void => {
+            setCompareSelection((current) => {
+                const currentIds = resolveCompareReportIds(
+                    current,
+                    compareGroupKey,
+                    compareGroupReports,
+                );
+                return {
+                    groupKey: compareGroupKey,
+                    reportIds: currentIds.includes(reportId)
+                        ? currentIds.filter((id) => id !== reportId)
+                        : [...currentIds, reportId],
+                };
+            });
+        },
+        [compareGroupKey, compareGroupReports],
+    );
 
     const handleSelectAllCompareReports = useCallback(() => {
-        setCompareSelectedIds(compareGroupReports.map((report) => report.id));
-    }, [compareGroupReports]);
+        setCompareSelection({
+            groupKey: compareGroupKey,
+            reportIds: compareGroupReports.map((report) => report.id),
+        });
+    }, [compareGroupKey, compareGroupReports]);
 
     const handleClearCompareReports = useCallback(() => {
-        setCompareSelectedIds([]);
-    }, []);
+        setCompareSelection({ groupKey: compareGroupKey, reportIds: [] });
+    }, [compareGroupKey]);
 
-    if (error !== undefined && !hasLoaded) {
-        return <PageError message={error} onRetry={() => void loadReports()} />;
+    if (error !== undefined && !hasSucceeded) {
+        return (
+            <PageError
+                message={error}
+                onRetry={refreshReports}
+            />
+        );
     }
 
     return (
@@ -591,13 +580,11 @@ export const EvalsReportsPage = (): JSX.Element => {
             <PageHeader title="Eval Reports">
                 <Button
                     onClick={() => {
-                        reportDetailRequestGenerationRef.current += 1;
-                        reportDetailRequestsRef.current.clear();
-                        setDetailLoadingId(undefined);
-                        setDetailError(undefined);
+                        abortReportDetailRequests();
+                        setDetailErrors({});
                         setReportDetails({});
-                        void loadReports();
-                        void loadReportOptions();
+                        refreshReports();
+                        refreshReportOptions();
                     }}
                     variant="outline"
                 >
@@ -606,11 +593,11 @@ export const EvalsReportsPage = (): JSX.Element => {
                 </Button>
             </PageHeader>
 
-            {error !== undefined && hasLoaded && (
+            {error !== undefined && hasSucceeded && (
                 <PageSection>
                     <InlineError
                         message={error}
-                        onRetry={() => void loadReports()}
+                        onRetry={refreshReports}
                     />
                 </PageSection>
             )}
@@ -660,7 +647,7 @@ export const EvalsReportsPage = (): JSX.Element => {
                                 <EvalsReportSingleView
                                     detailError={detailError}
                                     detailLoading={detailLoading}
-                                    onLoadReportDetail={loadReportDetail}
+                                    onRetryReportDetail={retryReportDetail}
                                     onViewModeChange={setViewMode}
                                     reportMeta={reportMeta}
                                     selectedReportDetail={selectedReportDetail}
@@ -680,10 +667,12 @@ export const EvalsReportsPage = (): JSX.Element => {
                                     compareType={compareType}
                                     compareTypeOptions={compareTypeOptions}
                                     detailError={detailError}
-                                    onCompareLeftIdChange={setCompareLeftId}
-                                    onCompareRightIdChange={setCompareRightId}
-                                    onCompareTypeChange={setCompareType}
-                                    onLoadReportDetail={loadReportDetail}
+                                    onCompareLeftIdChange={setCompareLeftIdState}
+                                    onCompareRightIdChange={
+                                        setCompareRightIdState
+                                    }
+                                    onCompareTypeChange={setCompareTypeState}
+                                    onRetryReportDetail={retryReportDetail}
                                     onSwapCompare={handleSwapCompare}
                                     onViewModeChange={setViewMode}
                                     viewMode={viewMode}
@@ -705,7 +694,7 @@ export const EvalsReportsPage = (): JSX.Element => {
                                     onCompareReportsSearchChange={
                                         setCompareReportsSearch
                                     }
-                                    onCompareTypeChange={setCompareType}
+                                    onCompareTypeChange={setCompareTypeState}
                                     onSelectAllCompareReports={
                                         handleSelectAllCompareReports
                                     }
@@ -719,7 +708,7 @@ export const EvalsReportsPage = (): JSX.Element => {
                                     compareType={compareType}
                                     compareTypeOptions={compareTypeOptions}
                                     modelGroupKey={modelGroupKey}
-                                    onCompareTypeChange={setCompareType}
+                                    onCompareTypeChange={setCompareTypeState}
                                     onModelGroupKeyChange={setModelGroupKey}
                                     onSelectReport={handleSelectReport}
                                     onViewModeChange={setViewMode}
