@@ -102,6 +102,7 @@ class EvalReportSummaryOut(BaseModel):
     model_configs: dict[str, object]
     pass_rate_average: float | None
     duration_median_average: float | None
+    total_cost: float | None
 
 
 class EvalEvaluationResultOut(BaseModel):
@@ -504,6 +505,7 @@ def _report_summary_record_out(summary: EvalReportSummaryRecord) -> EvalReportSu
         model_configs=summary.model_configs,
         pass_rate_average=summary.pass_rate_average,
         duration_median_average=summary.duration_median_average,
+        total_cost=summary.total_cost,
     )
 
 
@@ -776,6 +778,7 @@ async def list_eval_reports(
     search: Annotated[str | None, Query()] = None,
     sort_by: Annotated[EvalReportSortBy, Query()] = "generated_at",
     descending: Annotated[bool, Query()] = True,
+    include_cost: Annotated[bool, Query()] = False,
 ) -> PageOut[EvalReportSummaryOut]:
     del _current_user
     async with eval_report_session() as session:
@@ -787,6 +790,7 @@ async def list_eval_reports(
             offset=offset,
             search=search,
             sort_by=sort_by,
+            include_cost=include_cost,
         )
 
     return PageOut[EvalReportSummaryOut](

@@ -1,10 +1,19 @@
+import asyncio
+import re
+import shutil
+import tempfile
 from dataclasses import dataclass
-from datetime import datetime  # noqa: TC003
+from datetime import UTC, datetime
+from itertools import batched
+from pathlib import Path
 from typing import Annotated, Any, Literal
 from typing import cast as type_cast
+from urllib.parse import quote
 from uuid import UUID  # noqa: TC003
+from zipfile import ZIP_DEFLATED, ZipFile
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from sqlalchemy import (
     Float,
@@ -24,8 +33,15 @@ from sqlalchemy import (
 from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload
+from starlette.background import BackgroundTask
 
 from app.api.deps import CurrentUser, SessionDep
+from app.api.excel_export import (
+    BrowserDateTimeFormatter,
+    ExcelExportCell,
+    ExcelExportWorkbook,
+    excel_safe_text,
+)
 from app.api.grounding_agent import effective_grounding_source_status
 from app.api.guardrails_failures import (
     GUARDRAILS_AGENT_NAMES,
@@ -84,6 +100,25 @@ router = APIRouter(prefix="/conversations", tags=["conversations"])
 
 _PREVIEW_MAX_LENGTH = 60
 _CHATBOT_TIMING_AGENT_NAMES = ("chatbot", "investigation")
+_CHAT_EXPORT_HEADERS = (
+    "Chat",
+    "Summary",
+    "Transcript",
+    "Transcript file",
+    "Chat URL",
+    "User name",
+    "User email",
+    "Created",
+    "Updated",
+)
+_CHAT_EXPORT_COLUMN_WIDTHS = (32, 48, 80, 42, 64, 24, 32, 22, 22)
+_CHAT_EXPORT_COST_HEADER = "Cost"
+_CHAT_EXPORT_COST_COLUMN_WIDTH = 16
+_CHAT_EXPORT_BATCH_SIZE = 100
+_CHAT_EXPORT_TRANSCRIPT_DIR = "transcripts"
+_CHAT_EXPORT_MINIMUM_DISPLAY_COST = 0.0001
+_CHAT_EXPORT_DETAILED_COST_THRESHOLD = 0.01
+_INVALID_FILENAME_CHARACTERS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 
 ConversationDetailSource = Literal["chat", "chats", "messages", "investigate", "investigations"]
 
@@ -1074,7 +1109,38 @@ async def list_internal_conversations_paginated(
     start: Annotated[datetime | None, Query()] = None,
     end: Annotated[datetime | None, Query()] = None,
     kind: Annotated[Literal["chat", "investigation"], Query()] = "chat",
-) -> Any:
+) -> ConversationListPage:
+    return await _list_internal_conversations(
+        session,
+        current_user,
+        page_params=page_params,
+        search=search,
+        platform=platform,
+        user_email=user_email,
+        user_group=user_group,
+        phrase_search=phrase_search,
+        start=start,
+        end=end,
+        kind=kind,
+        export_all=False,
+    )
+
+
+async def _list_internal_conversations(
+    session: AsyncSession,
+    current_user: User,
+    *,
+    page_params: PaginationParams,
+    search: str | None,
+    platform: str | None,
+    user_email: str | None,
+    user_group: OwnerGroup | None,
+    phrase_search: bool,
+    start: datetime | None,
+    end: datetime | None,
+    kind: Literal["chat", "investigation"],
+    export_all: bool,
+) -> ConversationListPage:
     permission_map = await get_effective_permission_map(session, current_user)
     if kind == "investigation":
         _ensure_investigation_access(permission_map)
@@ -1142,7 +1208,7 @@ async def list_internal_conversations_paginated(
     # and trace aggregates. Aggregate sorts determine their page after aggregation.
     page_ids: list[UUID] | None = None
     page_total: int | None = None
-    if page_params.sort_by in {"updated_at", "created_at", "title"}:
+    if not export_all and page_params.sort_by in {"updated_at", "created_at", "title"}:
         latest_message_at = (
             select(Message.created_at)
             .where(Message.conversation_id == Conversation.id)
@@ -1165,16 +1231,13 @@ async def list_internal_conversations_paginated(
             "created_at": Conversation.created_at,
             "title": Conversation.title,
         }[page_params.sort_by]
-        page_rows = (
-            await session.execute(
-                page_stmt.add_columns(func.count().over().label("page_total"))
-                .order_by(
-                    page_sort_column.desc() if page_params.descending else page_sort_column.asc()
-                )
-                .offset(page_params.offset)
-                .limit(page_params.limit)
-            )
-        ).all()
+        sorted_page_stmt = (
+            page_stmt.add_columns(func.count().over().label("page_total"))
+            .order_by(page_sort_column.desc() if page_params.descending else page_sort_column.asc())
+            .offset(page_params.offset)
+            .limit(page_params.limit)
+        )
+        page_rows = (await session.execute(sorted_page_stmt)).all()
         if page_rows:
             page_total = int(page_rows[0].page_total)
             page_ids = [row[0] for row in page_rows]
@@ -1301,7 +1364,7 @@ async def list_internal_conversations_paginated(
         (Conversation.is_public.is_(True), PublicChatContact.email), else_=User.email
     ).label("user_email")
 
-    include_cost_in_query = page_params.sort_by == "total_cost"
+    include_cost_in_query = page_params.sort_by == "total_cost" or export_all
 
     base_stmt = (
         select(
@@ -1355,7 +1418,9 @@ async def list_internal_conversations_paginated(
 
     base_stmt = _apply_list_filters(base_stmt, effective_updated_at)
 
-    if page_total is None:
+    if export_all:
+        total = 0
+    elif page_total is None:
         count_stmt = select(func.count()).select_from(base_stmt.subquery())
         total = (await session.execute(count_stmt)).scalar() or 0
     else:
@@ -1381,11 +1446,9 @@ async def list_internal_conversations_paginated(
     sort_column: Any = sort_map.get(page_params.sort_by, effective_updated_at)
 
     if page_ids is None:
-        stmt = (
-            stmt.order_by(sort_column.desc() if page_params.descending else sort_column.asc())
-            .offset(page_params.offset)
-            .limit(page_params.limit)
-        )
+        stmt = stmt.order_by(sort_column.desc() if page_params.descending else sort_column.asc())
+        if not export_all:
+            stmt = stmt.offset(page_params.offset).limit(page_params.limit)
 
     rows = (await session.execute(stmt)).all()
     if page_ids is not None:
@@ -1457,10 +1520,272 @@ async def list_internal_conversations_paginated(
         ]
     ]
 
+    if export_all:
+        total = len(items)
     response = ConversationListPage(items=items, total=total)
     # Release the reserved connection before FastAPI validates and serializes the response.
     await session.commit()
     return response
+
+
+def _build_chat_export_url(chat_url_base: str, conversation_id: UUID) -> str:
+    base = chat_url_base.split("#", maxsplit=1)[0]
+    conversation_path = quote(str(conversation_id), safe="")
+    return f"{base}#/chats/{conversation_path}"
+
+
+def _format_chat_export_transcript(messages: list[Message]) -> str:
+    blocks: list[str] = []
+    for message in messages:
+        label = "Assistant" if message.role == "assistant" else "User"
+        content = _message_display_content(
+            role=message.role,
+            content=message.content,
+            guardrails_blocked=message.guardrails_blocked,
+            guardrails_blocked_message=message.guardrails_blocked_message,
+        )
+        blocks.append(f"{label}:\n{(content or '').rstrip()}")
+    return "\n\n---\n\n".join(blocks)
+
+
+def _build_chat_export_transcript_filename(*, index: int, total: int, title: str | None) -> str:
+    readable_title = " ".join((title or "Untitled chat").split())
+    readable_title = _INVALID_FILENAME_CHARACTERS.sub("", readable_title).strip(" .")
+    if readable_title == "":
+        readable_title = "Untitled chat"
+    readable_title = readable_title[:100].rstrip(" .") or "Untitled chat"
+    index_width = max(3, len(str(total)))
+    return f"{index:0{index_width}d} - {readable_title}.txt"
+
+
+def _format_export_cost(value: float | None) -> str:
+    if value is None:
+        return "-"
+    if 0 < value < _CHAT_EXPORT_MINIMUM_DISPLAY_COST:
+        return "<$0.0001"
+    fraction_digits = 4 if 0 < value < _CHAT_EXPORT_DETAILED_COST_THRESHOLD else 2
+    return f"${value:,.{fraction_digits}f}"
+
+
+def _build_chat_export_text_file(
+    item: ConversationListItem,
+    *,
+    transcript: str,
+    chat_url: str,
+    timestamp_formatter: BrowserDateTimeFormatter,
+    include_cost: bool,
+) -> str:
+    lines = [
+        f"Chat: {item.title or 'Untitled chat'}",
+        f"User name: {item.user_name or ''}",
+        f"User email: {item.user_email or ''}",
+        f"Created: {timestamp_formatter.format(item.created_at)}",
+        f"Updated: {timestamp_formatter.format(item.updated_at)}",
+        f"Chat URL: {chat_url}",
+    ]
+    if include_cost:
+        lines.append(f"Cost: {_format_export_cost(item.total_cost)}")
+    lines.extend(["", "Summary:", item.summary or "", "", "---", "", "Transcript:", "", transcript])
+    return "\n".join(lines)
+
+
+async def _load_current_branch_export_transcripts(
+    session: AsyncSession, conversation_ids: list[UUID]
+) -> dict[UUID, str]:
+    root_rows = (
+        await session.execute(
+            select(Conversation.id, Conversation.active_root_message_id).where(
+                Conversation.id.in_(conversation_ids)
+            )
+        )
+    ).all()
+    active_root_by_conversation_id: dict[UUID, UUID | None] = {}
+    for conversation_id, active_root_id in root_rows:
+        active_root_by_conversation_id[conversation_id] = active_root_id
+    messages = list(
+        (
+            await session.execute(
+                select(Message)
+                .where(Message.conversation_id.in_(conversation_ids))
+                .order_by(Message.conversation_id, Message.created_at, Message.id)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    messages_by_conversation_id: dict[UUID, list[Message]] = {}
+    for message in messages:
+        messages_by_conversation_id.setdefault(message.conversation_id, []).append(message)
+
+    transcripts: dict[UUID, str] = {}
+    for conversation_id in conversation_ids:
+        conversation_messages = messages_by_conversation_id.get(conversation_id, [])
+        current_path = get_current_branch_path_from_messages(
+            conversation_messages, active_root_by_conversation_id.get(conversation_id)
+        )
+        messages_by_id = {message.id: message for message in conversation_messages}
+        current_messages = [
+            messages_by_id[message_id]
+            for message_id in current_path
+            if message_id in messages_by_id
+        ]
+        transcripts[conversation_id] = _format_chat_export_transcript(current_messages)
+
+    await session.commit()
+    return transcripts
+
+
+def _write_chats_export_archive(
+    package_path: Path, *, workbook_path: Path, workbook_name: str, transcript_dir: Path
+) -> None:
+    with ZipFile(package_path, "w", compression=ZIP_DEFLATED) as archive:
+        archive.write(workbook_path, workbook_name)
+        for transcript_path in sorted(transcript_dir.iterdir()):
+            archive.write(transcript_path, f"{_CHAT_EXPORT_TRANSCRIPT_DIR}/{transcript_path.name}")
+
+
+async def _build_chats_export_package(
+    session: AsyncSession,
+    items: list[ConversationListItem],
+    *,
+    output_dir: Path,
+    chat_url_base: str,
+    browser_time_zone: str,
+    browser_locale: str,
+    include_cost: bool,
+) -> tuple[Path, str]:
+    export_date = datetime.now(UTC).date().isoformat()
+    package_name = f"chats-{export_date}.zip"
+    workbook_name = f"chats-{export_date}.xlsx"
+    workbook_path = output_dir / workbook_name
+    transcript_dir = output_dir / _CHAT_EXPORT_TRANSCRIPT_DIR
+    transcript_dir.mkdir(parents=True)
+
+    headers = _CHAT_EXPORT_HEADERS
+    column_widths = _CHAT_EXPORT_COLUMN_WIDTHS
+    if include_cost:
+        headers += (_CHAT_EXPORT_COST_HEADER,)
+        column_widths += (_CHAT_EXPORT_COST_COLUMN_WIDTH,)
+    workbook = ExcelExportWorkbook(
+        sheet_title="Chats", headers=headers, column_widths=column_widths
+    )
+    timestamp_formatter = BrowserDateTimeFormatter.resolve(
+        time_zone=browser_time_zone, locale=browser_locale
+    )
+
+    row_index = 0
+    for item_batch in batched(items, _CHAT_EXPORT_BATCH_SIZE, strict=False):
+        batch_items = list(item_batch)
+        transcripts = await _load_current_branch_export_transcripts(
+            session, [item.id for item in batch_items]
+        )
+        for item in batch_items:
+            row_index += 1
+            title = item.title or "Untitled chat"
+            transcript = transcripts.get(item.id, "")
+            transcript_filename = _build_chat_export_transcript_filename(
+                index=row_index, total=len(items), title=title
+            )
+            transcript_relative_path = f"{_CHAT_EXPORT_TRANSCRIPT_DIR}/{transcript_filename}"
+            chat_url = _build_chat_export_url(chat_url_base, item.id)
+            transcript_path = transcript_dir / transcript_filename
+            text_file_content = _build_chat_export_text_file(
+                item,
+                transcript=transcript,
+                chat_url=chat_url,
+                timestamp_formatter=timestamp_formatter,
+                include_cost=include_cost,
+            )
+            await asyncio.to_thread(transcript_path.write_text, text_file_content, encoding="utf-8")
+            truncation_notice = (
+                "\n\n[Transcript truncated for Excel. "
+                f"See {transcript_relative_path} for the complete transcript.]"
+            )
+            workbook_row = (
+                excel_safe_text(title),
+                excel_safe_text(item.summary),
+                excel_safe_text(transcript, truncation_suffix=truncation_notice),
+                ExcelExportCell(
+                    excel_safe_text(transcript_filename), hyperlink=transcript_relative_path
+                ),
+                ExcelExportCell(excel_safe_text(chat_url), hyperlink=chat_url),
+                excel_safe_text(item.user_name),
+                excel_safe_text(item.user_email),
+                timestamp_formatter.format(item.created_at),
+                timestamp_formatter.format(item.updated_at),
+            )
+            if include_cost:
+                workbook_row += (ExcelExportCell(item.total_cost, number_format='"$"#,##0.00####'),)
+            workbook.append(workbook_row)
+
+    await asyncio.to_thread(workbook.save, workbook_path)
+    package_path = output_dir / package_name
+    await asyncio.to_thread(
+        _write_chats_export_archive,
+        package_path,
+        workbook_path=workbook_path,
+        workbook_name=workbook_name,
+        transcript_dir=transcript_dir,
+    )
+    return package_path, package_name
+
+
+@router.get("/export")
+async def export_internal_conversations(
+    session: SessionDep,
+    current_user: CurrentUser,
+    search: Annotated[str | None, Query()] = None,
+    platform: Annotated[str | None, Query()] = None,
+    user_email: Annotated[str | None, Query()] = None,
+    user_group: Annotated[OwnerGroup | None, Query()] = None,
+    phrase_search: Annotated[bool, Query()] = False,
+    start: Annotated[datetime | None, Query()] = None,
+    end: Annotated[datetime | None, Query()] = None,
+    sort_by: Annotated[str, Query()] = "updated_at",
+    descending: Annotated[bool, Query()] = True,
+    chat_url_base: Annotated[str, Query()] = "",
+    browser_time_zone: Annotated[str, Query()] = "UTC",
+    browser_locale: Annotated[str, Query()] = "en-US",
+) -> FileResponse:
+    page = await _list_internal_conversations(
+        session,
+        current_user,
+        page_params=PaginationParams(limit=0, offset=0, sort_by=sort_by, descending=descending),
+        search=search,
+        platform=platform,
+        user_email=user_email,
+        user_group=user_group,
+        phrase_search=phrase_search,
+        start=start,
+        end=end,
+        kind="chat",
+        export_all=True,
+    )
+    permission_map = await get_effective_permission_map(session, current_user)
+    include_cost = permission_map.get(PermissionKey.CHATS_VIEW_COST_COLUMN, False)
+    await session.commit()
+
+    temporary_directory = Path(tempfile.mkdtemp(prefix="chats-export-"))
+    try:
+        package_path, package_name = await _build_chats_export_package(
+            session,
+            page.items,
+            output_dir=temporary_directory,
+            chat_url_base=chat_url_base,
+            browser_time_zone=browser_time_zone,
+            browser_locale=browser_locale,
+            include_cost=include_cost,
+        )
+    except Exception:
+        shutil.rmtree(temporary_directory, ignore_errors=True)
+        raise
+
+    return FileResponse(
+        package_path,
+        filename=package_name,
+        media_type="application/zip",
+        background=BackgroundTask(shutil.rmtree, temporary_directory, ignore_errors=True),
+    )
 
 
 async def _build_internal_conversation_detail(

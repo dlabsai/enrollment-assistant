@@ -117,7 +117,13 @@ export const ErrorDialog = ({
                     )}
                 </AlertDialogHeader>
                 <AlertDialogFooter>
-                    <AlertDialogAction>{okLabel}</AlertDialogAction>
+                    <AlertDialogAction
+                        onClick={(): void => {
+                            onOpenChange(false);
+                        }}
+                    >
+                        {okLabel}
+                    </AlertDialogAction>
                 </AlertDialogFooter>
             </AlertDialogContent>
         </AlertDialog>

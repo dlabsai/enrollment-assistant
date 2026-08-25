@@ -41,6 +41,7 @@ import type { ChatMessage } from "@va/shared/types";
 import {
     Copy,
     ExternalLink,
+    FileArchive,
     Filter,
     Link,
     ListTree,
@@ -90,6 +91,7 @@ import {
 import { mapServerGuardrailsFailures } from "../../chat/lib/guardrails";
 import {
     buildResponseLink,
+    getResponseLinkBaseUrl,
     openConversationInNewTab,
     type ResponseLinkTarget,
 } from "../../chat/lib/response-link";
@@ -100,6 +102,10 @@ import { InlineError, LoadingState } from "../../components/page-state";
 import { TimeRangeFilter } from "../../components/time-range-filter";
 import { UserFilterPopover } from "../../components/user-filter-popover";
 import { formatTableTimestamp } from "../../lib/date-format";
+import {
+    downloadApiBlob,
+    getBrowserExportTimeSettings,
+} from "../../lib/file-export";
 import {
     formatLocaleNumber,
     formatUsdCost,
@@ -113,7 +119,11 @@ import {
     useCopyChatTranscript,
     usePersistentChatSummary,
 } from "../hooks/use-chat-review-controls";
-import { fetchChatListPage, fetchChatUsers } from "../lib/api";
+import {
+    fetchChatListPage,
+    fetchChatsExport,
+    fetchChatUsers,
+} from "../lib/api";
 import {
     buildOwnerGroupFilterOptions,
     buildUserFilterParams,
@@ -1253,6 +1263,7 @@ const ChatReviewListPage = ({
         { id: "updated_at", desc: true },
     ]);
     const [loading, setLoading] = useState(true);
+    const [exporting, setExporting] = useState(false);
     const [error, setError] = useState<string | undefined>();
     const [page, setPage] = useState<ChatListPageResponse | undefined>();
     const [refreshToken, setRefreshToken] = useState(0);
@@ -1661,6 +1672,57 @@ const ChatReviewListPage = ({
         });
     }, [kind, selectedChatId]);
 
+    const handleExportChats = useCallback(async (): Promise<void> => {
+        if (kind !== "chat" || exporting) {
+            return;
+        }
+
+        setExporting(true);
+        try {
+            const sortKey = sorting[0]?.id ?? "updated_at";
+            const descending = sorting[0]?.desc ?? true;
+            const userFilterParams = canFilterUsers
+                ? buildUserFilterParams(selectedUser)
+                : {};
+            const response = await fetchChatsExport(api, {
+                platform: requestPlatform,
+                search: searchQuery,
+                phraseSearch,
+                userEmail: userFilterParams.userEmail,
+                userGroup: userFilterParams.userGroup,
+                sortBy: sortKey,
+                descending,
+                timeRange,
+                customRange,
+                chatUrlBase: getResponseLinkBaseUrl(),
+                ...getBrowserExportTimeSettings(),
+            });
+            const date = new Date().toISOString().slice(0, 10);
+            downloadApiBlob(response, `chats-${date}.zip`);
+            toast.success("Exported chats");
+        } catch (error_) {
+            toast.error(
+                error_ instanceof Error
+                    ? error_.message
+                    : "Failed to export chats",
+            );
+        } finally {
+            setExporting(false);
+        }
+    }, [
+        api,
+        canFilterUsers,
+        customRange,
+        exporting,
+        kind,
+        phraseSearch,
+        requestPlatform,
+        searchQuery,
+        selectedUser,
+        sorting,
+        timeRange,
+    ]);
+
     const detailContent = (
         <ChatDetailContent
             canViewDurationTooltip={canViewDurationTooltip}
@@ -1829,6 +1891,20 @@ const ChatReviewListPage = ({
                     <RefreshCw data-icon="inline-start" />
                     Refresh
                 </Button>
+                {kind === "chat" && (
+                    <Button
+                        disabled={
+                            exporting || loading || (page?.total ?? 0) === 0
+                        }
+                        onClick={() => {
+                            void handleExportChats();
+                        }}
+                        variant="outline"
+                    >
+                        <FileArchive data-icon="inline-start" />
+                        {exporting ? "Exporting..." : "Export chats"}
+                    </Button>
+                )}
             </PageHeader>
 
             <PageSection className="flex min-h-0 flex-1 flex-col">

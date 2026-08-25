@@ -291,12 +291,13 @@ async def test_evals_can_create_public_chatbot_case(transactional_session: Async
 
 
 @pytest.mark.asyncio
-async def test_evals_reports_list_and_detail(
+async def test_evals_reports_list_and_detail_with_opt_in_cost(
     transactional_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     admin = await _create_user(
         transactional_session, group_slug=SystemGroupSlug.ADMIN, email_prefix="eval-admin"
     )
+    trace_id = "1234567890abcdef1234567890abcdef"
 
     report = EvalRunRecord(
         report_id="eval-backendpagination-chatbot-20260417-120000-000000",
@@ -319,7 +320,7 @@ async def test_evals_reports_list_and_detail(
         expected_output=None,
         metadata_json=None,
         stats={
-            "runs": 1,
+            "runs": 2,
             "assertion_pass_rates": {"passed": 0.0},
             "pass_rate": 0.0,
             "runtime_error_rate": 0.0,
@@ -332,8 +333,21 @@ async def test_evals_reports_list_and_detail(
             output={"chatbot_response": "Hello"},
             duration=0.1,
             error=None,
-            otel_trace_id="1234567890abcdef1234567890abcdef",
+            otel_trace_id=trace_id,
             otel_span_id="1234567890abcdef",
+            assertions={"passed": {"name": "passed", "value": False, "reason": "nope"}},
+            scores={},
+            labels={},
+        )
+    )
+    case.runs.append(
+        EvalCaseRunResult(
+            run_index=2,
+            output={"chatbot_response": "Hello again"},
+            duration=0.4,
+            error=None,
+            otel_trace_id=trace_id,
+            otel_span_id="2234567890abcdef",
             assertions={"passed": {"name": "passed", "value": False, "reason": "nope"}},
             scores={},
             labels={},
@@ -356,6 +370,32 @@ async def test_evals_reports_list_and_detail(
     )
     transactional_session.add(report)
     transactional_session.add(older_report)
+    transactional_session.add_all(
+        [
+            _eval_trace_span(
+                trace_id=trace_id,
+                span_id="1234567890abcdef",
+                name="Evaluation: chatbot",
+                started_at=report.generated_at,
+                total_cost=0.01,
+            ),
+            _eval_trace_span(
+                trace_id=trace_id,
+                span_id="2234567890abcdef",
+                parent_span_id="1234567890abcdef",
+                name="eval_run case_a #2",
+                started_at=report.generated_at,
+                total_cost=0.02,
+            ),
+            _eval_trace_span(
+                trace_id="ffffffffffffffffffffffffffffffff",
+                span_id="ffffffffffffffff",
+                name="Unrelated evaluation",
+                started_at=report.generated_at,
+                total_cost=1.0,
+            ),
+        ]
+    )
     await transactional_session.flush()
 
     @asynccontextmanager
@@ -368,7 +408,9 @@ async def test_evals_reports_list_and_detail(
         transport=ASGITransport(app=app), base_url="http://testserver"
     ) as client:
         authenticate_client(client, admin.id)
-        list_response = await client.get("/api/evals/reports", params={"search": report.report_id})
+        list_response = await client.get(
+            "/api/evals/reports", params={"include_cost": "true", "search": report.report_id}
+        )
         paged_response = await client.get(
             "/api/evals/reports",
             params={
@@ -392,17 +434,19 @@ async def test_evals_reports_list_and_detail(
     assert reports[0]["repeats"] == 5
     assert reports[0]["concurrency"] == 10
     assert reports[0]["case_count"] == 1
-    assert reports[0]["run_count"] == 1
+    assert reports[0]["run_count"] == 2
     assert reports[0]["is_internal"] is True
     assert reports[0]["model_configs"] == {"chatbot": {"model": "gpt-test", "temperature": 0.1}}
     assert reports[0]["pass_rate_average"] == 0.0
     assert reports[0]["duration_median_average"] == 0.25
+    assert reports[0]["total_cost"] == pytest.approx(0.03)
 
     assert paged_response.status_code == 200
     paged_payload = paged_response.json()
     assert paged_payload["total"] == 2
     assert len(paged_payload["items"]) == 1
     assert paged_payload["items"][0]["title"] == "Chatbot"
+    assert paged_payload["items"][0]["total_cost"] is None
 
     assert detail_response.status_code == 200
     detail = detail_response.json()

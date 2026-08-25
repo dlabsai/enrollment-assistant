@@ -77,6 +77,7 @@ export interface EvalReportSummary {
     modelConfigs: Record<string, unknown>;
     passRateAverage: number | undefined;
     durationMedianAverage: number | undefined;
+    totalCost: number | undefined;
 }
 
 export interface EvalReportList {
@@ -207,6 +208,7 @@ export interface EvalReportSummaryApi {
     model_configs: Record<string, unknown>;
     pass_rate_average: number | null;
     duration_median_average: number | null;
+    total_cost: number | null;
 }
 
 export interface EvalReportListApi {

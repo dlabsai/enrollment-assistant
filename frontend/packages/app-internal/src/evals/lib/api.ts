@@ -45,6 +45,7 @@ const mapSummary = (report: EvalReportSummaryApi): EvalReportSummary => ({
     modelConfigs: report.model_configs,
     passRateAverage: report.pass_rate_average ?? undefined,
     durationMedianAverage: report.duration_median_average ?? undefined,
+    totalCost: report.total_cost ?? undefined,
 });
 
 const mapEvaluationResult = (
@@ -178,6 +179,7 @@ const isEvalStatus = (value: unknown): value is EvalRunStatusEvent["status"] =>
 
 interface FetchEvalReportsParams {
     descending: boolean;
+    includeCost?: boolean;
     limit: number;
     offset: number;
     search: string;
@@ -195,6 +197,10 @@ export const fetchEvalReports = async (
         offset: String(params.offset),
         sort_by: params.sortBy,
     });
+    if (params.includeCost === true) {
+        searchParams.set("include_cost", "true");
+    }
+
     const trimmedSearch = params.search.trim();
     if (trimmedSearch !== "") {
         searchParams.set("search", trimmedSearch);

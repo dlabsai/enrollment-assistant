@@ -36,6 +36,7 @@ import {
     buildScoreSummaryRows,
     formatDurationValue,
     formatEvalAudience,
+    formatModelTemperature,
     formatModelValue,
     formatOptionalNumber,
     formatPercentValue,
@@ -54,11 +55,7 @@ import { TestCaseSelector } from "./test-case-selector";
 
 type RunStatusFilter = "all" | "failed" | "passed" | "runtime_error";
 type CasePassRateFilter =
-    | "all"
-    | "below_threshold"
-    | "partial"
-    | "zero"
-    | "perfect";
+    "all" | "below_threshold" | "partial" | "zero" | "perfect";
 type ResponseRenderMode = "source" | "markdown";
 
 interface FilteredCaseResult {
@@ -651,6 +648,9 @@ export const EvalsReportDetail = memo(
             () => parseModelConfigurations(report),
             [report],
         );
+        const hasModelTemperature = modelConfigs.some(
+            (config) => config.temperature !== undefined,
+        );
         const additionalSettings = useMemo(
             () => Object.entries(report.additionalSettings),
             [report.additionalSettings],
@@ -888,9 +888,11 @@ export const EvalsReportDetail = memo(
                                     <TableRow>
                                         <TableHead>Role</TableHead>
                                         <TableHead>Model</TableHead>
-                                        <TableHead className="text-right">
-                                            Temperature
-                                        </TableHead>
+                                        {hasModelTemperature && (
+                                            <TableHead className="text-right">
+                                                Temperature
+                                            </TableHead>
+                                        )}
                                         <TableHead className="text-right">
                                             Max tokens
                                         </TableHead>
@@ -905,11 +907,13 @@ export const EvalsReportDetail = memo(
                                             <TableCell className="text-xs break-words">
                                                 {formatModelValue(config.model)}
                                             </TableCell>
-                                            <TableCell className="text-right tabular-nums">
-                                                {formatOptionalNumber(
-                                                    config.temperature,
-                                                )}
-                                            </TableCell>
+                                            {hasModelTemperature && (
+                                                <TableCell className="text-right tabular-nums">
+                                                    {formatModelTemperature(
+                                                        config.temperature,
+                                                    )}
+                                                </TableCell>
+                                            )}
                                             <TableCell className="text-right tabular-nums">
                                                 {formatOptionalNumber(
                                                     config.maxTokens,

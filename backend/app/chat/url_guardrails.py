@@ -30,10 +30,6 @@ _URL_BOUNDARY_CHARS = "<>()[]{}" + _URL_QUOTE_DELIMITERS
 _URL_TOKEN_CHARACTER = rf"[^\s{re.escape(_URL_BOUNDARY_CHARS)}]"
 _TRAILING_URL_PUNCTUATION = ".,;:!?)]}>*" + _URL_QUOTE_DELIMITERS
 _RELATIVE_URL_BASE = "https://demo-university.example.edu"
-_WWW_HOST_ALIASES = {
-    "www.demo-university.example.edu": "demo-university.example.edu",
-    "www.catalog.demo-university.example.edu": "catalog.demo-university.example.edu",
-}
 
 _HTTP_URL_PATTERN = re.compile(rf"https?://{_URL_TOKEN_CHARACTER}+", re.IGNORECASE)
 _MAILTO_PATTERN = re.compile(rf"mailto:{_URL_TOKEN_CHARACTER}+", re.IGNORECASE)
@@ -82,7 +78,7 @@ _TRACKING_QUERY_PARAM_NAMES = frozenset(
     }
 )
 _TRACKING_QUERY_PARAM_PREFIXES = ("_ga_", "_gac_", "_gcl_", "hsa_", "mtm_", "utm_")
-_URL_REGISTRY_VERSION = "v9"
+_URL_REGISTRY_VERSION = "v10"
 _URL_REGISTRY_CACHE_TTL_SECONDS = 60.0
 
 
@@ -144,8 +140,7 @@ def extract_urls(text: str) -> list[str]:
 
 
 def _normalize_host(netloc: str) -> str:
-    lowered = netloc.lower()
-    return _WWW_HOST_ALIASES.get(lowered, lowered)
+    return netloc.lower().removeprefix("www.")
 
 
 def _normalize_mailto(candidate: str) -> str | None:

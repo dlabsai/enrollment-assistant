@@ -14,6 +14,9 @@ export const formatOptionalNumber = (
         ? "-"
         : formatLocaleNumber(value, { maximumFractionDigits: 4 });
 
+export const formatModelTemperature = (value: number | undefined): string =>
+    value === undefined ? "" : formatOptionalNumber(value);
+
 export const formatModelValue = (value: string | undefined): string =>
     value === undefined || value === "" ? "-" : value;
 
@@ -93,6 +96,7 @@ interface EvalModelConfig {
 }
 
 interface EvalModelConfigSource {
+    isInternal: boolean | null;
     modelConfigs: Record<string, unknown>;
 }
 
@@ -106,6 +110,9 @@ interface EvalModelCompareRow {
 
 export const numberFromUnknown = (value: unknown): number | undefined =>
     typeof value === "number" && Number.isFinite(value) ? value : undefined;
+
+const modelSupportsTemperature = (model: string): boolean =>
+    !model.includes("gpt-5");
 
 const formatPercent = (value: number | undefined): string => {
     if (value === undefined) {
@@ -207,7 +214,10 @@ export const buildOverallAverages = (
             )) {
                 const mean = numberFromUnknown(value);
                 if (mean !== undefined) {
-                    scoreMeans.set(name, [...(scoreMeans.get(name) ?? []), mean]);
+                    scoreMeans.set(name, [
+                        ...(scoreMeans.get(name) ?? []),
+                        mean,
+                    ]);
                 }
             }
         }
@@ -244,6 +254,7 @@ export const parseModelConfigurations = (
     report: EvalModelConfigSource,
 ): EvalModelConfig[] =>
     Object.entries(report.modelConfigs)
+        .filter(([role]) => report.isInternal !== true || role !== "extractor")
         .map(([role, rawConfig]) => {
             if (!isRecord(rawConfig)) {
                 return {
@@ -254,10 +265,13 @@ export const parseModelConfigurations = (
                 } satisfies EvalModelConfig;
             }
             const modelValue = rawConfig.model;
+            const model = typeof modelValue === "string" ? modelValue : "";
             return {
                 role,
-                model: typeof modelValue === "string" ? modelValue : "",
-                temperature: numberFromUnknown(rawConfig.temperature),
+                model,
+                temperature: modelSupportsTemperature(model)
+                    ? numberFromUnknown(rawConfig.temperature)
+                    : undefined,
                 maxTokens: numberFromUnknown(rawConfig.max_tokens),
             } satisfies EvalModelConfig;
         })

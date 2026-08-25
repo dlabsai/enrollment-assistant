@@ -1,26 +1,26 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import UTC, datetime, tzinfo
+from datetime import UTC, datetime
 from io import BytesIO
-from typing import Annotated, Any, Literal, cast
+from typing import Annotated, Any, Literal
 from urllib.parse import quote
 from uuid import UUID  # noqa: TC003
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from babel.core import Locale, UnknownLocaleError
-from babel.dates import format_datetime
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import StreamingResponse
-from openpyxl import Workbook
-from openpyxl.cell.cell import Cell
-from openpyxl.styles import Alignment, Font, PatternFill
-from openpyxl.utils import get_column_letter
 from pydantic import BaseModel
 from sqlalchemy import false, func, or_, select
 from sqlalchemy.orm import aliased
 
 from app.api.deps import CurrentUser, SessionDep
+from app.api.excel_export import (
+    XLSX_MEDIA_TYPE,
+    BrowserDateTimeFormatter,
+    ExcelExportCell,
+    ExcelExportWorkbook,
+    excel_safe_text,
+)
 from app.api.routes.owner_group_filter import (
     OwnerGroup,
     build_owner_group_filter,
@@ -37,8 +37,6 @@ from app.models import Rating as MessageRating
 router = APIRouter(prefix="/feedback", tags=["feedback"])
 
 
-_XLSX_MEDIA_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-_FORMULA_PREFIXES = ("=", "+", "-", "@")
 _EXPORT_HEADERS = (
     "Thumbs",
     "Feedback text",
@@ -314,61 +312,8 @@ def _query_item_to_feedback_list_item(item: FeedbackQueryItem) -> FeedbackListIt
     )
 
 
-def _safe_excel_text(value: str | None) -> str:
-    if value is None:
-        return ""
-    stripped = value.lstrip()
-    if stripped.startswith(_FORMULA_PREFIXES):
-        return f"'{value}"
-    return value
-
-
 def _feedback_rating_label(rating: MessageRating) -> str:
     return "Down" if rating == MessageRating.THUMBS_DOWN else "Up"
-
-
-def _resolve_browser_timezone(time_zone: str) -> tzinfo:
-    try:
-        return ZoneInfo(time_zone)
-    except ZoneInfoNotFoundError:
-        return UTC
-
-
-def _normalize_browser_datetime(value: datetime, *, time_zone: tzinfo) -> datetime:
-
-    if value.tzinfo is None:
-        value = value.replace(tzinfo=UTC)
-    return value.astimezone(time_zone)
-
-
-def _normalize_browser_locale(value: str | None) -> str:
-    if value is None:
-        return "en_US"
-    normalized = value.replace("-", "_").strip()
-    if normalized == "":
-        return "en_US"
-    try:
-        return str(Locale.parse(normalized))
-    except UnknownLocaleError:
-        return "en_US"
-    except ValueError:
-        return "en_US"
-
-
-def _build_browser_datetime_format(locale: str | None) -> tuple[str, str]:
-    locale_name = _normalize_browser_locale(locale)
-    locale_obj = Locale.parse(locale_name)
-    format_pattern = "MMM d, h:mm a"
-    if "a" not in locale_obj.time_formats["short"].pattern:
-        format_pattern = "MMM d, HH:mm"
-    return locale_name, format_pattern
-
-
-def _format_browser_table_timestamp(
-    value: datetime, *, time_zone: tzinfo, locale_name: str, format_pattern: str
-) -> str:
-    localized = _normalize_browser_datetime(value, time_zone=time_zone)
-    return format_datetime(localized, format_pattern, locale=locale_name)
 
 
 def _build_message_url(message_url_base: str, conversation_id: UUID, message_id: UUID) -> str:
@@ -385,55 +330,30 @@ def _build_feedback_workbook(
     browser_time_zone: str,
     browser_locale: str,
 ) -> bytes:
-    workbook = Workbook()
-    worksheet = workbook.active
-    if worksheet is None:
-        raise RuntimeError("Failed to create feedback export worksheet")
-    worksheet.title = "Feedback"
-    worksheet.freeze_panes = "A2"
-
-    worksheet.append(_EXPORT_HEADERS)
-    header_fill = PatternFill(fill_type="solid", fgColor="D9EAF7")
-    for cell in cast(tuple[Cell, ...], worksheet[1]):
-        cell.font = Font(bold=True)
-        cell.fill = header_fill
-        cell.alignment = Alignment(vertical="top", wrap_text=True)
-
-    timezone_obj = _resolve_browser_timezone(browser_time_zone)
-    locale_name, format_pattern = _build_browser_datetime_format(browser_locale)
+    workbook = ExcelExportWorkbook(
+        sheet_title="Feedback", headers=_EXPORT_HEADERS, column_widths=_EXPORT_COLUMN_WIDTHS
+    )
+    timestamp_formatter = BrowserDateTimeFormatter.resolve(
+        time_zone=browser_time_zone, locale=browser_locale
+    )
 
     for item in items:
         message_url = _build_message_url(message_url_base, item.conversation_id, item.message_id)
-        worksheet.append(
+        workbook.append(
             (
                 _feedback_rating_label(item.rating),
-                _safe_excel_text(item.text),
-                _safe_excel_text(item.user_message_content),
-                _safe_excel_text(item.message_content),
-                _safe_excel_text(message_url),
-                _safe_excel_text(item.conversation_title or "Untitled chat"),
-                _safe_excel_text(item.conversation_user_name),
-                _safe_excel_text(item.conversation_user_email),
-                _safe_excel_text(item.feedback_user_name),
-                _safe_excel_text(item.feedback_user_email),
-                _format_browser_table_timestamp(
-                    item.created_at,
-                    time_zone=timezone_obj,
-                    locale_name=locale_name,
-                    format_pattern=format_pattern,
-                ),
+                excel_safe_text(item.text),
+                excel_safe_text(item.user_message_content),
+                excel_safe_text(item.message_content),
+                ExcelExportCell(excel_safe_text(message_url), hyperlink=message_url),
+                excel_safe_text(item.conversation_title or "Untitled chat"),
+                excel_safe_text(item.conversation_user_name),
+                excel_safe_text(item.conversation_user_email),
+                excel_safe_text(item.feedback_user_name),
+                excel_safe_text(item.feedback_user_email),
+                timestamp_formatter.format(item.created_at),
             )
         )
-        row_index = worksheet.max_row
-        message_url_cell = cast(Cell, worksheet.cell(row=row_index, column=5))
-        message_url_cell.hyperlink = message_url
-        message_url_cell.style = "Hyperlink"
-        for cell in cast(tuple[Cell, ...], worksheet[row_index]):
-            cell.alignment = Alignment(vertical="top", wrap_text=True)
-
-    for column_index, width in enumerate(_EXPORT_COLUMN_WIDTHS, start=1):
-        worksheet.column_dimensions[get_column_letter(column_index)].width = width
-    worksheet.auto_filter.ref = worksheet.dimensions
 
     buffer = BytesIO()
     workbook.save(buffer)
@@ -487,7 +407,7 @@ async def export_feedback(
 
     return StreamingResponse(
         BytesIO(workbook),
-        media_type=_XLSX_MEDIA_TYPE,
+        media_type=XLSX_MEDIA_TYPE,
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
 

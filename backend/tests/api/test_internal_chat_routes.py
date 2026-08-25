@@ -5,11 +5,14 @@ import logging
 from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass
 from datetime import timedelta
+from io import BytesIO
 from typing import TYPE_CHECKING
 from uuid import UUID, uuid4
+from zipfile import ZipFile
 
 import pytest
 from httpx import ASGITransport, AsyncClient
+from openpyxl import load_workbook
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api import grounding_agent
@@ -2731,6 +2734,215 @@ async def test_paginated_conversations_returns_and_sorts_role_message_counts(
         str(second_conversation.id),
         str(first_conversation.id),
     ]
+
+
+@pytest.mark.asyncio
+async def test_chats_export_builds_filtered_zip_with_complete_current_branch_transcripts(
+    transactional_session: AsyncSession,
+) -> None:
+    reviewer = await _create_user(
+        transactional_session, group_slug=SystemGroupSlug.USER, email_prefix="chat-export-reviewer"
+    )
+    hidden_owner = await _create_user(
+        transactional_session, group_slug=SystemGroupSlug.USER, email_prefix="chat-export-hidden"
+    )
+    await replace_user_permission_overrides(
+        transactional_session,
+        reviewer,
+        {
+            PermissionKey.ACCESS_CHATS: True,
+            PermissionKey.CHATS_VIEW_OWN: True,
+            PermissionKey.CHATS_VIEW_USERS: False,
+            PermissionKey.CHATS_VIEW_COST_COLUMN: True,
+        },
+    )
+
+    conversation = Conversation(
+        title="Admissions export: question?",
+        summary="A useful summary",
+        user=False,
+        project="demo",
+        user_id=reviewer.id,
+        is_public=False,
+    )
+    empty_conversation = Conversation(
+        title="Admissions export empty",
+        user=False,
+        project="demo",
+        user_id=reviewer.id,
+        is_public=False,
+    )
+    phrase_mismatch_conversation = Conversation(
+        title="Export admissions reordered",
+        user=False,
+        project="demo",
+        user_id=reviewer.id,
+        is_public=False,
+    )
+    hidden_conversation = Conversation(
+        title="Admissions export hidden",
+        user=False,
+        project="demo",
+        user_id=hidden_owner.id,
+        is_public=False,
+    )
+    transactional_session.add_all(
+        [conversation, empty_conversation, phrase_mismatch_conversation, hidden_conversation]
+    )
+    await transactional_session.flush()
+
+    root = Message(role="user", content="How do I apply?", conversation=conversation)
+    transactional_session.add(root)
+    await transactional_session.flush()
+    long_answer_content = "A" * 40_000
+    long_answer = Message(
+        role="assistant", content=long_answer_content, conversation=conversation, parent_id=root.id
+    )
+    alternate_answer = Message(
+        role="assistant",
+        content="Inactive alternate response",
+        conversation=conversation,
+        parent_id=root.id,
+    )
+    transactional_session.add_all([long_answer, alternate_answer])
+    await transactional_session.flush()
+    follow_up = Message(
+        role="user",
+        content="What happens next?",
+        conversation=conversation,
+        parent_id=long_answer.id,
+    )
+    transactional_session.add(follow_up)
+    await transactional_session.flush()
+    blocked_answer = Message(
+        role="assistant",
+        content="Raw rejected response",
+        conversation=conversation,
+        parent_id=follow_up.id,
+        guardrails_blocked=True,
+        guardrails_blocked_message="Please contact an advisor.",
+    )
+    hidden_message = Message(
+        role="assistant", content="Hidden owner response", conversation=hidden_conversation
+    )
+    transactional_session.add_all([blocked_answer, hidden_message])
+    await transactional_session.flush()
+    conversation.active_root_message_id = root.id
+    root.active_child_id = long_answer.id
+    long_answer.active_child_id = follow_up.id
+    follow_up.active_child_id = blocked_answer.id
+    await transactional_session.commit()
+
+    export_params = {
+        "search": "Admissions export",
+        "phrase_search": "true",
+        "sort_by": "title",
+        "descending": "false",
+        "chat_url_base": "https://internal.example/app",
+        "browser_time_zone": "UTC",
+        "browser_locale": "en-US",
+    }
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://testserver"
+    ) as client:
+        authenticate_client(client, reviewer.id)
+        response = await client.get("/api/conversations/export", params=export_params)
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("application/zip")
+    assert "chats-" in response.headers["content-disposition"]
+
+    with ZipFile(BytesIO(response.content)) as archive:
+        names = archive.namelist()
+        workbook_names = [name for name in names if name.endswith(".xlsx")]
+        assert len(workbook_names) == 1
+        workbook_name = workbook_names[0]
+        assert {name for name in names if name.startswith("transcripts/")} == {
+            "transcripts/001 - Admissions export empty.txt",
+            "transcripts/002 - Admissions export question.txt",
+        }
+        workbook = load_workbook(BytesIO(archive.read(workbook_name)))
+        worksheet = workbook.active
+        assert worksheet is not None
+        rows = list(worksheet.iter_rows(values_only=True))
+        assert rows[0] == (
+            "Chat",
+            "Summary",
+            "Transcript",
+            "Transcript file",
+            "Chat URL",
+            "User name",
+            "User email",
+            "Created",
+            "Updated",
+            "Cost",
+        )
+        assert [row[0] for row in rows[1:]] == [
+            "Admissions export empty",
+            "Admissions export: question?",
+        ]
+        assert rows[1][2] is None
+        assert rows[2][1] == "A useful summary"
+        excel_transcript = rows[2][2]
+        assert isinstance(excel_transcript, str)
+        assert len(excel_transcript) == 32_767
+        assert excel_transcript.startswith("User:\nHow do I apply?")
+        assert excel_transcript.endswith(
+            "[Transcript truncated for Excel. See transcripts/002 - "
+            "Admissions export question.txt for the complete transcript.]"
+        )
+        assert rows[2][3] == "002 - Admissions export question.txt"
+        assert rows[2][4] == f"https://internal.example/app#/chats/{conversation.id}"
+        assert rows[2][5] == reviewer.name
+        assert rows[2][6] == reviewer.email
+        assert rows[2][9] is None
+        transcript_file_cell = worksheet.cell(row=3, column=4)
+        assert transcript_file_cell.hyperlink is not None
+        assert transcript_file_cell.hyperlink.target == (
+            "transcripts/002 - Admissions export question.txt"
+        )
+        workbook.close()
+
+        full_transcript = archive.read("transcripts/002 - Admissions export question.txt").decode()
+        empty_transcript = archive.read("transcripts/001 - Admissions export empty.txt").decode()
+
+    assert "Chat: Admissions export: question?" in full_transcript
+    assert f"Chat URL: https://internal.example/app#/chats/{conversation.id}" in full_transcript
+    assert "Cost: -" in full_transcript
+    assert f"Assistant:\n{long_answer_content}" in full_transcript
+    assert "User:\nWhat happens next?" in full_transcript
+    assert "Assistant:\nPlease contact an advisor." in full_transcript
+    assert "Raw rejected response" not in full_transcript
+    assert "Inactive alternate response" not in full_transcript
+    assert empty_transcript.endswith("Transcript:\n\n")
+
+    await replace_user_permission_overrides(
+        transactional_session,
+        reviewer,
+        {
+            PermissionKey.ACCESS_CHATS: True,
+            PermissionKey.CHATS_VIEW_OWN: True,
+            PermissionKey.CHATS_VIEW_USERS: False,
+            PermissionKey.CHATS_VIEW_COST_COLUMN: False,
+        },
+    )
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://testserver"
+    ) as client:
+        authenticate_client(client, reviewer.id)
+        no_cost_response = await client.get("/api/conversations/export", params=export_params)
+
+    assert no_cost_response.status_code == 200
+    with ZipFile(BytesIO(no_cost_response.content)) as archive:
+        workbook_name = next(name for name in archive.namelist() if name.endswith(".xlsx"))
+        workbook = load_workbook(BytesIO(archive.read(workbook_name)), read_only=True)
+        worksheet = workbook.active
+        assert worksheet is not None
+        headers = next(worksheet.iter_rows(values_only=True))
+        workbook.close()
+        text_file = archive.read("transcripts/002 - Admissions export question.txt").decode()
+    assert headers[-1] == "Updated"
+    assert "\nCost:" not in text_file
 
 
 @pytest.mark.asyncio

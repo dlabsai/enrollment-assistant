@@ -60,9 +60,7 @@ const initialReportOptions: EvalReportSummary[] = [];
 const getCompareGroupKey = (reports: EvalReportSummary[]): string =>
     JSON.stringify(reports.map((report) => report.id));
 
-const getDefaultCompareReportIds = (
-    reports: EvalReportSummary[],
-): string[] =>
+const getDefaultCompareReportIds = (reports: EvalReportSummary[]): string[] =>
     reports.slice(0, 5).map((report) => report.id);
 
 const resolveCompareReportIds = (
@@ -96,6 +94,7 @@ export const EvalsReportsPage = (): JSX.Element => {
         async (signal: AbortSignal): Promise<EvalReportsData> => {
             const response = await fetchEvalReports(api, {
                 descending: desc,
+                includeCost: true,
                 limit: pageSize,
                 offset: (currentPage - 1) * pageSize,
                 search: searchValue,
@@ -146,8 +145,9 @@ export const EvalsReportsPage = (): JSX.Element => {
         Record<string, string | undefined>
     >({});
     const [viewMode, setViewMode] = useState<EvalsReportViewMode>("report");
-    const [compareTypeState, setCompareTypeState] =
-        useState<string | undefined>();
+    const [compareTypeState, setCompareTypeState] = useState<
+        string | undefined
+    >();
     const [compareLeftIdState, setCompareLeftIdState] = useState<
         string | undefined
     >();
@@ -409,17 +409,13 @@ export const EvalsReportsPage = (): JSX.Element => {
     );
     const compareLeftId =
         compareLeftIdState !== undefined &&
-        compareGroupReports.some(
-            (report) => report.id === compareLeftIdState,
-        )
+        compareGroupReports.some((report) => report.id === compareLeftIdState)
             ? compareLeftIdState
             : compareGroupReports[0]?.id;
     const compareRightId =
         compareRightIdState !== undefined &&
         compareRightIdState !== compareLeftId &&
-        compareGroupReports.some(
-            (report) => report.id === compareRightIdState,
-        )
+        compareGroupReports.some((report) => report.id === compareRightIdState)
             ? compareRightIdState
             : compareGroupReports.find((report) => report.id !== compareLeftId)
                   ?.id;
@@ -667,7 +663,9 @@ export const EvalsReportsPage = (): JSX.Element => {
                                     compareType={compareType}
                                     compareTypeOptions={compareTypeOptions}
                                     detailError={detailError}
-                                    onCompareLeftIdChange={setCompareLeftIdState}
+                                    onCompareLeftIdChange={
+                                        setCompareLeftIdState
+                                    }
                                     onCompareRightIdChange={
                                         setCompareRightIdState
                                     }

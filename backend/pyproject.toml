@@ -23,16 +23,13 @@ dependencies = [
     "pwdlib[argon2]",
     "pydantic",
     "pydantic-ai-slim[openai]",
-    "pydantic-evals",
     "pydantic-settings",
     "python-dotenv",
-    "python-slugify",
     "rich",
     "sqlalchemy",
     "tenacity",
     "tiktoken",
     "joserfc",
-    "scikit-learn",
     "openpyxl",
 ]
 

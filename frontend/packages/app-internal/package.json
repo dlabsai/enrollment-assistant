@@ -10,6 +10,7 @@
         "build-prod": "pnpm -w exec tsc -b packages/app-internal && vite build --mode internal-prod",
         "type-check": "pnpm -w exec tsc -b --noEmit packages/app-internal",
         "lint": "eslint src vite.config.ts --fix --cache --cache-strategy content --cache-location ../../node_modules/.cache/eslint/app-internal",
+        "test:auth": "node --experimental-strip-types --test tests/auth-error-message.test.ts",
         "test:branches": "node --experimental-strip-types --test tests/conversation-tree.test.ts",
         "test:chat-state": "node --experimental-strip-types --test tests/active-request-tracker.test.ts tests/chat-list-state.test.ts tests/generation-attempt.test.ts tests/message-retry.test.ts tests/message-stream-lifecycle.test.ts",
         "test:evals": "node --experimental-strip-types --test tests/assistant-draft.test.ts tests/eval-report-utils.test.ts",

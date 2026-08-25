@@ -1,3 +1,5 @@
+import type { ApiBlobResponse } from "@va/shared/lib/api-client";
+
 import type { AuthenticatedApi } from "../../auth/hooks/use-authenticated-api";
 import {
     type CustomTimeRange,
@@ -61,32 +63,37 @@ interface ChatListPageResponse {
     total: number;
 }
 
-export const fetchChatListPage = async (
-    api: AuthenticatedApi,
-    params: {
-        search?: string;
-        phraseSearch?: boolean;
-        platform?: "internal" | "public";
-        userEmail?: string;
-        userGroup?: "staff" | "devs";
-        limit: number;
-        offset: number;
-        sortBy?: string;
-        descending?: boolean;
-        timeRange: TimeRangeValue;
-        customRange: CustomTimeRange;
-        kind?: "chat" | "investigation";
-    },
-): Promise<ChatListPage> => {
-    const query = new URLSearchParams();
+interface ChatBaseParams {
+    search?: string;
+    phraseSearch?: boolean;
+    platform?: "internal" | "public";
+    userEmail?: string;
+    userGroup?: "staff" | "devs";
+    sortBy?: string;
+    descending?: boolean;
+    timeRange: TimeRangeValue;
+    customRange: CustomTimeRange;
+}
+
+interface ChatListParams extends ChatBaseParams {
+    limit: number;
+    offset: number;
+    kind?: "chat" | "investigation";
+}
+
+interface ChatExportParams extends ChatBaseParams {
+    chatUrlBase: string;
+    browserTimeZone: string;
+    browserLocale: string;
+}
+
+const appendChatBaseQueryParams = (
+    query: URLSearchParams,
+    params: ChatBaseParams,
+): void => {
     if (params.platform !== undefined) {
         query.set("platform", params.platform);
     }
-    if (params.kind !== undefined) {
-        query.set("kind", params.kind);
-    }
-    query.set("limit", String(params.limit));
-    query.set("offset", String(params.offset));
     if (params.search !== undefined && params.search.trim() !== "") {
         query.set("search", params.search.trim());
         if (params.phraseSearch === true) {
@@ -117,6 +124,19 @@ export const fetchChatListPage = async (
     if (timeRangeParams.end !== undefined) {
         query.set("end", timeRangeParams.end);
     }
+};
+
+export const fetchChatListPage = async (
+    api: AuthenticatedApi,
+    params: ChatListParams,
+): Promise<ChatListPage> => {
+    const query = new URLSearchParams();
+    query.set("limit", String(params.limit));
+    query.set("offset", String(params.offset));
+    if (params.kind !== undefined) {
+        query.set("kind", params.kind);
+    }
+    appendChatBaseQueryParams(query, params);
 
     const response = await api.get<ChatListPageResponse>(
         `${CHATS_BASE}/paginated?${query.toString()}`,
@@ -142,4 +162,18 @@ export const fetchChatListPage = async (
             feedbackDown: item.feedback_down ?? 0,
         })),
     };
+};
+
+export const fetchChatsExport = async (
+    api: AuthenticatedApi,
+    params: ChatExportParams,
+): Promise<ApiBlobResponse> => {
+    const query = new URLSearchParams();
+    appendChatBaseQueryParams(query, params);
+    query.set("chat_url_base", params.chatUrlBase);
+    query.set("browser_time_zone", params.browserTimeZone);
+    query.set("browser_locale", params.browserLocale);
+    return api.getBlob(`${CHATS_BASE}/export?${query.toString()}`, {
+        headers: { Accept: "application/zip" },
+    });
 };

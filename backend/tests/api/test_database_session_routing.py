@@ -19,6 +19,7 @@ if TYPE_CHECKING:
     [
         ("GET", "/conversations", "/conversations", "interactive"),
         ("GET", "/conversations/paginated", "/conversations/paginated", "interactive"),
+        ("GET", "/conversations/export", "/conversations/export", "main"),
         ("GET", "/messages", "/messages", "interactive"),
         ("GET", "/feedback", "/feedback", "interactive"),
         ("GET", "/feedback/export", "/feedback/export", "main"),

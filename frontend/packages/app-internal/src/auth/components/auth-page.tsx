@@ -16,11 +16,13 @@ import {
     FormMessage,
 } from "@va/shared/components/ui/form";
 import { Input } from "@va/shared/components/ui/input";
+import { isApiError } from "@va/shared/lib/api-client";
 import { type JSX, useCallback, useEffect, useMemo, useState } from "react";
 import { useForm } from "react-hook-form";
 
 import { useAuth } from "../contexts/auth-context";
 import { loginUser, registerUser } from "../lib/api";
+import { getAuthFormErrorMessage } from "../lib/error-message";
 
 interface FormState {
     name: string;
@@ -148,11 +150,11 @@ export const AuthPage = (): JSX.Element => {
 
                 await authenticate();
             } catch (error) {
-                const message =
-                    error instanceof Error
-                        ? error.message
-                        : "Authentication failed";
-                setError(message);
+                setError(
+                    getAuthFormErrorMessage(
+                        isApiError(error) ? error.detail : undefined,
+                    ),
+                );
             }
         },
         [authenticate, clearAuthError, form, activeMode, validatePasswords],

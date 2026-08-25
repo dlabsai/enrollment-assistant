@@ -8,6 +8,7 @@ import { Input } from "@va/shared/components/ui/input";
 import type { JSX } from "react";
 
 import { DataTable } from "../../components/data-table";
+import { formatUsdCost } from "../../lib/number-format";
 import {
     formatEvalAudience,
     formatOptionalNumber,
@@ -99,6 +100,17 @@ const reportColumns: ColumnDef<EvalReportSummary>[] = [
         ),
     },
     {
+        id: "cost",
+        accessorKey: "totalCost",
+        header: () => <div className="text-right">Cost</div>,
+        enableSorting: false,
+        cell: ({ row }) => (
+            <div className="text-right tabular-nums">
+                {formatUsdCost(row.original.totalCost)}
+            </div>
+        ),
+    },
+    {
         id: "repeats",
         accessorKey: "repeats",
         header: () => <div className="text-right">Repeats</div>,
@@ -183,7 +195,7 @@ export const EvalsReportsList = ({
             pagination={pagination}
             rowCount={rowCount}
             sorting={sorting}
-            tableClassName="min-w-[1120px]"
+            tableClassName="min-w-[1200px]"
             wrapCellText
         />
     </section>

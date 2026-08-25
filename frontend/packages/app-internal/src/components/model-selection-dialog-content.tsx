@@ -143,11 +143,10 @@ export const ModelSelectionDialogContent = <TTarget extends string>({
         const isSelected = fullValue === currentTargetValue;
         return (
             <CommandItem
-                className={
-                    isSelected
-                        ? "bg-accent/60 flex items-center gap-2"
-                        : "flex items-center gap-2"
-                }
+                className={cn(
+                    "flex items-center gap-2 [&>svg:last-child]:hidden",
+                    isSelected && "bg-accent/60",
+                )}
                 key={fullValue}
                 onSelect={(selected) => {
                     if (typeof selected === "string") {

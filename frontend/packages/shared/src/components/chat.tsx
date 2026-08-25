@@ -90,6 +90,7 @@ export const Chat = ({
 }: ChatProps): JSX.Element => {
     const resolvedHeaderContent = headerContent ?? undefined;
     const [alertDialogOpen, setAlertDialogOpen] = useState(false);
+    const [alertTitle, setAlertTitle] = useState("Voice input unavailable");
     const [alertMessage, setAlertMessage] = useState("");
 
     const [localComposerValue, setLocalComposerValue] = useState("");
@@ -116,6 +117,44 @@ export const Chat = ({
         messagesRef.current = messages;
     }, [messages]);
 
+    const handleSTTError = useCallback(
+        (error: SpeechRecognitionErrorEvent["error"]): void => {
+            let message: string | undefined;
+            let title = "Voice input unavailable";
+            switch (error) {
+                case "not-allowed": {
+                    title = "Microphone access required";
+                    message =
+                        "If you're using a browser, select the icon to the left of the web address to allow voice input.";
+                    break;
+                }
+                case "service-not-allowed": {
+                    message =
+                        "Speech recognition is blocked by this browser or your organization's policy.";
+                    break;
+                }
+                case "audio-capture": {
+                    message =
+                        "The microphone is unavailable. Check that a microphone is connected and that this app has permission to use it.";
+                    break;
+                }
+                case "network": {
+                    message =
+                        "Speech recognition could not connect to its service. Check your network connection and try again.";
+                    break;
+                }
+                // No default
+            }
+
+            if (message !== undefined) {
+                setAlertTitle(title);
+                setAlertMessage(message);
+                setAlertDialogOpen(true);
+            }
+        },
+        [],
+    );
+
     const {
         speak: ttsSpeak,
         stop: ttsStop,
@@ -134,6 +173,7 @@ export const Chat = ({
         enabled: !disableVoiceFeatures,
         continuous: true,
         lang: "en-US",
+        onError: handleSTTError,
         onFinalTranscript: (chunk) => {
             const { current } = composerValueRef;
             const next = current ? `${current} ${chunk}` : chunk;
@@ -162,6 +202,7 @@ export const Chat = ({
 
     const handleStartRecording = useCallback(() => {
         if (!sttSupported) {
+            setAlertTitle("Voice input unavailable");
             setAlertMessage(
                 "Speech recognition is not supported in your browser.",
             );
@@ -397,7 +438,7 @@ export const Chat = ({
                 okLabel="OK"
                 onOpenChange={setAlertDialogOpen}
                 open={alertDialogOpen}
-                title="Notice"
+                title={alertTitle}
             />
         </div>
     );

@@ -6,6 +6,7 @@ import {
     buildOverallAverages,
     buildScoreSummaryRows,
     formatEvalAudience,
+    formatModelTemperature,
     parseModelConfigurations,
     parseSummaryTable,
 } from "../src/evals/lib/report-utils.ts";
@@ -29,8 +30,13 @@ const report: EvalReportDetail = {
     modelConfigs: {
         chatbot_model: {
             model: "azure/gpt-5.5",
-            temperature: null,
+            temperature: 0.7,
             max_tokens: 0,
+        },
+        extractor: {
+            model: "azure/gpt-4.1-mini",
+            temperature: 0,
+            max_tokens: 500,
         },
     },
     cases: [
@@ -134,7 +140,12 @@ describe("eval report utilities", () => {
         assert.equal(formatEvalAudience(null), "Mixed/unknown");
     });
 
-    it("builds model views from structured model config data", () => {
+    it("leaves unsupported model temperatures blank instead of using a placeholder", () => {
+        assert.equal(formatModelTemperature(undefined), "");
+        assert.equal(formatModelTemperature(0), "0");
+    });
+
+    it("hides extractor configuration for internal reports", () => {
         assert.deepEqual(parseModelConfigurations(report), [
             {
                 role: "chatbot_model",
@@ -147,5 +158,27 @@ describe("eval report utilities", () => {
         assert.deepEqual(buildModelRoleMap(report), {
             chatbot: "azure/gpt-5.5",
         });
+    });
+
+    it("retains extractor configuration for public and mixed reports", () => {
+        for (const isInternal of [false, null]) {
+            assert.deepEqual(
+                parseModelConfigurations({ ...report, isInternal }),
+                [
+                    {
+                        role: "chatbot_model",
+                        model: "azure/gpt-5.5",
+                        temperature: undefined,
+                        maxTokens: 0,
+                    },
+                    {
+                        role: "extractor",
+                        model: "azure/gpt-4.1-mini",
+                        temperature: 0,
+                        maxTokens: 500,
+                    },
+                ],
+            );
+        }
     });
 });

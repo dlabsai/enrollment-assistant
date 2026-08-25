@@ -117,15 +117,16 @@ def test_normalize_url_strips_fragment_slash_and_punctuation() -> None:
 
 def test_normalize_url_strips_markdown_emphasis_delimiters() -> None:
     url = "https://www.parchment.com/u/registration/30816782/institution"
+    normalized_url = "https://parchment.com/u/registration/30816782/institution"
     message = f"Order transcripts at **{url}**."
-    allowed_urls = frozenset({url})
+    allowed_urls = frozenset({normalized_url})
 
     assert extract_urls(message) == [url]
-    assert normalize_url(f"{url}**") == url
+    assert normalize_url(f"{url}**") == normalized_url
     assert find_unknown_urls(message, allowed_urls=allowed_urls) == []
 
 
-def test_normalize_url_normalizes_www_demo_hosts() -> None:
+def test_normalize_url_treats_www_as_an_apex_host_alias() -> None:
     assert (
         normalize_url("https://www.demo-university.example.edu/admissions/")
         == "https://demo-university.example.edu/admissions"
@@ -136,6 +137,15 @@ def test_normalize_url_normalizes_www_demo_hosts() -> None:
         )
         == "https://catalog.demo-university.example.edu/content.php?catoid=7&navoid=274"
     )
+    assert normalize_url("www.GED.com") == "https://ged.com/"
+
+
+def test_find_unknown_urls_treats_www_and_apex_hosts_as_equivalent() -> None:
+    allowed_urls = frozenset(collect_normalized_urls("Use www.GED.com for details."))
+
+    assert allowed_urls == {"https://ged.com/"}
+    assert find_unknown_urls("Use GED.com.", allowed_urls=allowed_urls) == []
+    assert find_unknown_urls("Use https://www.ged.com/.", allowed_urls=allowed_urls) == []
 
 
 def test_normalize_url_strips_tracking_query_params() -> None:
@@ -307,8 +317,8 @@ def test_build_blog_url_feedback_lists_all_blog_urls() -> None:
 
 
 def test_get_guardrail_url_registry_key_uses_va_scope() -> None:
-    assert get_guardrail_url_registry_key(is_internal=True) == "internal_v9"
-    assert get_guardrail_url_registry_key(is_internal=False) == "public_v9"
+    assert get_guardrail_url_registry_key(is_internal=True) == "internal_v10"
+    assert get_guardrail_url_registry_key(is_internal=False) == "public_v10"
 
 
 @pytest.mark.asyncio
@@ -607,7 +617,7 @@ async def test_get_allowed_url_registry_for_va_persists_missing_registry(
 
     assert registry == frozenset(persisted.urls)
     assert "https://apply.demo-university.example.edu/" in registry
-    assert "https://www.bls.gov/ooh" in registry
+    assert "https://bls.gov/ooh" in registry
     assert "https://demo-university.example.edu/accreditation-and-consumer-information" in registry
     assert "https://studentaid.gov/" in registry
 
@@ -820,7 +830,7 @@ async def test_refresh_guardrail_url_registries_populates_all_variants(
     ).all()
     keys = {row[0] for row in rows}
 
-    assert keys == {"internal_v9", "public_v9"}
+    assert keys == {"internal_v10", "public_v10"}
 
 
 @pytest.mark.asyncio

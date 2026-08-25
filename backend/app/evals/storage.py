@@ -7,6 +7,7 @@ from contextlib import asynccontextmanager
 from dataclasses import asdict, dataclass, fields, is_dataclass
 from datetime import datetime
 from typing import Any, Literal, cast
+from uuid import UUID
 
 from pydantic import BaseModel
 from sqlalchemy import Float, String, asc, desc, func, or_, select
@@ -19,7 +20,7 @@ from app.evals.rag_data import create_session_factory
 from app.evals.report import EvaluationReport, EvaluationResult
 from app.evals.runtime import EvalRunConfig, EvalRunRequestConfig
 from app.evals.test_db import create_test_db_engine, load_eval_database_url
-from app.models import EvalCaseResult, EvalCaseRunResult, EvalRunRecord
+from app.models import EvalCaseResult, EvalCaseRunResult, EvalRunRecord, OtelSpan
 from app.utils import current_time_utc
 
 _EXCLUDED_STORED_OUTPUT_FIELDS = {"retrieved_tool_context", "system_prompt"}
@@ -54,6 +55,7 @@ class EvalReportSummaryRecord:
     is_internal: bool | None
     pass_rate_average: float | None
     duration_median_average: float | None
+    total_cost: float | None = None
 
 
 def _jsonable(value: Any) -> Any:
@@ -210,6 +212,43 @@ def _report_metric_averages() -> Any:
     )
 
 
+async def _eval_report_total_costs(
+    session: AsyncSession, eval_run_ids: Sequence[UUID]
+) -> dict[UUID, float]:
+    """Return persisted span-cost totals for the distinct traces linked to each report."""
+    if not eval_run_ids:
+        return {}
+
+    report_trace_ids = (
+        select(
+            EvalCaseResult.eval_run_id.label("eval_run_id"),
+            EvalCaseRunResult.otel_trace_id.label("trace_id"),
+        )
+        .join(EvalCaseRunResult, EvalCaseRunResult.case_id == EvalCaseResult.id)
+        .where(
+            EvalCaseResult.eval_run_id.in_(eval_run_ids),
+            EvalCaseRunResult.otel_trace_id.is_not(None),
+        )
+        .distinct()
+        .subquery()
+    )
+    rows = (
+        await session.execute(
+            select(
+                report_trace_ids.c.eval_run_id, func.sum(OtelSpan.total_cost).label("total_cost")
+            )
+            .join(OtelSpan, OtelSpan.trace_id == report_trace_ids.c.trace_id)
+            .where(OtelSpan.total_cost.is_not(None))
+            .group_by(report_trace_ids.c.eval_run_id)
+        )
+    ).all()
+    return {
+        cast(UUID, row.eval_run_id): float(row.total_cost)
+        for row in rows
+        if row.total_cost is not None
+    }
+
+
 def _report_summary_query_parts() -> tuple[Any, Any, Any, Any, Any, Any]:
     is_internal_expr = EvalCaseResult.inputs["is_internal"].as_boolean()
     case_counts = (
@@ -338,6 +377,7 @@ async def list_eval_report_summaries(
     offset: int = 0,
     search: str | None,
     sort_by: EvalReportSortBy = "generated_at",
+    include_cost: bool = False,
 ) -> list[EvalReportSummaryRecord]:
     (
         case_counts,
@@ -357,6 +397,7 @@ async def list_eval_report_summaries(
     order_by = desc(sort_expr) if descending else asc(sort_expr)
     stmt = (
         select(
+            EvalRunRecord.id.label("eval_run_id"),
             EvalRunRecord.report_id,
             EvalRunRecord.name,
             EvalRunRecord.suite,
@@ -388,6 +429,11 @@ async def list_eval_report_summaries(
     if search_condition is not None:
         stmt = stmt.where(search_condition)
     rows = (await session.execute(stmt)).all()
+    total_costs = (
+        await _eval_report_total_costs(session, [cast(UUID, row.eval_run_id) for row in rows])
+        if include_cost
+        else {}
+    )
     return [
         EvalReportSummaryRecord(
             report_id=row.report_id,
@@ -410,6 +456,7 @@ async def list_eval_report_summaries(
                 if row.duration_median_average is not None
                 else None
             ),
+            total_cost=total_costs.get(cast(UUID, row.eval_run_id)),
         )
         for row in rows
     ]
