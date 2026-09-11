@@ -101,7 +101,10 @@ const DataTablePagination = <TData,>({
                     }}
                     value={String(table.getState().pagination.pageSize)}
                 >
-                    <SelectTrigger className="h-8 w-[110px]">
+                    <SelectTrigger
+                        aria-label="Rows per page"
+                        className="h-8 w-[110px]"
+                    >
                         <SelectValue placeholder="Rows" />
                     </SelectTrigger>
                     <SelectContent side="top">
@@ -119,6 +122,7 @@ const DataTablePagination = <TData,>({
                 </Select>
                 <div className="flex items-center gap-1">
                     <Button
+                        aria-label="First page"
                         className="h-8 w-8 p-0"
                         disabled={!table.getCanPreviousPage()}
                         onClick={() => {
@@ -130,6 +134,7 @@ const DataTablePagination = <TData,>({
                         <ChevronsLeft className="size-4" />
                     </Button>
                     <Button
+                        aria-label="Previous page"
                         className="h-8 w-8 p-0"
                         disabled={!table.getCanPreviousPage()}
                         onClick={() => {
@@ -141,6 +146,7 @@ const DataTablePagination = <TData,>({
                         <ChevronLeft className="size-4" />
                     </Button>
                     <Button
+                        aria-label="Next page"
                         className="h-8 w-8 p-0"
                         disabled={!table.getCanNextPage()}
                         onClick={() => {
@@ -152,6 +158,7 @@ const DataTablePagination = <TData,>({
                         <ChevronRight className="size-4" />
                     </Button>
                     <Button
+                        aria-label="Last page"
                         className="h-8 w-8 p-0"
                         disabled={!table.getCanNextPage()}
                         onClick={() => {
@@ -171,8 +178,8 @@ const DataTablePagination = <TData,>({
 interface DataTableProps<TData, TValue> {
     columns: ColumnDef<TData, TValue>[];
     data: TData[];
-    sorting: SortingState;
-    onSortingChange: OnChangeFn<SortingState>;
+    sorting?: SortingState;
+    onSortingChange?: OnChangeFn<SortingState>;
     pagination: PaginationState;
     onPaginationChange: OnChangeFn<PaginationState>;
     pageCount: number;
@@ -182,18 +189,24 @@ interface DataTableProps<TData, TValue> {
     wrapCellText?: boolean;
     manualPagination?: boolean;
     manualSorting?: boolean;
+    enableSortingRemoval?: boolean;
     emptyMessage?: string;
+    showPagination?: boolean;
     isLoading?: boolean;
     onRowClick?: (row: TData) => void;
     canRowClick?: (row: TData) => boolean;
     isRowSelected?: (row: TData) => boolean;
+    getRowId?: (row: TData) => string;
+    getRowActionLabel?: (row: TData) => string;
     columnVisibility?: VisibilityState;
 }
+
+const EMPTY_SORTING: SortingState = [];
 
 export const DataTable = <TData, TValue>({
     columns,
     data,
-    sorting,
+    sorting = EMPTY_SORTING,
     onSortingChange,
     pagination,
     onPaginationChange,
@@ -204,17 +217,22 @@ export const DataTable = <TData, TValue>({
     wrapCellText = false,
     manualPagination = true,
     manualSorting = true,
+    enableSortingRemoval = true,
     emptyMessage = "No results.",
+    showPagination = true,
     isLoading = false,
     onRowClick,
     canRowClick,
     isRowSelected,
+    getRowId,
+    getRowActionLabel,
     columnVisibility,
 }: DataTableProps<TData, TValue>): JSX.Element => {
     // eslint-disable-next-line react-hooks/incompatible-library
     const table = useReactTable({
         data,
         columns,
+        getRowId,
         getCoreRowModel: getCoreRowModel(),
         getPaginationRowModel: getPaginationRowModel(),
         getSortedRowModel: getSortedRowModel(),
@@ -222,6 +240,8 @@ export const DataTable = <TData, TValue>({
         onPaginationChange,
         manualPagination,
         manualSorting,
+        enableSorting: onSortingChange !== undefined,
+        enableSortingRemoval,
         pageCount,
         state: {
             sorting,
@@ -320,6 +340,9 @@ export const DataTable = <TData, TValue>({
             const clickable =
                 onRowClick !== undefined &&
                 (canRowClick?.(row.original) ?? true);
+            const rowActionLabel = clickable
+                ? getRowActionLabel?.(row.original)
+                : undefined;
             return (
                 <TableRow
                     className={cn(
@@ -334,17 +357,35 @@ export const DataTable = <TData, TValue>({
                         }
                     }}
                 >
-                    {row.getVisibleCells().map((cell) => (
-                        <TableCell
-                            className={cellClassName}
-                            key={cell.id}
-                        >
-                            {flexRender(
-                                cell.column.columnDef.cell,
-                                cell.getContext(),
-                            )}
-                        </TableCell>
-                    ))}
+                    {row.getVisibleCells().map((cell, index) => {
+                        const content = flexRender(
+                            cell.column.columnDef.cell,
+                            cell.getContext(),
+                        );
+                        return (
+                            <TableCell
+                                className={cellClassName}
+                                key={cell.id}
+                            >
+                                {index === 0 && rowActionLabel !== undefined ? (
+                                    <div className="relative">
+                                        {content}
+                                        <button
+                                            aria-label={rowActionLabel}
+                                            className="focus-visible:ring-ring absolute inset-0 cursor-pointer rounded-sm outline-none focus-visible:ring-2 focus-visible:ring-offset-2"
+                                            onClick={(event) => {
+                                                event.stopPropagation();
+                                                onRowClick?.(row.original);
+                                            }}
+                                            type="button"
+                                        />
+                                    </div>
+                                ) : (
+                                    content
+                                )}
+                            </TableCell>
+                        );
+                    })}
                 </TableRow>
             );
         });
@@ -414,12 +455,14 @@ export const DataTable = <TData, TValue>({
                     <TableBody>{bodyContent}</TableBody>
                 </Table>
             </div>
-            <div className="shrink-0">
-                <DataTablePagination
-                    rowCount={rowCount}
-                    table={table}
-                />
-            </div>
+            {showPagination && (
+                <div className="shrink-0">
+                    <DataTablePagination
+                        rowCount={rowCount}
+                        table={table}
+                    />
+                </div>
+            )}
         </div>
     );
 };

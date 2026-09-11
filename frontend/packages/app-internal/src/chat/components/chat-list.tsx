@@ -1,3 +1,4 @@
+import { fromDate, isSameDay, isSameYear } from "@internationalized/date";
 import { ConfirmDialog, ErrorDialog } from "@va/shared/components/dialog";
 import { HighlightedSnippet } from "@va/shared/components/highlighted-snippet";
 import { HighlightedText } from "@va/shared/components/highlighted-text";
@@ -34,6 +35,7 @@ import {
 import { toast } from "sonner";
 
 import { useAuthenticatedApi } from "../../auth/hooks/use-authenticated-api";
+import { getAppFormatSettings } from "../../lib/time-zone";
 import { useChatActions, useChatStore } from "../contexts/chat-store-context";
 import { type ChatCollectionKind, searchChats } from "../lib/api";
 import { createSelectSortedChats } from "../lib/store";
@@ -46,6 +48,18 @@ const INITIAL_VISIBLE_COUNT = 30;
 const VISIBLE_BATCH_SIZE = 10;
 const SEARCH_PAGE_SIZE = 20;
 const SCROLL_THRESHOLD_PX = 32;
+const { locale: appLocale, timeZone: appTimeZone } = getAppFormatSettings();
+const currentYearDateFormatter = new Intl.DateTimeFormat(appLocale, {
+    day: "numeric",
+    month: "long",
+    timeZone: appTimeZone,
+});
+const olderDateFormatter = new Intl.DateTimeFormat(appLocale, {
+    day: "2-digit",
+    month: "2-digit",
+    timeZone: appTimeZone,
+    year: "numeric",
+});
 
 const formatRelativeTimestamp = (value: string, now = new Date()): string => {
     const date = new Date(value);
@@ -72,25 +86,15 @@ const formatRelativeTimestamp = (value: string, now = new Date()): string => {
         return `${hours} hour${hours === 1 ? "" : "s"} ago`;
     }
 
-    const yesterday = new Date(now);
-    yesterday.setDate(now.getDate() - 1);
-
-    if (date.toDateString() === yesterday.toDateString()) {
+    const zonedDate = fromDate(date, appTimeZone);
+    const zonedNow = fromDate(now, appTimeZone);
+    if (isSameDay(zonedDate, zonedNow.subtract({ days: 1 }))) {
         return "yesterday";
     }
 
-    if (date.getFullYear() === now.getFullYear()) {
-        return date.toLocaleDateString(undefined, {
-            day: "numeric",
-            month: "long",
-        });
-    }
-
-    return date.toLocaleDateString(undefined, {
-        month: "2-digit",
-        day: "2-digit",
-        year: "numeric",
-    });
+    return isSameYear(zonedDate, zonedNow)
+        ? currentYearDateFormatter.format(date)
+        : olderDateFormatter.format(date);
 };
 
 interface ChatListProps {
@@ -265,7 +269,9 @@ export const ChatList = ({
 
         try {
             await deleteChat(pendingDeleteId);
-            toast.success(`${isInvestigationList ? "Investigation" : "Chat"} deleted`);
+            toast.success(
+                `${isInvestigationList ? "Investigation" : "Chat"} deleted`,
+            );
         } catch {
             setErrorMessage(`Failed to delete ${itemLabel}`);
             setErrorDialogOpen(true);
@@ -362,7 +368,8 @@ export const ChatList = ({
                         .map((chat) => ({
                             id: chat.id,
                             title: chat.title,
-                            snippet: chat.lastMessagePreview ?? chat.title ?? "",
+                            snippet:
+                                chat.lastMessagePreview ?? chat.title ?? "",
                             updatedAt: new Date(chat.updatedAt).toISOString(),
                         }));
 
@@ -698,7 +705,7 @@ export const ChatList = ({
             <ConfirmDialog
                 cancelLabel="Cancel"
                 confirmLabel="Delete"
-                description={`Are you sure you want to delete this ${itemLabel}? This action cannot be undone.`}
+                description={`Are you sure you want to delete this ${itemLabel}? This action cannot be undone.${isInvestigationList ? "" : " Any linked screening flags and decisions will also be deleted."}`}
                 onConfirm={handleDelete}
                 onOpenChange={setDeleteDialogOpen}
                 open={deleteDialogOpen}

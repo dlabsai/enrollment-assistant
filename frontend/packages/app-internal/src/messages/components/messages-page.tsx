@@ -1,3 +1,4 @@
+import { useNavigate, useSearch } from "@tanstack/react-router";
 import type {
     ColumnDef,
     SortingState,
@@ -5,6 +6,7 @@ import type {
 } from "@tanstack/react-table";
 import { DEFAULT_HIGHLIGHT_CLASS } from "@va/shared/components/highlighted-text";
 import { Badge } from "@va/shared/components/ui/badge";
+import { Input } from "@va/shared/components/ui/input";
 import {
     Select,
     SelectContent,
@@ -23,7 +25,8 @@ import {
 import { Skeleton } from "@va/shared/components/ui/skeleton";
 import { UNIVERSITY_NAME } from "@va/shared/config";
 import { setDocumentTitle } from "@va/shared/lib/document-title";
-import { type JSX, useEffect, useMemo, useState } from "react";
+import { X } from "lucide-react";
+import { type JSX, useCallback, useEffect, useMemo, useState } from "react";
 
 import { useAuth } from "../../auth/contexts/auth-context";
 import { useAuthenticatedApi } from "../../auth/hooks/use-authenticated-api";
@@ -39,6 +42,10 @@ import {
 } from "../../chats/hooks/use-chat-review-controls";
 import { fetchChatUsers } from "../../chats/lib/api";
 import {
+    parseRouteDate,
+    routeUserOption,
+} from "../../chats/lib/review-search-state";
+import {
     buildOwnerGroupFilterOptions,
     buildUserFilterParams,
 } from "../../chats/lib/user-filter-options";
@@ -51,12 +58,14 @@ import { PageSection, PageShell } from "../../components/page-shell";
 import { InlineError } from "../../components/page-state";
 import { ReviewTableToolbar } from "../../components/review-table-toolbar";
 import { formatTableTimestamp } from "../../lib/date-format";
-import {
-    formatLocaleNumber,
-    formatUsdCost,
-} from "../../lib/number-format";
-import type { CustomTimeRange, TimeRangeValue } from "../../lib/time-range";
+import { formatLocaleNumber, formatUsdCost } from "../../lib/number-format";
 import { fetchMessageListPage } from "../lib/api";
+import type {
+    GuardrailStatusFilter,
+    MessagePlatformFilter,
+    MessageRoleFilter,
+    MessagesSearch,
+} from "../lib/search-state";
 import type {
     MessageListPage as MessageListPageResponse,
     MessageListRow,
@@ -87,8 +96,8 @@ const loadColumnVisibility = (): VisibilityState => {
             return {};
         }
         return Object.fromEntries(
-            Object.entries(parsed).filter(([, value]) =>
-                typeof value === "boolean"
+            Object.entries(parsed).filter(
+                ([, value]) => typeof value === "boolean",
             ),
         );
     } catch {
@@ -101,8 +110,6 @@ const formatCount = (value: number): string => formatLocaleNumber(value);
 const formatOptionalCount = (value: number | undefined): string =>
     value === undefined ? "-" : formatCount(value);
 
-type MessageRoleFilter = "assistant" | "user" | "all";
-
 const MESSAGE_ROLE_OPTIONS: { label: string; value: MessageRoleFilter }[] = [
     { label: "All roles", value: "all" },
     { label: "User role", value: "user" },
@@ -113,6 +120,21 @@ const isMessageRoleFilter = (
     value: string | null,
 ): value is MessageRoleFilter =>
     MESSAGE_ROLE_OPTIONS.some((option) => option.value === value);
+
+const PLATFORM_OPTIONS: { label: string; value: MessagePlatformFilter }[] = [
+    { label: "All platforms", value: "all" },
+    { label: "Internal", value: "internal" },
+    { label: "Public", value: "public" },
+];
+
+const GUARDRAIL_STATUS_OPTIONS: {
+    label: string;
+    value: GuardrailStatusFilter;
+}[] = [
+    { label: "All guardrail outcomes", value: "all" },
+    { label: "Required retry", value: "retried" },
+    { label: "Final blocked", value: "blocked" },
+];
 
 const formatDuration = (value: number | undefined): string => {
     if (value === undefined) {
@@ -308,6 +330,18 @@ const buildColumns = (
         ),
     },
     {
+        id: "guardrail_retry_count",
+        accessorKey: "guardrailRetryCount",
+        header: "Chatbot retries",
+        enableSorting: true,
+        meta: { skeleton: skeletonLine("h-5 w-14") },
+        cell: ({ row }): JSX.Element => (
+            <div className="text-muted-foreground text-xs tabular-nums">
+                {formatOptionalCount(row.original.guardrailRetryCount)}
+            </div>
+        ),
+    },
+    {
         id: "guardrails_blocked",
         accessorKey: "guardrailsBlocked",
         header: "Blocked",
@@ -340,7 +374,20 @@ const buildColumns = (
 export const MessagesPage = (): JSX.Element => {
     const api = useAuthenticatedApi();
     const { user } = useAuth();
+    const routeSearch = useSearch({ from: "/messages" });
+    const navigate = useNavigate({ from: "/messages" });
     const canFilterUsers = user?.permissions.access_messages === true;
+    const canViewPublic =
+        user?.group.slug === "admin" || user?.group.slug === "dev";
+    const availablePlatformOptions = useMemo(
+        () =>
+            canViewPublic
+                ? PLATFORM_OPTIONS
+                : PLATFORM_OPTIONS.filter(
+                      (option) => option.value !== "public",
+                  ),
+        [canViewPublic],
+    );
     const ownerGroupFilterOptions = useMemo(
         () => buildOwnerGroupFilterOptions(user),
         [user],
@@ -355,14 +402,58 @@ export const MessagesPage = (): JSX.Element => {
     const canViewSources = hasPermission(user, "chat_view_sources");
     const canViewTools = hasPermission(user, "chat_view_tools");
 
-    const [searchInput, setSearchInput] = useState("");
-    const [searchQuery, setSearchQuery] = useState("");
-    const [role, setRole] = useState<MessageRoleFilter>("assistant");
-    const [timeRange, setTimeRange] = useState<TimeRangeValue>("30d");
-    const [customRange, setCustomRange] = useState<CustomTimeRange>({});
-    const [selectedUser, setSelectedUser] = useState<
-        ChatUserOption | undefined
-    >();
+    const requestedPlatform: MessagePlatformFilter =
+        routeSearch.platform ?? "all";
+    const platform: MessagePlatformFilter =
+        requestedPlatform === "public" && !canViewPublic
+            ? "all"
+            : requestedPlatform;
+    const role: MessageRoleFilter = routeSearch.role ?? "assistant";
+    const guardrailStatus: GuardrailStatusFilter =
+        routeSearch.guardrailStatus ?? "all";
+    const excludeDraft = routeSearch.excludeDraft === true;
+    const timeRange =
+        routeSearch.timeRange ??
+        (routeSearch.start === undefined ? "30d" : "custom");
+    const customRange = useMemo(
+        () => ({
+            start: parseRouteDate(routeSearch.start),
+            end: parseRouteDate(routeSearch.endBefore ?? routeSearch.end),
+        }),
+        [routeSearch.end, routeSearch.endBefore, routeSearch.start],
+    );
+    const selectedUser = useMemo(
+        () =>
+            routeUserOption(
+                routeSearch.userEmail,
+                routeSearch.userGroup,
+                platform === "all" ? undefined : platform,
+            ),
+        [platform, routeSearch.userEmail, routeSearch.userGroup],
+    );
+    const updateSearch = useCallback(
+        (updates: Partial<MessagesSearch>): void => {
+            void navigate({
+                replace: true,
+                search: (previous) => ({ ...previous, ...updates }),
+                to: "/messages",
+            });
+        },
+        [navigate],
+    );
+
+    const searchQuery = routeSearch.search ?? "";
+    const [searchDraft, setSearchDraft] = useState(() => ({
+        routeValue: searchQuery,
+        value: searchQuery,
+    }));
+    if (searchDraft.routeValue !== searchQuery) {
+        setSearchDraft({ routeValue: searchQuery, value: searchQuery });
+    }
+    const searchInput = searchDraft.value;
+    const setSearchInput = (value: string): void => {
+        setSearchDraft({ routeValue: searchQuery, value });
+    };
     const [userSearchInput, setUserSearchInput] = useState("");
     const [userSearchQuery, setUserSearchQuery] = useState("");
     const [userOptions, setUserOptions] = useState<ChatUserOption[]>([]);
@@ -370,9 +461,15 @@ export const MessagesPage = (): JSX.Element => {
     const [userLoading, setUserLoading] = useState(false);
     const [pageIndex, setPageIndex] = useState(0);
     const [pageSize, setPageSize] = useState(getDefaultDataTablePageSize);
-    const [sorting, setSorting] = useState<SortingState>([
-        { id: "created_at", desc: true },
-    ]);
+    const sorting = useMemo<SortingState>(
+        () => [
+            {
+                id: routeSearch.sortBy ?? "created_at",
+                desc: routeSearch.descending ?? true,
+            },
+        ],
+        [routeSearch.descending, routeSearch.sortBy],
+    );
     const [columnVisibility, setColumnVisibility] =
         useState<VisibilityState>(loadColumnVisibility);
     const [loading, setLoading] = useState(true);
@@ -393,13 +490,19 @@ export const MessagesPage = (): JSX.Element => {
 
     useEffect(() => {
         const timeout = setTimeout(() => {
-            setSearchQuery(searchInput.trim());
+            const nextSearch = searchInput.trim();
+            if (nextSearch === searchQuery) {
+                return;
+            }
+            updateSearch({
+                search: nextSearch === "" ? undefined : nextSearch,
+            });
             setPageIndex(0);
         }, 300);
         return (): void => {
             clearTimeout(timeout);
         };
-    }, [searchInput]);
+    }, [searchInput, searchQuery, updateSearch]);
 
     useEffect(() => {
         const timeout = setTimeout(() => {
@@ -420,6 +523,7 @@ export const MessagesPage = (): JSX.Element => {
             try {
                 const response = await fetchChatUsers(api, {
                     search: userSearchQuery,
+                    platform: platform === "all" ? undefined : platform,
                     limit: 50,
                 });
                 if (isMounted) {
@@ -439,7 +543,7 @@ export const MessagesPage = (): JSX.Element => {
         return (): void => {
             isMounted = false;
         };
-    }, [api, canFilterUsers, userPopoverOpen, userSearchQuery]);
+    }, [api, canFilterUsers, platform, userPopoverOpen, userSearchQuery]);
 
     useEffect(() => {
         let isMounted = true;
@@ -455,13 +559,21 @@ export const MessagesPage = (): JSX.Element => {
                     search: searchQuery,
                     userEmail: userFilterParams.userEmail,
                     userGroup: userFilterParams.userGroup,
+                    platform: platform === "all" ? undefined : platform,
                     role,
+                    guardrailStatus,
+                    minGenerationTimeMs: routeSearch.minGenerationTimeMs,
+                    maxGenerationTimeMs: routeSearch.maxGenerationTimeMs,
+                    excludeDraft,
+                    conversationStart: routeSearch.conversationStart,
+                    conversationEnd: routeSearch.conversationEnd,
                     limit: pageSize,
                     offset: pageIndex * pageSize,
                     sortBy: sorting[0]?.id ?? "created_at",
                     descending: sorting[0]?.desc ?? true,
                     timeRange,
                     customRange,
+                    endBefore: routeSearch.endBefore,
                 });
                 if (isMounted) {
                     setPage(response);
@@ -490,8 +602,16 @@ export const MessagesPage = (): JSX.Element => {
         customRange,
         pageIndex,
         pageSize,
+        platform,
         refreshToken,
         role,
+        guardrailStatus,
+        routeSearch.maxGenerationTimeMs,
+        routeSearch.minGenerationTimeMs,
+        routeSearch.conversationStart,
+        routeSearch.conversationEnd,
+        routeSearch.endBefore,
+        excludeDraft,
         searchQuery,
         selectedUser,
         sorting,
@@ -567,14 +687,24 @@ export const MessagesPage = (): JSX.Element => {
     const tableData = page?.items ?? [];
     const pageCount = Math.max(1, Math.ceil((page?.total ?? 0) / pageSize));
     const userOptionsWithOwnerGroups = useMemo(
-        () => [...ownerGroupFilterOptions, ...userOptions],
-        [ownerGroupFilterOptions, userOptions],
+        () =>
+            platform === "public"
+                ? userOptions
+                : [...ownerGroupFilterOptions, ...userOptions],
+        [ownerGroupFilterOptions, platform, userOptions],
     );
     const selectedUserLabel =
         selectedUser?.name ?? selectedUser?.email ?? "All users";
     const selectedRoleLabel =
         MESSAGE_ROLE_OPTIONS.find((option) => option.value === role)?.label ??
         "Assistant role";
+    const selectedPlatformLabel =
+        PLATFORM_OPTIONS.find((option) => option.value === platform)?.label ??
+        "All platforms";
+    const selectedGuardrailStatusLabel =
+        GUARDRAIL_STATUS_OPTIONS.find(
+            (option) => option.value === guardrailStatus,
+        )?.label ?? "All guardrail outcomes";
     const detailTitle =
         selectedMessage?.conversationTitle ?? detail?.title ?? "Chat";
     const highlightQuery = searchInput.trim();
@@ -620,6 +750,36 @@ export const MessagesPage = (): JSX.Element => {
     return (
         <PageShell className="overflow-hidden">
             <PageHeader title="Messages">
+                {(routeSearch.conversationStart !== undefined ||
+                    routeSearch.conversationEnd !== undefined) && (
+                    <Badge
+                        className="gap-1"
+                        variant="secondary"
+                    >
+                        Chats created:{" "}
+                        {routeSearch.conversationStart === undefined
+                            ? "Any time"
+                            : formatTimestamp(routeSearch.conversationStart)}
+                        {" – "}
+                        {routeSearch.conversationEnd === undefined
+                            ? "Any time"
+                            : formatTimestamp(routeSearch.conversationEnd)}
+                        <button
+                            aria-label="Clear chat creation filter"
+                            className="hover:bg-muted-foreground/20 focus-visible:ring-ring rounded-sm p-0.5 focus-visible:ring-2 focus-visible:outline-none"
+                            onClick={() => {
+                                updateSearch({
+                                    conversationStart: undefined,
+                                    conversationEnd: undefined,
+                                });
+                                setPageIndex(0);
+                            }}
+                            type="button"
+                        >
+                            <X className="size-3" />
+                        </button>
+                    </Badge>
+                )}
                 <ReviewTableToolbar
                     canFilterUsers={canFilterUsers}
                     customRange={customRange}
@@ -627,8 +787,51 @@ export const MessagesPage = (): JSX.Element => {
                         <PageHeaderGroup>
                             <Select
                                 onValueChange={(value) => {
+                                    if (
+                                        value === "all" ||
+                                        value === "internal" ||
+                                        value === "public"
+                                    ) {
+                                        updateSearch({
+                                            platform:
+                                                value === "all"
+                                                    ? undefined
+                                                    : value,
+                                            userEmail: undefined,
+                                            userGroup: undefined,
+                                        });
+                                        setPageIndex(0);
+                                    }
+                                }}
+                                value={platform}
+                            >
+                                <SelectTrigger
+                                    aria-label="Platform"
+                                    className="w-[150px]"
+                                >
+                                    <SelectValue>
+                                        {selectedPlatformLabel}
+                                    </SelectValue>
+                                </SelectTrigger>
+                                <SelectContent>
+                                    <SelectGroup>
+                                        {availablePlatformOptions.map(
+                                            (option) => (
+                                                <SelectItem
+                                                    key={option.value}
+                                                    value={option.value}
+                                                >
+                                                    {option.label}
+                                                </SelectItem>
+                                            ),
+                                        )}
+                                    </SelectGroup>
+                                </SelectContent>
+                            </Select>
+                            <Select
+                                onValueChange={(value) => {
                                     if (isMessageRoleFilter(value)) {
-                                        setRole(value);
+                                        updateSearch({ role: value });
                                         setPageIndex(0);
                                     }
                                 }}
@@ -655,6 +858,142 @@ export const MessagesPage = (): JSX.Element => {
                                     </SelectGroup>
                                 </SelectContent>
                             </Select>
+                            <Select
+                                onValueChange={(value) => {
+                                    if (
+                                        value === "all" ||
+                                        value === "retried" ||
+                                        value === "blocked"
+                                    ) {
+                                        updateSearch({
+                                            guardrailStatus:
+                                                value === "all"
+                                                    ? undefined
+                                                    : value,
+                                        });
+                                        setPageIndex(0);
+                                    }
+                                }}
+                                value={guardrailStatus}
+                            >
+                                <SelectTrigger
+                                    aria-label="Guardrail outcome"
+                                    className="w-[190px]"
+                                >
+                                    <SelectValue>
+                                        {selectedGuardrailStatusLabel}
+                                    </SelectValue>
+                                </SelectTrigger>
+                                <SelectContent>
+                                    <SelectGroup>
+                                        {GUARDRAIL_STATUS_OPTIONS.map(
+                                            (option) => (
+                                                <SelectItem
+                                                    key={option.value}
+                                                    value={option.value}
+                                                >
+                                                    {option.label}
+                                                </SelectItem>
+                                            ),
+                                        )}
+                                    </SelectGroup>
+                                </SelectContent>
+                            </Select>
+                            <Select
+                                onValueChange={(value) => {
+                                    updateSearch({
+                                        excludeDraft:
+                                            value === "live" ? true : undefined,
+                                    });
+                                    setPageIndex(0);
+                                }}
+                                value={excludeDraft ? "live" : "all"}
+                            >
+                                <SelectTrigger
+                                    aria-label="Prompt scope"
+                                    className="w-[140px]"
+                                >
+                                    <SelectValue>
+                                        {excludeDraft
+                                            ? "Live prompts"
+                                            : "All prompts"}
+                                    </SelectValue>
+                                </SelectTrigger>
+                                <SelectContent>
+                                    <SelectGroup>
+                                        <SelectItem value="all">
+                                            All prompts
+                                        </SelectItem>
+                                        <SelectItem value="live">
+                                            Live prompts
+                                        </SelectItem>
+                                    </SelectGroup>
+                                </SelectContent>
+                            </Select>
+                            <div className="flex items-center gap-2">
+                                <Input
+                                    aria-label="Minimum response time in seconds"
+                                    className="w-24"
+                                    defaultValue={
+                                        routeSearch.minGenerationTimeMs ===
+                                        undefined
+                                            ? ""
+                                            : routeSearch.minGenerationTimeMs /
+                                              1000
+                                    }
+                                    key={`min-${routeSearch.minGenerationTimeMs ?? ""}`}
+                                    min="0"
+                                    onBlur={(event) => {
+                                        const seconds = Number(
+                                            event.currentTarget.value,
+                                        );
+                                        updateSearch({
+                                            minGenerationTimeMs:
+                                                event.currentTarget.value ===
+                                                    "" ||
+                                                !Number.isFinite(seconds) ||
+                                                seconds < 0
+                                                    ? undefined
+                                                    : seconds * 1000,
+                                        });
+                                        setPageIndex(0);
+                                    }}
+                                    placeholder="Min sec"
+                                    step="0.1"
+                                    type="number"
+                                />
+                                <Input
+                                    aria-label="Maximum response time in seconds"
+                                    className="w-24"
+                                    defaultValue={
+                                        routeSearch.maxGenerationTimeMs ===
+                                        undefined
+                                            ? ""
+                                            : routeSearch.maxGenerationTimeMs /
+                                              1000
+                                    }
+                                    key={`max-${routeSearch.maxGenerationTimeMs ?? ""}`}
+                                    min="0"
+                                    onBlur={(event) => {
+                                        const seconds = Number(
+                                            event.currentTarget.value,
+                                        );
+                                        updateSearch({
+                                            maxGenerationTimeMs:
+                                                event.currentTarget.value ===
+                                                    "" ||
+                                                !Number.isFinite(seconds) ||
+                                                seconds < 0
+                                                    ? undefined
+                                                    : seconds * 1000,
+                                        });
+                                        setPageIndex(0);
+                                    }}
+                                    placeholder="Max sec"
+                                    step="0.1"
+                                    type="number"
+                                />
+                            </div>
                             <DataTableColumnVisibility
                                 columnVisibility={columnVisibility}
                                 columns={columns}
@@ -664,16 +1003,36 @@ export const MessagesPage = (): JSX.Element => {
                     }
                     onClear={() => {
                         setSearchInput("");
-                        setSearchQuery("");
-                        setSelectedUser(undefined);
-                        setRole("assistant");
-                        setTimeRange("30d");
-                        setCustomRange({});
+                        updateSearch({
+                            excludeDraft: undefined,
+                            conversationStart: undefined,
+                            conversationEnd: undefined,
+                            guardrailStatus: undefined,
+                            minGenerationTimeMs: undefined,
+                            maxGenerationTimeMs: undefined,
+                            platform: undefined,
+                            role: undefined,
+                            search: undefined,
+                            start: undefined,
+                            end: undefined,
+                            endBefore: undefined,
+                            timeRange: "30d",
+                            userEmail: undefined,
+                            userGroup: undefined,
+                            sortBy: undefined,
+                            descending: undefined,
+                        });
                         setPageIndex(0);
-                        setSorting([{ id: "created_at", desc: true }]);
                     }}
                     onCustomRangeChange={(value) => {
-                        setCustomRange(value);
+                        updateSearch({
+                            conversationStart: undefined,
+                            conversationEnd: undefined,
+                            start: value.start?.toISOString(),
+                            end: value.end?.toISOString(),
+                            endBefore: undefined,
+                            timeRange: "custom",
+                        });
                         setPageIndex(0);
                     }}
                     onRefresh={() => {
@@ -681,12 +1040,29 @@ export const MessagesPage = (): JSX.Element => {
                     }}
                     onSearchInputChange={setSearchInput}
                     onSelectedUserChange={(option) => {
-                        setSelectedUser(option);
+                        const userFilter = buildUserFilterParams(option);
+                        updateSearch({
+                            userEmail: userFilter.userEmail,
+                            userGroup: userFilter.userGroup,
+                        });
                         setUserPopoverOpen(false);
                         setPageIndex(0);
                     }}
                     onTimeRangeChange={(value) => {
-                        setTimeRange(value);
+                        updateSearch({
+                            conversationStart: undefined,
+                            conversationEnd: undefined,
+                            timeRange: value,
+                            endBefore: undefined,
+                            start:
+                                value === "custom"
+                                    ? routeSearch.start
+                                    : undefined,
+                            end:
+                                value === "custom"
+                                    ? routeSearch.end
+                                    : undefined,
+                        });
                         setPageIndex(0);
                     }}
                     onUserPopoverOpenChange={setUserPopoverOpen}
@@ -725,7 +1101,14 @@ export const MessagesPage = (): JSX.Element => {
                         openMessage(row);
                     }}
                     onSortingChange={(updater) => {
-                        setSorting(updater);
+                        const next =
+                            typeof updater === "function"
+                                ? updater(sorting)
+                                : updater;
+                        updateSearch({
+                            sortBy: next[0]?.id,
+                            descending: next[0]?.desc,
+                        });
                         setPageIndex(0);
                     }}
                     pageCount={pageCount}

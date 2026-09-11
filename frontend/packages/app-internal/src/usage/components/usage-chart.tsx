@@ -6,7 +6,7 @@ import {
     CardTitle,
 } from "@va/shared/components/ui/card";
 import { type JSX, useMemo } from "react";
-import { Area, AreaChart, CartesianGrid, XAxis, YAxis } from "recharts";
+import { CartesianGrid, Line, LineChart, XAxis, YAxis } from "recharts";
 
 import {
     type ChartConfig,
@@ -17,19 +17,22 @@ import {
     ChartTooltipContent,
 } from "@/components/ui/chart";
 
+import { useVisibleChartSeries } from "../../lib/chart-series";
 import { makeLocaleNumberFormatter } from "../../lib/number-format";
-import type { TimeRangeValue } from "../../lib/time-range";
 import {
     formatTimeSeriesTick,
     formatTimeSeriesTooltipLabel,
-    isHourlyTimeRange,
+    type TimeGranularity,
+    timeGranularityLabel,
 } from "../../lib/time-series";
-import type { UsageDaily } from "../types";
+import type { UsageTimeSeriesPoint } from "../types";
 
 interface UsageChartProps {
-    data: UsageDaily[];
-    timeRange: TimeRangeValue;
+    data: UsageTimeSeriesPoint[];
+    granularity: TimeGranularity;
 }
+
+const dataKeys = ["requests", "tokens"] as const;
 
 const chartConfig = {
     requests: {
@@ -44,26 +47,25 @@ const chartConfig = {
 
 export const UsageChart = ({
     data,
-    timeRange,
+    granularity,
 }: UsageChartProps): JSX.Element => {
     const compactFormatter = useMemo(
         () => makeLocaleNumberFormatter({ notation: "compact" }),
         [],
     );
-    const isHourly = isHourlyTimeRange(timeRange);
-
+    const { hiddenSeries, toggleSeries, visibleSeries } =
+        useVisibleChartSeries(dataKeys);
     return (
         <Card className="@container/card">
             <CardHeader>
                 <CardTitle>LLM usage over time</CardTitle>
                 <CardDescription>
                     <span className="hidden @[540px]/card:block">
-                        {isHourly
-                            ? "Hourly LLM requests and token usage"
-                            : "Daily LLM requests and token usage"}
+                        {timeGranularityLabel[granularity]} LLM requests and
+                        token usage
                     </span>
                     <span className="@[540px]/card:hidden">
-                        {isHourly ? "Hourly LLM usage" : "Daily LLM usage"}
+                        {timeGranularityLabel[granularity]} LLM usage
                     </span>
                 </CardDescription>
             </CardHeader>
@@ -72,111 +74,91 @@ export const UsageChart = ({
                     className="aspect-auto h-[250px] w-full"
                     config={chartConfig}
                 >
-                    <AreaChart data={data}>
-                        <defs>
-                            <linearGradient
-                                id="fillRequests"
-                                x1="0"
-                                x2="0"
-                                y1="0"
-                                y2="1"
-                            >
-                                <stop
-                                    offset="5%"
-                                    stopColor="var(--color-requests)"
-                                    stopOpacity={1}
-                                />
-                                <stop
-                                    offset="95%"
-                                    stopColor="var(--color-requests)"
-                                    stopOpacity={0.1}
-                                />
-                            </linearGradient>
-                            <linearGradient
-                                id="fillTokens"
-                                x1="0"
-                                x2="0"
-                                y1="0"
-                                y2="1"
-                            >
-                                <stop
-                                    offset="5%"
-                                    stopColor="var(--color-tokens)"
-                                    stopOpacity={0.4}
-                                />
-                                <stop
-                                    offset="95%"
-                                    stopColor="var(--color-tokens)"
-                                    stopOpacity={0.1}
-                                />
-                            </linearGradient>
-                        </defs>
+                    <LineChart
+                        accessibilityLayer
+                        data={data}
+                    >
                         <CartesianGrid vertical={false} />
                         <XAxis
                             axisLine={false}
-                            dataKey="date"
+                            dataKey="bucket_start"
                             minTickGap={32}
                             tickFormatter={(value: string) =>
-                                formatTimeSeriesTick(value, timeRange)
+                                formatTimeSeriesTick(value, granularity)
                             }
                             tickLine={false}
                             tickMargin={8}
                         />
                         <YAxis
+                            allowDecimals={false}
                             axisLine={false}
+                            hide={!visibleSeries.has("requests")}
                             tickFormatter={(value: number) =>
                                 compactFormatter.format(value)
                             }
                             tickLine={false}
+                            tickMargin={8}
                             width={48}
                             yAxisId="requests"
                         />
                         <YAxis
+                            allowDecimals={false}
                             axisLine={false}
+                            hide={!visibleSeries.has("tokens")}
                             orientation="right"
                             tickFormatter={(value: number) =>
                                 compactFormatter.format(value)
                             }
                             tickLine={false}
+                            tickMargin={8}
                             width={56}
                             yAxisId="tokens"
                         />
                         <ChartTooltip
                             content={
                                 <ChartTooltipContent
-                                    indicator="dot"
+                                    indicator="line"
                                     labelFormatter={(value) =>
                                         formatTimeSeriesTooltipLabel(
-                                            typeof value === "string" ||
-                                                typeof value === "number"
-                                                ? String(value)
-                                                : "",
-                                            timeRange,
+                                            value,
+                                            granularity,
                                         )
                                     }
                                 />
                             }
-                            cursor={false}
                         />
-                        <Area
+                        <Line
+                            connectNulls={false}
                             dataKey="requests"
-                            fill="url(#fillRequests)"
+                            dot={false}
+                            hide={!visibleSeries.has("requests")}
+                            isAnimationActive={false}
                             stroke="var(--color-requests)"
-                            type="natural"
+                            strokeWidth={2}
+                            type="linear"
                             yAxisId="requests"
                         />
-                        <Area
+                        <Line
+                            connectNulls={false}
                             dataKey="tokens"
-                            fill="url(#fillTokens)"
+                            dot={false}
+                            hide={!visibleSeries.has("tokens")}
+                            isAnimationActive={false}
                             stroke="var(--color-tokens)"
-                            type="natural"
+                            strokeWidth={2}
+                            type="linear"
                             yAxisId="tokens"
                         />
                         <ChartLegend
-                            content={<ChartLegendContent />}
+                            content={
+                                <ChartLegendContent
+                                    hiddenKeys={hiddenSeries}
+                                    onItemToggle={toggleSeries}
+                                />
+                            }
                             verticalAlign="bottom"
                         />
-                    </AreaChart>
+                    </LineChart>
                 </ChartContainer>
             </CardContent>
         </Card>

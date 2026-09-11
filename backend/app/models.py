@@ -283,6 +283,16 @@ class RefreshToken(Base):
     user: Mapped[User] = relationship(back_populates="refresh_tokens")
 
 
+class MicrosoftBrowserAuthFlow(Base):
+    state_hash: Mapped[str] = mapped_column(String(64), nullable=False, unique=True, index=True)
+    browser_binding_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    flow: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    return_path: Mapped[str] = mapped_column(Text, nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, index=True
+    )
+
+
 class Conversation(Base):
     title: Mapped[str | None] = mapped_column(nullable=False)
     user: Mapped[bool] = mapped_column(default=False)
@@ -373,6 +383,7 @@ class AssistantMessageMetadata(Base):
     chatbot_time: Mapped[float | None] = mapped_column(nullable=True)
     guardrail_model_settings: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
     guardrail_time: Mapped[float | None] = mapped_column(nullable=True)
+    guardrail_retry_count: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
     chatbot_times: Mapped[list[float] | None] = mapped_column(JSONB, nullable=True)
     guardrail_times: Mapped[list[float] | None] = mapped_column(JSONB, nullable=True)
     grounding_source_keys: Mapped[list[str | dict[str, Any]] | None] = mapped_column(
@@ -429,6 +440,81 @@ class Message(Base):
         ),
         Index("ix_message_created_at_desc_id", text("created_at DESC"), "id"),
         Index("ix_message_role_created_at_desc_id", "role", text("created_at DESC"), "id"),
+    )
+
+
+class ComplianceInstructionsVersion(Base):
+    number: Mapped[int] = mapped_column(Integer, unique=True)
+    content: Mapped[str] = mapped_column(Text)
+    created_by_id: Mapped[UUID | None] = mapped_column(ForeignKey("user.id", ondelete="SET NULL"))
+
+
+class ComplianceScreening(Base):
+    created_by_id: Mapped[UUID | None] = mapped_column(ForeignKey("user.id", ondelete="SET NULL"))
+    instructions_version_id: Mapped[UUID] = mapped_column(
+        ForeignKey("compliance_instructions_version.id", ondelete="RESTRICT")
+    )
+    start_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    end_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    model_name: Mapped[str] = mapped_column(String(255))
+    screening_version: Mapped[str] = mapped_column(String(32))
+    model_settings: Mapped[dict[str, Any]] = mapped_column(JSONB)
+    admission_error_code: Mapped[str | None] = mapped_column(String(40))
+
+
+class ComplianceItem(Base):
+    screening_id: Mapped[UUID] = mapped_column(
+        ForeignKey("compliance_screening.id", ondelete="CASCADE"), index=True
+    )
+    message_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("message.id", ondelete="SET NULL"), index=True
+    )
+    conversation_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("conversation.id", ondelete="SET NULL"), index=True
+    )
+    # Non-content ownership provenance keeps tombstones permission-aware after source deletion.
+    owner_id: Mapped[UUID | None] = mapped_column(ForeignKey("user.id", ondelete="SET NULL"))
+    requested_by_id: Mapped[UUID | None] = mapped_column(ForeignKey("user.id", ondelete="SET NULL"))
+    status: Mapped[str] = mapped_column(String(24), default="queued", index=True)
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    lease_token: Mapped[UUID | None] = mapped_column(nullable=True)
+    leased_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    input_hash: Mapped[str | None] = mapped_column(String(64))
+    error_code: Mapped[str | None] = mapped_column(String(40))
+
+    __table_args__ = (
+        Index("ix_compliance_item_screening_message", "screening_id", "message_id", unique=True),
+    )
+
+
+class ComplianceFinding(Base):
+    item_id: Mapped[UUID] = mapped_column(
+        ForeignKey("compliance_item.id", ondelete="CASCADE"), index=True
+    )
+    # Cascade through the source too: item tombstones survive, source-derived findings do not.
+    message_id: Mapped[UUID] = mapped_column(
+        ForeignKey("message.id", ondelete="CASCADE"), index=True
+    )
+    title: Mapped[str] = mapped_column(String(240))
+    explanation: Mapped[str] = mapped_column(Text)
+    evidence_start: Mapped[int] = mapped_column(Integer)
+    evidence_end: Mapped[int] = mapped_column(Integer)
+    instruction_start: Mapped[int] = mapped_column(Integer)
+    instruction_end: Mapped[int] = mapped_column(Integer)
+    review_state: Mapped[str] = mapped_column(String(24), default="needs_review")
+    decision_revision: Mapped[int] = mapped_column(Integer, default=0)
+
+
+class ComplianceDecision(Base):
+    finding_id: Mapped[UUID] = mapped_column(
+        ForeignKey("compliance_finding.id", ondelete="CASCADE"), index=True
+    )
+    reviewer_id: Mapped[UUID | None] = mapped_column(ForeignKey("user.id", ondelete="SET NULL"))
+    revision: Mapped[int] = mapped_column(Integer)
+    state: Mapped[str] = mapped_column(String(24))
+
+    __table_args__ = (
+        Index("ix_compliance_decision_revision", "finding_id", "revision", unique=True),
     )
 
 

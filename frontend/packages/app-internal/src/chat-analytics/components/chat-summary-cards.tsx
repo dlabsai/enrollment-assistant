@@ -10,7 +10,7 @@ import {
 import type { JSX } from "react";
 
 import { formatLocaleNumber } from "../../lib/number-format";
-import type { ChatAnalyticsSummary } from "../../usage/types";
+import type { ChatAnalyticsSummary } from "../types";
 
 interface ChatSummaryCardsProps {
     summary: ChatAnalyticsSummary;
@@ -39,35 +39,35 @@ export const ChatSummaryCards = ({
                 </CardAction>
             </CardHeader>
             <CardContent className="text-muted-foreground text-sm">
-                Chats in this view
+                Chats created in this view
             </CardContent>
         </Card>
         <Card className="@container/card">
             <CardHeader>
-                <CardDescription>Total messages</CardDescription>
+                <CardDescription>Total turns</CardDescription>
                 <CardTitle className="text-2xl font-semibold tabular-nums @[250px]/card:text-3xl">
-                    {formatLocaleNumber(summary.total_messages)}
+                    {formatLocaleNumber(summary.total_turns)}
                 </CardTitle>
                 <CardAction>
                     <IconMessages className="text-muted-foreground size-5" />
                 </CardAction>
             </CardHeader>
             <CardContent className="text-muted-foreground text-sm">
-                User and assistant messages
+                User turns in those chats
             </CardContent>
         </Card>
         <Card className="@container/card">
             <CardHeader>
-                <CardDescription>Avg messages per chat</CardDescription>
+                <CardDescription>Avg turns per chat</CardDescription>
                 <CardTitle className="text-2xl font-semibold tabular-nums @[250px]/card:text-3xl">
-                    {formatAvg(summary.avg_messages_per_conversation)}
+                    {formatAvg(summary.avg_turns_per_conversation)}
                 </CardTitle>
                 <CardAction>
                     <IconChartLine className="text-muted-foreground size-5" />
                 </CardAction>
             </CardHeader>
             <CardContent className="text-muted-foreground text-sm">
-                Average chat length
+                Average for chats created in this view
             </CardContent>
         </Card>
     </div>

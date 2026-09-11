@@ -1,13 +1,14 @@
 import assert from "node:assert/strict";
-import { describe, it } from "node:test";
+
+import { describe, it } from "vitest";
 
 import {
     buildAssistantDraftPromptTemplates,
     getAssistantDraftEdits,
     selectAssistantDraftBaseVersionId,
     selectHasAssistantDraft,
-} from "../src/instructions/lib/assistant-draft.ts";
-import type { PromptSetVersion } from "../src/instructions/types/index.ts";
+} from "../src/instructions/lib/assistant-draft";
+import type { PromptSetVersion } from "../src/instructions/types";
 
 const baseState = {
     activeSectionId: "summary-internal",
@@ -76,7 +77,8 @@ describe("Assistant instruction drafts", () => {
                 },
             ],
             drafts: {
-                "guardrails_agent_internal.j2": "Edited guardrails instructions",
+                "guardrails_agent_internal.j2":
+                    "Edited guardrails instructions",
             },
         };
 

@@ -20,6 +20,7 @@ import {
     isTeamsForceModeEnabled,
     isTeamsLikelyByProxy,
     isTeamsSsoEnabled,
+    isTeamsUnavailableError,
     requestTeamsSsoToken,
 } from "../lib/teams-sso";
 import type { UserProfile } from "../types";
@@ -139,6 +140,9 @@ export const AuthProvider = ({ children }: AuthProviderProps): JSX.Element => {
                 try {
                     await runTeamsSsoLogin();
                 } catch (teamsError) {
+                    if (isTeamsUnavailableError(teamsError)) {
+                        return;
+                    }
                     logger.warn(
                         "Automatic Microsoft Teams sign-in failed",
                         teamsError,

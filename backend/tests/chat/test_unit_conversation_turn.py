@@ -1,5 +1,6 @@
 """Tests for the handle_conversation_turn function in engine.py."""
 
+from typing import Literal
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import UUID, uuid4
 
@@ -142,14 +143,85 @@ class TestHandleConversationTurnNewConversation:
         assert "Guardrails Agent rejected your previous response" in feedback_part.content
         assert "Remove the dollar amount." in feedback_part.content
 
-    def test_guardrail_retry_count_excludes_initial_attempt(self):
-        """Retry telemetry counts chatbot retries, not all guardrail checks."""
-        retry_count = getattr(chat_engine, "_guardrail_retry_count_from_attempts")
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("validity_sequence", "max_retries", "expected_retry_count", "expected_outcome"),
+        [([False, True], 3, 1, "accepted"), ([False, False, False], 2, 2, "blocked")],
+    )
+    async def test_persists_guardrail_retry_count_for_final_outcome(
+        self,
+        session: AsyncSession,
+        test_user: User,
+        model_settings: ModelSettings,
+        mock_chatbot_result: MagicMock,
+        validity_sequence: list[bool],
+        max_retries: int,
+        expected_retry_count: int,
+        expected_outcome: Literal["accepted", "blocked"],
+    ) -> None:
+        rejection = [{"guardrail": "llm", "message": "Try again"}]
+        chatbot_message = {"role": "assistant", "content": "Accepted response", "tool_calls": None}
+        with (
+            patch("app.chat.engine.create_chatbot_agent") as mock_create_chatbot,
+            patch(
+                "app.chat.engine.get_runtime_jinja_environment", new_callable=AsyncMock
+            ) as mock_get_runtime_jinja_environment,
+            patch("app.chat.engine.get_deps_with_jinja_env") as mock_get_deps_with_jinja_env,
+            patch(
+                "app.chat.engine.get_allowed_url_registry_for_va",
+                new_callable=AsyncMock,
+                return_value=frozenset(),
+            ),
+            patch(
+                "app.chat.engine._run_chatbot_guardrails_iteration", new_callable=AsyncMock
+            ) as run_iteration,
+        ):
+            setup_mock_agents(
+                mock_create_chatbot,
+                mock_get_runtime_jinja_environment,
+                mock_get_deps_with_jinja_env,
+                mock_chatbot_result,
+            )
+            run_iteration.side_effect = [
+                (
+                    chatbot_message,
+                    is_valid,
+                    "" if is_valid else "Try again",
+                    rejection,
+                    "System prompt",
+                    [],
+                    None,
+                    0.1,
+                    0.2,
+                )
+                for is_valid in validity_sequence
+            ]
 
-        assert retry_count(0) == 0
-        assert retry_count(1) == 0
-        assert retry_count(2) == 1
-        assert retry_count(3) == 2
+            _user_message_id, assistant_message = await handle_conversation_turn(
+                project_name="test_project",
+                conversation_id=None,
+                parent_message_id=None,
+                user_prompt="Hello",
+                is_regeneration=False,
+                chatbot_model_settings=model_settings,
+                guardrail_model_settings=model_settings,
+                user_id=test_user.id,
+                session=session,
+                tool_session_factory=async_session_factory,
+                enable_guardrails=True,
+                max_guardrails_retries=max_retries,
+            )
+
+        metadata = await session.scalar(
+            select(AssistantMessageMetadata).where(
+                AssistantMessageMetadata.message_id == assistant_message.id
+            )
+        )
+        assert metadata is not None
+        assert metadata.guardrail_retry_count == expected_retry_count
+        assert assistant_message.guardrails_blocked is (expected_outcome == "blocked")
+        assert assistant_message.metadata is not None
+        assert assistant_message.metadata.guardrail_retries == expected_retry_count
 
     @pytest.mark.asyncio
     async def test_demo_turn_uses_retrieval_capable_chatbot_prompt(

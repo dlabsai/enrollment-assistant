@@ -5,7 +5,7 @@
 - Use **cookie-based auth** for the browser app.
 - **Auto-login with Teams SSO** only when the app is actually running inside Teams.
 - If Teams SSO fails, **fail visibly**. Do not silently downgrade to another auth path.
-- Outside Teams, show the normal login screen.
+- Outside Teams, show the normal login screen. Show Microsoft sign in or password registration only when the backend enables each option.
 - Do not silently switch identities.
 - Auto-refresh of the same cookie session is okay.
 
@@ -52,8 +52,11 @@ If automatic Teams SSO fails:
 
 If the app is **not** running inside Teams:
 
-- do not auto-attempt Teams SSO
-- show the normal login/register screen
+- do not attempt Teams SSO
+- show the normal login screen
+- show password registration when the backend enables it
+- show **Continue with Microsoft** when the backend enables browser Microsoft SSO
+- start browser Microsoft SSO only after the user selects the button
 
 ### 6. No silent identity replacement
 
@@ -74,8 +77,12 @@ Authentication behavior must be predictable.
 
 ### Outside Teams
 
-1. Restore existing cookie session if present
-2. If no valid session, show normal login screen
+1. Restore the existing cookie session if present
+2. If there is no valid session, show the normal login screen
+3. If password registration is enabled, let the user open the registration form
+4. If browser Microsoft SSO is enabled, let the user select **Continue with Microsoft**
+5. If Microsoft sign in succeeds, create the normal cookie session
+6. If Microsoft sign in fails, return to the normal login screen with a plain error
 
 ## Desired auth UX principles
 

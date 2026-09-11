@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.routes import auth as auth_routes
 from app.core.config import settings
+from app.core.entra_identity import EntraIdentity
 from app.core.rbac import SystemGroupSlug, get_group_for_slug
 from app.core.security import get_password_hash
 from app.main import app
@@ -260,8 +261,8 @@ async def test_teams_sso_creates_user_and_sets_refresh_cookie(
     teams_email = f"teams-{uuid4()}@example.com"
     teams_object_id = f"teams-object-{uuid4()}"
 
-    async def fake_validate_teams_sso_token(_: str) -> auth_routes.TeamsSsoIdentity:
-        return auth_routes.TeamsSsoIdentity(
+    async def fake_validate_teams_sso_token(_: str) -> EntraIdentity:
+        return EntraIdentity(
             tenant_id="tenant-id", object_id=teams_object_id, email=teams_email, name="Teams User"
         )
 
@@ -316,8 +317,8 @@ async def test_teams_sso_links_existing_user_by_email(
     await transactional_session.commit()
     await transactional_session.refresh(existing_user)
 
-    async def fake_validate_teams_sso_token(_: str) -> auth_routes.TeamsSsoIdentity:
-        return auth_routes.TeamsSsoIdentity(
+    async def fake_validate_teams_sso_token(_: str) -> EntraIdentity:
+        return EntraIdentity(
             tenant_id="tenant-id",
             object_id=teams_object_id,
             email=normalized_email,
@@ -362,8 +363,8 @@ async def test_teams_sso_refresh_uses_embedded_cookie_settings(
     teams_email = f"teams-refresh-{uuid4()}@example.com"
     teams_object_id = f"teams-refresh-object-{uuid4()}"
 
-    async def fake_validate_teams_sso_token(_: str) -> auth_routes.TeamsSsoIdentity:
-        return auth_routes.TeamsSsoIdentity(
+    async def fake_validate_teams_sso_token(_: str) -> EntraIdentity:
+        return EntraIdentity(
             tenant_id="tenant-id",
             object_id=teams_object_id,
             email=teams_email,

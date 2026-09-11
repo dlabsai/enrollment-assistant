@@ -1,9 +1,15 @@
+import { API_URL } from "@va/shared/config";
 import { apiGet, apiPost } from "@va/shared/lib/api-client";
 
 import type { UserProfile } from "../types";
 
 interface AuthSuccessResponse {
     success: boolean;
+}
+
+interface AuthConfigResponse {
+    browser_microsoft_sso_enabled: boolean;
+    password_registration_enabled: boolean;
 }
 
 interface LoginPayload {
@@ -34,6 +40,14 @@ export const registerUser = async (
     apiPost<AuthSuccessResponse>("/auth/register", payload, {
         credentials: "include",
     });
+
+export const fetchAuthConfig = async (): Promise<AuthConfigResponse> =>
+    apiGet<AuthConfigResponse>("/auth/config");
+
+export const getMicrosoftBrowserSsoStartUrl = (
+    returnTo = "/",
+): string =>
+    `${API_URL}/auth/microsoft/start?return_to=${encodeURIComponent(returnTo)}`;
 
 export const fetchCurrentUser = async (): Promise<UserProfile> =>
     apiGet<UserProfile>("/auth/me", {

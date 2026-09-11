@@ -26,11 +26,13 @@ const appViewTitle: Record<AppView, string> = {
     chats: "Chats",
     messages: "Messages",
     feedback: "Feedback",
+    compliance: "Screenings",
     investigate: "Investigate",
     investigations: "Investigations",
     usage: "Usage",
     traces: "Traces",
     analytics: "Chat Analytics",
+    quality: "Quality",
     adoption: "Adoption",
     "public-analytics": "Public Analytics",
     evals: "Eval Runner",
@@ -54,6 +56,9 @@ const getRequestedView = (pathname: string): AppView | undefined => {
     if (normalized.startsWith("chats/")) {
         return "chats";
     }
+    if (normalized.startsWith("compliance/")) {
+        return "compliance";
+    }
     if (normalized.startsWith("investigations/")) {
         return "investigations";
     }
@@ -75,6 +80,9 @@ const resolveView = (
     const resolved = normalized === "" ? defaultView : normalized;
     if (resolved.startsWith("chats/")) {
         return canAccessView("chats", user) ? "chats" : defaultView;
+    }
+    if (resolved.startsWith("compliance/")) {
+        return canAccessView("compliance", user) ? "compliance" : defaultView;
     }
     if (resolved.startsWith("investigations/")) {
         return canAccessView("investigations", user)

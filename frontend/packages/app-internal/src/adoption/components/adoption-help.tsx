@@ -23,8 +23,8 @@ export const AdoptionHelp = (): JSX.Element => {
                     <p>
                         The Adoption page shows how many people use Chat. Each
                         person is counted once on a day when they send one or
-                        more messages. More messages and more chats on the same day
-                        don&apos;t increase the count.
+                        more messages. More messages and more chats on the same
+                        day don&apos;t increase the count.
                     </p>
                     <div>
                         <p className="text-foreground font-medium">
@@ -44,9 +44,9 @@ export const AdoptionHelp = (): JSX.Element => {
                         <p className="mt-1">
                             Monthly active users means the number of different
                             people who sent a message during the 30 days up to
-                            and including each date in the chart. For each new
-                            chart date, the dashboard moves the period forward
-                            by one day instead of using a calendar month.
+                            and including each point in the chart. Chart points
+                            can represent hours, days, weeks, or months,
+                            depending on the selected date range.
                         </p>
                     </div>
                     <div>
@@ -76,7 +76,9 @@ export const AdoptionHelp = (): JSX.Element => {
                         </p>
                         <ul className="mt-1 list-inside list-disc space-y-1">
                             <li>
-                                Dates use the time zone set in your browser.
+                                Dates use the app time zone. It defaults to
+                                browser time; developers can select Eastern Time
+                                in the sidebar Settings menu.
                             </li>
                             <li>
                                 The date filter sets the period shown on the

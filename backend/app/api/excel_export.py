@@ -45,19 +45,19 @@ def excel_safe_text(value: str | None, *, truncation_suffix: str | None = None) 
 
 
 @dataclass(frozen=True)
-class BrowserDateTimeFormatter:
+class ExportDateTimeFormatter:
     time_zone: tzinfo
     locale_name: str
     format_pattern: str
 
     @classmethod
-    def resolve(cls, *, time_zone: str, locale: str | None) -> BrowserDateTimeFormatter:
+    def resolve(cls, *, time_zone: str, locale: str | None) -> ExportDateTimeFormatter:
         try:
             timezone_obj: tzinfo = ZoneInfo(time_zone)
         except ZoneInfoNotFoundError:
             timezone_obj = UTC
 
-        locale_name = _normalize_browser_locale(locale)
+        locale_name = _normalize_locale(locale)
         locale_obj = Locale.parse(locale_name)
         format_pattern = "MMM d, h:mm a"
         if "a" not in locale_obj.time_formats["short"].pattern:
@@ -65,13 +65,19 @@ class BrowserDateTimeFormatter:
         return cls(time_zone=timezone_obj, locale_name=locale_name, format_pattern=format_pattern)
 
     def format(self, value: datetime) -> str:
-        if value.tzinfo is None:
-            value = value.replace(tzinfo=UTC)
-        localized = value.astimezone(self.time_zone)
+        localized = self._localize(value)
         return format_datetime(localized, self.format_pattern, locale=self.locale_name)
 
+    def format_date(self, value: datetime) -> str:
+        return self._localize(value).date().isoformat()
 
-def _normalize_browser_locale(value: str | None) -> str:
+    def _localize(self, value: datetime) -> datetime:
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=UTC)
+        return value.astimezone(self.time_zone)
+
+
+def _normalize_locale(value: str | None) -> str:
     if value is None:
         return "en_US"
     normalized = value.replace("-", "_").strip()
@@ -108,6 +114,34 @@ class ExcelExportWorkbook:
             cell.alignment = _CELL_ALIGNMENT
             header_cells.append(cell)
         self._worksheet.append(header_cells)
+
+    def add_information_sheet(
+        self, rows: tuple[tuple[str, ExcelScalar], ...], *, title: str = "Export information"
+    ) -> None:
+        """Add a two-column information sheet before the data sheet."""
+        worksheet: Any = self._workbook.create_sheet(title, 0)
+        worksheet.freeze_panes = "A2"
+        worksheet.column_dimensions["A"].width = 36
+        worksheet.column_dimensions["B"].width = 100
+
+        headers: list[Cell] = []
+        for value in ("Item", "Value"):
+            cell = WriteOnlyCell(worksheet, value=value)
+            cell.font = _HEADER_FONT
+            cell.fill = _HEADER_FILL
+            cell.alignment = _CELL_ALIGNMENT
+            headers.append(cell)
+        worksheet.append(headers)
+
+        for label, value in rows:
+            cells: list[Cell] = []
+            for item in (label, value):
+                cell = WriteOnlyCell(worksheet, value=item)
+                if isinstance(item, str):
+                    cell.data_type = "s"
+                cell.alignment = _CELL_ALIGNMENT
+                cells.append(cell)
+            worksheet.append(cells)
 
     def append(self, values: tuple[ExcelExportCell | ExcelScalar, ...]) -> None:
         if len(values) != len(self._headers):

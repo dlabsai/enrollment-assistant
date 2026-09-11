@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import uuid  # noqa: TC003
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime  # noqa: TC003
 from enum import StrEnum
 from functools import lru_cache
 from typing import TYPE_CHECKING, Annotated, Any
@@ -15,6 +15,11 @@ from sqlalchemy.sql import ColumnElement
 
 from app.api.deps import CurrentUser, SessionDep, require_permission
 from app.api.response_costs import price_usage
+from app.api.routes.analytics_time import (
+    TimeGranularity,
+    build_time_series_boundaries,
+    select_time_granularity,
+)
 from app.api.routes.owner_group_filter import (
     OwnerGroup,
     apply_aggregate_owner_filter,
@@ -54,8 +59,9 @@ class UsageTraceBasicOut(BaseModel):
     is_public: bool | None
 
 
-class UsageDailyOut(BaseModel):
-    date: datetime
+class UsageTimeSeriesPointOut(BaseModel):
+    bucket_start: datetime
+    bucket_end: datetime
     requests: int
     tokens: int
     cost: float
@@ -87,71 +93,40 @@ class UsageSummaryOut(BaseModel):
 
 class UsageOverviewOut(BaseModel):
     summary: UsageSummaryOut
-    daily: list[UsageDailyOut]
+    time_granularity: TimeGranularity
+    series: list[UsageTimeSeriesPointOut]
     models: list[UsageModelOut]
     latest_traces: list[UsageTraceBasicOut]
 
 
-def _use_hourly_buckets(start: datetime | None, end: datetime | None) -> bool:
-    return start is not None and end is not None and end - start <= timedelta(hours=24)
-
-
-def _build_usage_daily_data(
-    rows: Iterable[Any], start: datetime | None, end: datetime | None, *, use_hourly: bool
-) -> list[UsageDailyOut]:
-    if not use_hourly or start is None or end is None:
-        return [
-            UsageDailyOut(
-                date=row.date,
-                requests=row.requests,
-                tokens=row.tokens,
-                cost=float(row.cost),
-                embedding_requests=row.embedding_requests,
-                embedding_tokens=row.embedding_tokens,
-                embedding_cost=float(row.embedding_cost),
-                errors=row.errors,
-                avg_duration=float(row.avg_duration or 0),
-            )
-            for row in rows
-        ]
-
+def _build_usage_series(
+    rows: Iterable[Any],
+    start: datetime | None,
+    end: datetime | None,
+    *,
+    granularity: TimeGranularity,
+) -> list[UsageTimeSeriesPointOut]:
     row_map = {row.date: row for row in rows}
-    current = start.replace(minute=0, second=0, microsecond=0)
-    end_bucket = end.replace(minute=0, second=0, microsecond=0)
-    hourly_rows: list[UsageDailyOut] = []
-    while current <= end_bucket:
-        row = row_map.get(current)
-        if row is None:
-            hourly_rows.append(
-                UsageDailyOut(
-                    date=current,
-                    requests=0,
-                    tokens=0,
-                    cost=0.0,
-                    embedding_requests=0,
-                    embedding_tokens=0,
-                    embedding_cost=0.0,
-                    errors=0,
-                    avg_duration=0.0,
-                )
-            )
-        else:
-            hourly_rows.append(
-                UsageDailyOut(
-                    date=row.date,
-                    requests=row.requests,
-                    tokens=row.tokens,
-                    cost=float(row.cost),
-                    embedding_requests=row.embedding_requests,
-                    embedding_tokens=row.embedding_tokens,
-                    embedding_cost=float(row.embedding_cost),
-                    errors=row.errors,
-                    avg_duration=float(row.avg_duration or 0),
-                )
-            )
-        current += timedelta(hours=1)
+    boundaries = build_time_series_boundaries(set(row_map), start, end, granularity)
 
-    return hourly_rows
+    result: list[UsageTimeSeriesPointOut] = []
+    for boundary in boundaries:
+        row = row_map.get(boundary.key)
+        result.append(
+            UsageTimeSeriesPointOut(
+                bucket_start=boundary.start,
+                bucket_end=boundary.end,
+                requests=int(row.requests if row else 0),
+                tokens=int(row.tokens if row else 0),
+                cost=float(row.cost if row else 0),
+                embedding_requests=int(row.embedding_requests if row else 0),
+                embedding_tokens=int(row.embedding_tokens if row else 0),
+                embedding_cost=float(row.embedding_cost if row else 0),
+                errors=int(row.errors if row else 0),
+                avg_duration=float(row.avg_duration or 0) if row else 0.0,
+            )
+        )
+    return result
 
 
 def _strip_model_provider_prefix(model: str, provider: str) -> str:
@@ -625,10 +600,9 @@ async def get_usage_summary(
         )
         return statement.where(platform_filter) if platform_filter is not None else statement
 
-    use_hourly_buckets = _use_hourly_buckets(start, end)
-    bucket_unit = "hour" if use_hourly_buckets else "day"
-    time_bucket = func.date_trunc(bucket_unit, span_time_expr)
-    daily_stmt = select(
+    time_granularity = select_time_granularity(start, end)
+    time_bucket = func.date_trunc(time_granularity.value, span_time_expr, "UTC")
+    series_stmt = select(
         time_bucket.label("date"),
         func.coalesce(func.sum(case((~is_embedding_expr, 1), else_=0)), 0).label("requests"),
         func.coalesce(func.sum(case((~is_embedding_expr, tokens_expr), else_=0)), 0).label(
@@ -655,11 +629,11 @@ async def get_usage_summary(
         ),
         func.avg(case((~is_embedding_expr, duration_expr), else_=None)).label("avg_duration"),
     ).select_from(OtelSpan)
-    daily_stmt = apply_usage_filters(daily_stmt).where(*filters)
-    daily_stmt = daily_stmt.group_by(time_bucket).order_by(time_bucket)
+    series_stmt = apply_usage_filters(series_stmt).where(*filters)
+    series_stmt = series_stmt.group_by(time_bucket).order_by(time_bucket)
 
-    daily_rows = (await session.execute(daily_stmt)).all()
-    daily_data = _build_usage_daily_data(daily_rows, start, end, use_hourly=use_hourly_buckets)
+    series_rows = (await session.execute(series_stmt)).all()
+    series = _build_usage_series(series_rows, start, end, granularity=time_granularity)
 
     summary_stmt = select(
         func.coalesce(func.sum(case((~is_embedding_expr, 1), else_=0)), 0).label("total_requests"),
@@ -742,7 +716,8 @@ async def get_usage_summary(
             total_errors=summary_row.total_errors,
             avg_duration=float(summary_row.avg_duration or 0),
         ),
-        daily=daily_data,
+        time_granularity=time_granularity,
+        series=series,
         models=[
             UsageModelOut(
                 model=row.model, requests=row.requests, tokens=row.tokens, cost=float(row.cost)

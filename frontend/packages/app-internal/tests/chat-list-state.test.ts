@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
-import { describe, it } from "node:test";
 
-import { mergeChatListItems } from "../src/chat/lib/chat-list-state.ts";
-import type { Chat, ChatListItem } from "../src/chat/types/index.ts";
+import { describe, it } from "vitest";
+
+import { mergeChatListItems } from "../src/chat/lib/chat-list-state";
+import type { Chat, ChatListItem } from "../src/chat/types";
 
 const createListItem = (
     overrides: Partial<ChatListItem> = {},

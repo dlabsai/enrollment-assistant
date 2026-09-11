@@ -15,6 +15,9 @@ export const getAuthFormErrorMessage = (detail?: string): string => {
         case "Email already registered": {
             return "An account with this email already exists. Try signing in instead.";
         }
+        case "Password registration is not enabled": {
+            return "Registration is not available. Sign in with an existing account.";
+        }
         default: {
             return DEFAULT_AUTH_ERROR_MESSAGE;
         }

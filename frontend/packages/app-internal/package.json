@@ -10,14 +10,7 @@
         "build-prod": "pnpm -w exec tsc -b packages/app-internal && vite build --mode internal-prod",
         "type-check": "pnpm -w exec tsc -b --noEmit packages/app-internal",
         "lint": "eslint src vite.config.ts --fix --cache --cache-strategy content --cache-location ../../node_modules/.cache/eslint/app-internal",
-        "test:auth": "node --experimental-strip-types --test tests/auth-error-message.test.ts",
-        "test:branches": "node --experimental-strip-types --test tests/conversation-tree.test.ts",
-        "test:chat-state": "node --experimental-strip-types --test tests/active-request-tracker.test.ts tests/chat-list-state.test.ts tests/generation-attempt.test.ts tests/message-retry.test.ts tests/message-stream-lifecycle.test.ts",
-        "test:evals": "node --experimental-strip-types --test tests/assistant-draft.test.ts tests/eval-report-utils.test.ts",
-        "test:formatters": "node --experimental-strip-types --test tests/number-format.test.ts",
-        "test:rag": "node --experimental-strip-types --test tests/rag-operation-stream.test.ts",
-        "test:time-range": "node --experimental-strip-types --test tests/time-range.test.ts",
-        "test:traces": "node --experimental-strip-types --test tests/trace-utils.test.ts",
+        "test": "vitest run",
         "preview-local": "vite preview --mode internal-local",
         "preview-stage": "vite preview --mode internal-stage",
         "preview-prod": "vite preview --mode internal-prod"
@@ -52,6 +45,7 @@
         "zustand": "^5.0.12"
     },
     "devDependencies": {
-        "vite": "^8.0.3"
+        "vite": "^8.0.3",
+        "vitest": "^4.1.11"
     }
 }

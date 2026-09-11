@@ -12,6 +12,67 @@ if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
 
 
+def test_scheduler_configures_screening_and_rag_jobs(monkeypatch: pytest.MonkeyPatch) -> None:
+    jobs: list[tuple[object, dict[str, object]]] = []
+
+    class FakeScheduler:
+        def add_job(self, function: object, **kwargs: object) -> None:
+            jobs.append((function, kwargs))
+
+    monkeypatch.setattr(scheduler_module, "scheduler", FakeScheduler())
+
+    scheduler_module.configure_scheduler_jobs()
+
+    screening_function, screening_options = next(
+        job for job in jobs if job[1].get("id") == "scheduled_screening"
+    )
+    assert screening_function is scheduler_module.scheduled_screening_job
+    assert screening_options == {
+        "trigger": "cron",
+        "hour": 2,
+        "minute": 30,
+        "timezone": "America/New_York",
+        "max_instances": 1,
+        "coalesce": True,
+        "id": "scheduled_screening",
+        "replace_existing": True,
+    }
+
+    rag_function, rag_options = next(job for job in jobs if job[1].get("id") == "sync_data")
+    assert rag_function is scheduler_module.sync_data_job
+    assert rag_options["hour"] == 3
+    assert rag_options["minute"] == 0
+    assert rag_options["timezone"] == "America/New_York"
+
+
+@pytest.mark.asyncio
+async def test_scheduled_screening_job_runs_once_under_scheduler_lock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    lock_calls: list[tuple[int, str]] = []
+    admissions = 0
+
+    @asynccontextmanager
+    async def fake_job_lock(lock_id: int, *, job_name: str) -> AsyncGenerator[bool]:
+        lock_calls.append((lock_id, job_name))
+        yield True
+
+    async def fake_admit_daily_screening() -> None:
+        nonlocal admissions
+        admissions += 1
+
+    monkeypatch.setattr(scheduler_module, "_job_lock", fake_job_lock)
+    monkeypatch.setattr(scheduler_module, "admit_daily_screening", fake_admit_daily_screening)
+
+    await scheduler_module.scheduled_screening_job()
+
+    assert len(lock_calls) == 1
+    lock_id, job_name = lock_calls[0]
+    assert isinstance(lock_id, int)
+    assert job_name == "scheduled_screening_job"
+    assert admissions == 1
+
+
 @pytest.mark.asyncio
 async def test_sync_data_job_skips_pipeline_when_scheduler_lock_is_unavailable(
     monkeypatch: pytest.MonkeyPatch,

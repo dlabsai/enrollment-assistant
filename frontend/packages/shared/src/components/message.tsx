@@ -1,9 +1,11 @@
 import { splitHighlightText } from "@va/shared/lib/highlight";
+import { cn } from "@va/shared/lib/utils";
 import type { ChatMessage } from "@va/shared/types";
 import type { Element, Parent, Root, Text } from "hast";
+import { decodeString } from "micromark-util-decode-string";
 import { memo, type ReactNode, useMemo } from "react";
 import { Streamdown } from "streamdown";
-import type { Pluggable } from "unified";
+import type { Pluggable, Plugin } from "unified";
 import { visit } from "unist-util-visit";
 
 import { DEFAULT_HIGHLIGHT_CLASS, HighlightedText } from "./highlighted-text";
@@ -19,21 +21,90 @@ interface MessageProps {
     hideFooterUntilHover?: boolean;
     highlightQuery?: string;
     highlightPhrase?: boolean;
+    highlightExactSource?: string;
+    isFocusHighlighted?: boolean;
 }
 
 const isElement = (node: Parent): node is Element => node.type === "element";
 
-const createHighlightRehypePlugin = (
-    query: string,
-    highlightClassName: string,
-    phrase = false,
-): Pluggable | undefined => {
-    const trimmedQuery = query.trim();
-    if (trimmedQuery === "") {
+const findUniqueSource = (
+    source: string,
+    query: string | undefined,
+): number | undefined => {
+    if (query === undefined || query === "") {
         return undefined;
     }
+    const start = source.indexOf(query);
+    return start !== -1 && !source.includes(query, start + 1) ? start : undefined;
+};
 
-    return () => (tree: Root) => {
+interface HighlightPluginOptions {
+    query: string;
+    highlightClassName: string;
+    phrase: boolean;
+    sourceStart?: number;
+}
+
+const sourceHighlightRange = (
+    node: Text,
+    source: string,
+    sourceStart: number,
+    sourceEnd: number,
+): [start: number, end: number] | undefined => {
+    const nodeStart = node.position?.start.offset;
+    const nodeEnd = node.position?.end.offset;
+    if (
+        nodeStart === undefined ||
+        nodeEnd === undefined ||
+        nodeEnd <= sourceStart ||
+        nodeStart >= sourceEnd
+    ) {
+        return undefined;
+    }
+    const overlapStart = Math.max(nodeStart, sourceStart);
+    const overlapEnd = Math.min(nodeEnd, sourceEnd);
+    if (sourceStart <= nodeStart && sourceEnd >= nodeEnd) {
+        return [0, node.value.length];
+    }
+    const nodeSource = source.slice(nodeStart, nodeEnd);
+    if (decodeString(nodeSource) !== node.value) {
+        return undefined;
+    }
+    return [
+        decodeString(nodeSource.slice(0, overlapStart - nodeStart)).length,
+        decodeString(nodeSource.slice(0, overlapEnd - nodeStart)).length,
+    ];
+};
+
+interface HighlightTextPart {
+    text: string;
+    highlight: boolean;
+}
+
+const splitSourceHighlightText = (
+    node: Text,
+    source: string,
+    sourceStart: number,
+    sourceEnd: number,
+): HighlightTextPart[] => {
+    const range = sourceHighlightRange(node, source, sourceStart, sourceEnd);
+    if (!range) {
+        return [];
+    }
+    return [
+        { text: node.value.slice(0, range[0]), highlight: false },
+        { text: node.value.slice(range[0], range[1]), highlight: true },
+        { text: node.value.slice(range[1]), highlight: false },
+    ].filter((part) => part.text !== "");
+};
+
+const highlightRehypePlugin: Plugin<[HighlightPluginOptions], Root> =
+    ({ query, highlightClassName, phrase, sourceStart }) =>
+    (tree: Root, file): void => {
+        const source = String(file.value);
+        const sourceEnd =
+            sourceStart === undefined ? undefined : sourceStart + query.length;
+        const isSourceHighlight = sourceStart !== undefined;
         visit(
             tree,
             "text",
@@ -50,7 +121,15 @@ const createHighlightRehypePlugin = (
                     return;
                 }
 
-                const parts = splitHighlightText(node.value, trimmedQuery, phrase);
+                const parts =
+                    sourceStart === undefined || sourceEnd === undefined
+                        ? splitHighlightText(node.value, query, phrase)
+                        : splitSourceHighlightText(
+                              node,
+                              source,
+                              sourceStart,
+                              sourceEnd,
+                          );
                 const hasHighlights = parts.some((part) => part.highlight);
                 if (!hasHighlights) {
                     return;
@@ -63,6 +142,9 @@ const createHighlightRehypePlugin = (
                             tagName: "mark",
                             properties: {
                                 className: highlightClassName,
+                                ...(isSourceHighlight
+                                    ? { "data-exact-highlight": true }
+                                    : {}),
                             },
                             children: [{ type: "text", value: part.text }],
                         };
@@ -80,6 +162,29 @@ const createHighlightRehypePlugin = (
             },
         );
     };
+
+const createHighlightRehypePlugin = (
+    query: string,
+    highlightClassName: string,
+    phrase = false,
+    sourceStart?: number,
+): Pluggable | undefined => {
+    const resolvedQuery = sourceStart === undefined ? query.trim() : query;
+    if (resolvedQuery === "") {
+        return undefined;
+    }
+
+    // Streamdown caches processors by plugin function name plus serialized options.
+    // Supplying the query and source range as options prevents stale highlighting.
+    return [
+        highlightRehypePlugin,
+        {
+            query: resolvedQuery,
+            highlightClassName,
+            phrase,
+            sourceStart,
+        },
+    ];
 };
 
 export const Message = memo(
@@ -93,6 +198,8 @@ export const Message = memo(
         hideFooterUntilHover = false,
         highlightQuery = "",
         highlightPhrase = false,
+        highlightExactSource,
+        isFocusHighlighted = false,
     }: MessageProps) => {
         const isUser = message.role === "user";
         const shouldHideFooter = hideFooterUntilHover && !isUser;
@@ -101,15 +208,26 @@ export const Message = memo(
             footer !== undefined ||
             footerAside !== undefined ||
             (!isUser && onPlayTTS !== undefined);
+        const exactSourceStart = findUniqueSource(
+            message.content,
+            highlightExactSource,
+        );
+        const resolvedHighlightQuery =
+            highlightExactSource === undefined
+                ? highlightQuery
+                : exactSourceStart === undefined
+                  ? ""
+                  : highlightExactSource;
 
         const highlightRehypePlugin = useMemo(
             () =>
                 createHighlightRehypePlugin(
-                    highlightQuery,
+                    resolvedHighlightQuery,
                     DEFAULT_HIGHLIGHT_CLASS,
                     highlightPhrase,
+                    exactSourceStart,
                 ),
-            [highlightPhrase, highlightQuery],
+            [exactSourceStart, highlightPhrase, resolvedHighlightQuery],
         );
 
         const content = useMemo(() => {
@@ -134,7 +252,8 @@ export const Message = memo(
             return (
                 <Streamdown
                     className="max-w-none wrap-break-word"
-                    key={`${message.id}-${highlightQuery}-${highlightPhrase}`}
+                    key={`${message.id}-${resolvedHighlightQuery}-${highlightPhrase}-${exactSourceStart ?? ""}`}
+                    mode={exactSourceStart === undefined ? undefined : "static"}
                     rehypePlugins={
                         highlightRehypePlugin
                             ? [highlightRehypePlugin]
@@ -144,11 +263,24 @@ export const Message = memo(
                     {message.content}
                 </Streamdown>
             );
-        }, [highlightPhrase, highlightQuery, highlightRehypePlugin, isUser, message]);
+        }, [
+            exactSourceStart,
+            highlightPhrase,
+            highlightQuery,
+            highlightRehypePlugin,
+            isUser,
+            message,
+            resolvedHighlightQuery,
+        ]);
 
         return (
             <div
-                className={`flex ${isUser ? "justify-end" : "justify-start"} ${isUser ? "mb-0" : "mb-6"}`}
+                className={cn(
+                    "flex rounded-xl transition-[background-color,box-shadow] duration-700",
+                    isUser ? "mb-0 justify-end" : "mb-6 justify-start",
+                    isFocusHighlighted &&
+                        "bg-yellow-100/70 shadow-[0_0_0_2px_rgba(250,204,21,0.65)] dark:bg-yellow-950/40",
+                )}
             >
                 <div
                     className={

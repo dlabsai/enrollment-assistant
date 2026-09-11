@@ -2,7 +2,7 @@ from pathlib import Path
 from typing import Annotated, Any, Literal
 from urllib.parse import urlsplit
 
-from pydantic import AnyUrl, BeforeValidator, computed_field
+from pydantic import AnyUrl, BeforeValidator, Field, computed_field
 from pydantic_core import MultiHostUrl
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -166,6 +166,12 @@ class Settings(BaseSettings):
         "your question to the right team."
     )
 
+    # Manual and scheduled screening: one bounded executor per web process, no transcript logging.
+    COMPLIANCE_WORKER_ENABLED: bool = True
+    COMPLIANCE_MODEL: str = "azure/gpt-5.4"
+    COMPLIANCE_MAX_MESSAGES: int = Field(default=10000, ge=1, le=100000)
+    COMPLIANCE_MAX_INPUT_CHARACTERS: int = Field(default=200000, ge=1000, le=1000000)
+
     # Model for evaluation/judge
     EVALUATION_MODEL: str = "azure/gpt-5.4"
     EVALUATION_MODEL_TEMPERATURE: float = 0.0
@@ -207,6 +213,7 @@ class Settings(BaseSettings):
     STRESS_FAKE_LLM_REQUEST_PADDING_BYTES: int = 0
     STRESS_FAKE_LLM_RESPONSE_PADDING_BYTES: int = 0
 
+    PASSWORD_REGISTRATION_ENABLED: bool = False
     USER_REGISTRATION_TOKEN: str | None = None
     ADMIN_REGISTRATION_TOKEN: str | None = None
     DEV_REGISTRATION_TOKEN: str | None = None
@@ -215,6 +222,17 @@ class Settings(BaseSettings):
     TEAMS_SSO_CLIENT_ID: str = ""
     TEAMS_SSO_RESOURCE: str = ""
     TEAMS_SSO_ALLOWED_AUDIENCES: str = ""
+    BROWSER_SSO_ENABLED: bool = False
+    BROWSER_SSO_TENANT_ID: str = ""
+    BROWSER_SSO_CLIENT_ID: str = ""
+    BROWSER_SSO_REDIRECT_URI: str = ""
+    BROWSER_SSO_ALLOWED_EMAIL_DOMAIN: str = ""
+    BROWSER_SSO_CERTIFICATE_THUMBPRINT: str = ""
+    BROWSER_SSO_CERTIFICATE_PRIVATE_KEY: str = ""
+    BROWSER_SSO_CERTIFICATE_PRIVATE_KEY_PATH: str = ""
+    BROWSER_SSO_REQUEST_TIMEOUT_SECONDS: float = 10.0
+    BROWSER_SSO_FLOW_EXPIRE_MINUTES: int = 10
+    BROWSER_SSO_FLOW_COOKIE_NAME: str = "va_microsoft_sso_flow"
     JWT_SECRET_KEY: str | None = None
     JWT_ALGORITHM: str = "HS256"
     JWT_EXPIRE_MINUTES: int = 1440  # 24 hours
@@ -240,6 +258,45 @@ class Settings(BaseSettings):
                 "PROVIDER_HTTP_MAX_KEEPALIVE_CONNECTIONS must be between zero and "
                 "PROVIDER_HTTP_MAX_CONNECTIONS"
             )
+        if self.BROWSER_SSO_REQUEST_TIMEOUT_SECONDS <= 0:
+            raise ValueError("BROWSER_SSO_REQUEST_TIMEOUT_SECONDS must be positive")
+        if self.BROWSER_SSO_FLOW_EXPIRE_MINUTES <= 0:
+            raise ValueError("BROWSER_SSO_FLOW_EXPIRE_MINUTES must be positive")
+        if self.BROWSER_SSO_ENABLED:
+            browser_sso_required_values = {
+                "BROWSER_SSO_TENANT_ID": self.BROWSER_SSO_TENANT_ID,
+                "BROWSER_SSO_CLIENT_ID": self.BROWSER_SSO_CLIENT_ID,
+                "BROWSER_SSO_REDIRECT_URI": self.BROWSER_SSO_REDIRECT_URI,
+                "BROWSER_SSO_ALLOWED_EMAIL_DOMAIN": self.BROWSER_SSO_ALLOWED_EMAIL_DOMAIN,
+                "BROWSER_SSO_CERTIFICATE_THUMBPRINT": self.BROWSER_SSO_CERTIFICATE_THUMBPRINT,
+            }
+            missing_browser_sso_values = [
+                name for name, value in browser_sso_required_values.items() if value.strip() == ""
+            ]
+            if missing_browser_sso_values:
+                raise ValueError(
+                    "Browser SSO is missing configuration: " + ", ".join(missing_browser_sso_values)
+                )
+            if not (
+                self.BROWSER_SSO_CERTIFICATE_PRIVATE_KEY.strip()
+                or self.BROWSER_SSO_CERTIFICATE_PRIVATE_KEY_PATH.strip()
+            ):
+                raise ValueError("Browser SSO certificate private key is not configured")
+            browser_sso_redirect = urlsplit(self.BROWSER_SSO_REDIRECT_URI.strip())
+            if (
+                browser_sso_redirect.scheme not in {"http", "https"}
+                or not browser_sso_redirect.netloc
+            ):
+                raise ValueError("BROWSER_SSO_REDIRECT_URI must be an absolute HTTP(S) URL")
+            if self.ENVIRONMENT == "production" and browser_sso_redirect.scheme != "https":
+                raise ValueError("Production BROWSER_SSO_REDIRECT_URI must use HTTPS")
+            allowed_email_domain = self.BROWSER_SSO_ALLOWED_EMAIL_DOMAIN.strip()
+            if (
+                allowed_email_domain.startswith("@")
+                or "@" in allowed_email_domain
+                or "." not in allowed_email_domain
+            ):
+                raise ValueError("BROWSER_SSO_ALLOWED_EMAIL_DOMAIN must be a domain without @")
 
         stress_urls = {
             "STRESS_FAKE_LLM_URL": self.STRESS_FAKE_LLM_URL,

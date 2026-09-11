@@ -16,12 +16,19 @@ import {
     FormMessage,
 } from "@va/shared/components/ui/form";
 import { Input } from "@va/shared/components/ui/input";
+import { UNIVERSITY_NAME } from "@va/shared/config";
 import { isApiError } from "@va/shared/lib/api-client";
+import { logger } from "@va/shared/lib/logger";
 import { type JSX, useCallback, useEffect, useMemo, useState } from "react";
 import { useForm } from "react-hook-form";
 
 import { useAuth } from "../contexts/auth-context";
-import { loginUser, registerUser } from "../lib/api";
+import {
+    fetchAuthConfig,
+    getMicrosoftBrowserSsoStartUrl,
+    loginUser,
+    registerUser,
+} from "../lib/api";
 import { getAuthFormErrorMessage } from "../lib/error-message";
 
 interface FormState {
@@ -42,6 +49,20 @@ const initialFormState = (): FormState => ({
     registration_token: "",
 });
 
+const getInitialMicrosoftSsoError = (): string | undefined => {
+    const currentUrl = new URL(window.location.href);
+    return currentUrl.searchParams.get("auth_error") === "microsoft_sso"
+        ? `Microsoft sign in did not complete. Use an approved ${UNIVERSITY_NAME} account or try again.`
+        : undefined;
+};
+
+const signInWithMicrosoft = (): void => {
+    const currentUrl = new URL(window.location.href);
+    currentUrl.searchParams.delete("auth_error");
+    const returnTo = `${currentUrl.pathname}${currentUrl.search}${currentUrl.hash}`;
+    window.location.assign(getMicrosoftBrowserSsoStartUrl(returnTo));
+};
+
 export const AuthPage = (): JSX.Element => {
     const {
         authenticate,
@@ -54,7 +75,13 @@ export const AuthPage = (): JSX.Element => {
         teamsSsoLoading,
     } = useAuth();
     const [mode, setMode] = useState<Mode>("login");
-    const [error, setError] = useState<string | undefined>();
+    const [error, setError] = useState<string | undefined>(
+        getInitialMicrosoftSsoError,
+    );
+    const [browserMicrosoftSsoEnabled, setBrowserMicrosoftSsoEnabled] =
+        useState(false);
+    const [passwordRegistrationEnabled, setPasswordRegistrationEnabled] =
+        useState(false);
     const form = useForm<FormState>({
         defaultValues: initialFormState(),
     });
@@ -106,9 +133,11 @@ export const AuthPage = (): JSX.Element => {
             teamsOnlyMode
                 ? "Use your Microsoft Teams account to sign in to the internal app."
                 : activeMode === "login"
-                  ? "Use the email and password you registered with."
+                  ? browserMicrosoftSsoEnabled
+                      ? `Use your ${UNIVERSITY_NAME} Microsoft account, or use the email and password you registered with.`
+                      : "Use the email and password you registered with."
                   : "Provide your name, email, password, and the registration token you were given.",
-        [activeMode, teamsOnlyMode],
+        [activeMode, browserMicrosoftSsoEnabled, teamsOnlyMode],
     );
 
     const isBusy = isSubmitting || teamsSsoLoading;
@@ -166,6 +195,46 @@ export const AuthPage = (): JSX.Element => {
         setError(undefined);
         clearAuthError();
     }, [clearAuthError, form]);
+
+    useEffect(() => {
+        const currentUrl = new URL(window.location.href);
+        if (currentUrl.searchParams.get("auth_error") === "microsoft_sso") {
+            currentUrl.searchParams.delete("auth_error");
+            window.history.replaceState(
+                window.history.state,
+                "",
+                `${currentUrl.pathname}${currentUrl.search}${currentUrl.hash}`,
+            );
+        }
+    }, []);
+
+    useEffect(() => {
+        let active = true;
+        if (!teamsOnlyMode) {
+            void fetchAuthConfig().then(
+                (config) => {
+                    if (active) {
+                        setBrowserMicrosoftSsoEnabled(
+                            config.browser_microsoft_sso_enabled,
+                        );
+                        setPasswordRegistrationEnabled(
+                            config.password_registration_enabled,
+                        );
+                    }
+                },
+                (error: unknown) => {
+                    logger.warn(
+                        "Failed to load authentication configuration",
+                        error,
+                    );
+                },
+            );
+        }
+
+        return (): void => {
+            active = false;
+        };
+    }, [teamsOnlyMode]);
 
     useEffect(() => {
         if (sessionExpired) {
@@ -244,6 +313,26 @@ export const AuthPage = (): JSX.Element => {
                                         );
                                     }}
                                 >
+                                    {activeMode === "login" &&
+                                        browserMicrosoftSsoEnabled && (
+                                            <div className="space-y-3">
+                                                <Button
+                                                    className="w-full"
+                                                    disabled={isBusy}
+                                                    onClick={
+                                                        signInWithMicrosoft
+                                                    }
+                                                    type="button"
+                                                    variant="outline"
+                                                >
+                                                    Continue with Microsoft
+                                                </Button>
+                                                <p className="text-muted-foreground text-center text-sm">
+                                                    Or use email and password
+                                                </p>
+                                            </div>
+                                        )}
+
                                     {activeMode === "register" && (
                                         <FormField
                                             control={form.control}
@@ -385,18 +474,19 @@ export const AuthPage = (): JSX.Element => {
                                         >
                                             {submitLabel}
                                         </Button>
-                                        {!sessionExpired && (
-                                            <Button
-                                                disabled={isBusy}
-                                                onClick={toggleMode}
-                                                type="button"
-                                                variant="outline"
-                                            >
-                                                {activeMode === "login"
-                                                    ? "Need an account? Register"
-                                                    : "Have an account? Login"}
-                                            </Button>
-                                        )}
+                                        {!sessionExpired &&
+                                            passwordRegistrationEnabled && (
+                                                <Button
+                                                    disabled={isBusy}
+                                                    onClick={toggleMode}
+                                                    type="button"
+                                                    variant="outline"
+                                                >
+                                                    {activeMode === "login"
+                                                        ? "Need an account? Register"
+                                                        : "Have an account? Login"}
+                                                </Button>
+                                            )}
                                     </div>
                                 </form>
                             </Form>

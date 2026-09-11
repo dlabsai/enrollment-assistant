@@ -5,8 +5,11 @@ This document covers the testing infrastructure for the backend, including how t
 ## Quick Start
 
 ```bash
-# Run all tests (fast - reuses existing RAG data)
+# Run all tests (RAG-dependent tests reuse existing RAG data)
 uv run pytest
+
+# Run focused DB-backed tests without preparing RAG data
+uv run pytest tests/api/test_analytics_routes.py
 
 # Run integration/e2e tests only (LLM required)
 uv run pytest tests/chat/test_llm_conversation_turn.py -v -s
@@ -154,14 +157,16 @@ ISOLATED COMPONENT TESTS:
 
 ## Persistent RAG Data
 
-RAG data population is expensive because it creates embeddings via Azure OpenAI API.
-Data is persisted in the external test database selected via `PYTEST_POSTGRES_*`, so repeated
-runs reuse existing RAG data unless `--rebuild-rag` is set.
+The base `db_engine` fixture migrates and initializes the guarded schema without preparing RAG data. Tests that require the embedded corpus explicitly request `rag_db_engine`. RAG population is expensive because it creates embeddings via Azure OpenAI API; its data remains persisted in the external test database selected via `PYTEST_POSTGRES_*`, so repeated RAG-dependent runs reuse it unless `--rebuild-rag` is set.
 
 ## Troubleshooting
 
 ### Tests fail at startup with missing DB env vars
 Set all required `PYTEST_POSTGRES_*` vars before running pytest.
+
+### Test database references another branch's Alembic revision
+
+Recreate the guarded `_test` database after switching between `main` and `generic`. Their migration histories intentionally use different revision IDs and must not be migrated over each other.
 
 ### Need to update RAG data after source changes
 ```bash

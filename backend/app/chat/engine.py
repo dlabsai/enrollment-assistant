@@ -812,6 +812,7 @@ async def handle_investigation_turn(
         total_time=total_time,
         chatbot_model_settings=chatbot_model_settings.to_dict(),
         chatbot_time=chatbot_time,
+        guardrail_retry_count=0,
     )
     session.add(metadata)
     await session.flush()
@@ -1184,6 +1185,7 @@ async def handle_conversation_turn(
             guardrail_model_settings.to_dict() if guardrail_time is not None else None
         ),
         guardrail_time=guardrail_time,
+        guardrail_retry_count=guardrail_retries,
         # Per-iteration timing arrays (only store if there were retries)
         chatbot_times=chatbot_times if len(chatbot_times) > 1 else None,
         guardrail_times=guardrail_times if len(guardrail_times) > 1 else None,

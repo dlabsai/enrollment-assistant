@@ -8,24 +8,32 @@ import type { JSX } from "react";
 interface LoadingStateProps {
     message?: string;
     className?: string;
+    variant?: "page" | "inline";
 }
 
 export const LoadingState = ({
     message = "Loading...",
     className,
-}: LoadingStateProps): JSX.Element => (
-    <div
-        className={cn(
-            "flex h-full flex-1 items-center justify-center",
-            className,
-        )}
-    >
-        <div className="text-muted-foreground flex items-center gap-2">
-            <Spinner className="size-5" />
-            <span>{message}</span>
-        </div>
-    </div>
-);
+    variant = "page",
+}: LoadingStateProps): JSX.Element => {
+    const Root = variant === "inline" ? "span" : "div";
+    return (
+        <Root
+            className={cn(
+                "items-center",
+                variant === "page"
+                    ? "flex h-full flex-1 justify-center"
+                    : "inline-flex",
+                className,
+            )}
+        >
+            <span className="text-muted-foreground flex items-center gap-2">
+                <Spinner className={cn(variant === "page" && "size-5")} />
+                <span>{message}</span>
+            </span>
+        </Root>
+    );
+};
 
 interface PageErrorProps {
     message: string;

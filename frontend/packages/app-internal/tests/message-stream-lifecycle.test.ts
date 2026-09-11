@@ -1,14 +1,11 @@
 import assert from "node:assert/strict";
-import { after, before, describe, it } from "node:test";
-import { fileURLToPath } from "node:url";
 
-import { createServer, type ViteDevServer } from "vite";
+import { describe, it } from "vitest";
 
-import type { AuthenticatedApi } from "../src/auth/hooks/use-authenticated-api.ts";
-type SendMessageStream = typeof import("../src/chat/lib/api.ts").sendMessageStream;
+import type { AuthenticatedApi } from "../src/auth/hooks/use-authenticated-api";
+import { sendMessageStream } from "../src/chat/lib/api";
 
-const packageRoot = fileURLToPath(new URL("..", import.meta.url));
-const sharedRoot = fileURLToPath(new URL("../../shared/src", import.meta.url));
+type StreamCallbacks = Parameters<typeof sendMessageStream>[2];
 
 const assistantEvent = [
     "event: assistant_message",
@@ -17,7 +14,7 @@ const assistantEvent = [
     "",
 ].join("\n");
 
-const callbacks = () => ({
+const callbacks = (): StreamCallbacks => ({
     onChatId: (): void => undefined,
     onTitleUpdate: (): void => undefined,
     onAgentStage: (): void => undefined,
@@ -28,52 +25,30 @@ const callbacks = () => ({
     onError: (): void => undefined,
 });
 
+const consume = async (
+    body: string,
+    eventCallbacks = callbacks(),
+): Promise<void> => {
+    const api = {
+        postStream: async (): Promise<Response> => new Response(body),
+    } satisfies Pick<AuthenticatedApi, "postStream">;
+    await sendMessageStream(
+        api,
+        {
+            userMessage: "Question",
+            generationAttemptId: "attempt-1",
+        },
+        eventCallbacks,
+    );
+};
+
 describe("primary message stream lifecycle", () => {
-    let server: ViteDevServer;
-    let sendMessageStream: SendMessageStream;
-
-    before(async () => {
-        process.env.VITE_API_URL = "/api";
-        server = await createServer({
-            appType: "custom",
-            configFile: false,
-            root: packageRoot,
-            optimizeDeps: { noDiscovery: true },
-            resolve: {
-                alias: [{ find: "@va/shared", replacement: sharedRoot }],
-            },
-            server: { middlewareMode: true },
-        });
-        ({ sendMessageStream } = await server.ssrLoadModule(
-            "/src/chat/lib/api.ts",
-        ));
-    });
-
-    after(async () => {
-        await server.close();
-    });
-
-    const consume = async (
-        body: string,
-        eventCallbacks = callbacks(),
-    ): Promise<void> => {
-        const api = {
-            postStream: async () => new Response(body),
-        } as unknown as AuthenticatedApi;
-        await sendMessageStream(
-            api,
-            {
-                userMessage: "Question",
-                generationAttemptId: "attempt-1",
-            },
-            eventCallbacks,
-        );
-    };
-
     it("rejects EOF before an assistant or generation failure", async () => {
         await assert.rejects(
-            consume('event: conversation\ndata: {"conversation_id":"chat-1"}\n\n'),
-            /ended before a primary outcome/,
+            consume(
+                'event: conversation\ndata: {"conversation_id":"chat-1"}\n\n',
+            ),
+            /ended before a primary outcome/u,
         );
     });
 
@@ -87,7 +62,7 @@ describe("primary message stream lifecycle", () => {
 
         await assert.rejects(
             consume(`${assistantEvent}${failureEvent}`),
-            /multiple primary outcomes/,
+            /multiple primary outcomes/u,
         );
     });
 
@@ -108,7 +83,7 @@ describe("primary message stream lifecycle", () => {
 
         await assert.rejects(
             consume(malformedAssistant, eventCallbacks),
-            /Invalid tool_sources_used payload/,
+            /Invalid tool_sources_used payload/u,
         );
         assert.equal(assistantCalls, 0);
     });
@@ -130,7 +105,7 @@ describe("primary message stream lifecycle", () => {
 
         await assert.rejects(
             consume(`${assistantEvent}${malformedGrounding}`, eventCallbacks),
-            /Invalid grounding_sources_used payload/,
+            /Invalid grounding_sources_used payload/u,
         );
         assert.equal(assistantCalls, 1);
     });

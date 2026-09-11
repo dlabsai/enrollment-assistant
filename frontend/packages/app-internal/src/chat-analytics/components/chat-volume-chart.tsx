@@ -6,40 +6,39 @@ import {
     CardTitle,
 } from "@va/shared/components/ui/card";
 import type { JSX } from "react";
-import { Area, AreaChart, CartesianGrid, XAxis, YAxis } from "recharts";
+import { CartesianGrid, Line, LineChart, XAxis, YAxis } from "recharts";
 
 import {
     type ChartConfig,
     ChartContainer,
-    ChartLegend,
-    ChartLegendContent,
+    ChartInteractivePoint,
     ChartTooltip,
     ChartTooltipContent,
 } from "@/components/ui/chart";
 
-import type { TimeRangeValue } from "../../lib/time-range";
+import { formatLocaleNumber } from "../../lib/number-format";
 import {
     formatTimeSeriesTick,
     formatTimeSeriesTooltipLabel,
-    isHourlyTimeRange,
+    type TimeGranularity,
+    timeGranularityLabel,
 } from "../../lib/time-series";
-import type { ChatAnalyticsDaily } from "../../usage/types";
+import type { ChatAnalyticsTimeSeriesPoint } from "../types";
 
 interface ChatVolumeChartProps {
-    data: ChatAnalyticsDaily[];
-    timeRange: TimeRangeValue;
+    canInspect: boolean;
+    onInspect: (point: ChatAnalyticsTimeSeriesPoint) => void;
+    data: ChatAnalyticsTimeSeriesPoint[];
+    granularity: TimeGranularity;
 }
 
-type VolumeMetric = "conversations" | "messages";
+type VolumeMetric = "conversations" | "turns";
 
-interface VolumeAreaChartProps {
-    data: ChatAnalyticsDaily[];
+interface VolumeLineChartProps extends ChatVolumeChartProps {
     config: ChartConfig;
     dataKey: VolumeMetric;
     title: string;
     description: string;
-    gradientId: string;
-    timeRange: TimeRangeValue;
 }
 
 const chatsChartConfig = {
@@ -49,22 +48,23 @@ const chatsChartConfig = {
     },
 } satisfies ChartConfig;
 
-const messagesChartConfig = {
-    messages: {
-        label: "Messages",
+const turnsChartConfig = {
+    turns: {
+        label: "Turns",
         color: "var(--chart-2)",
     },
 } satisfies ChartConfig;
 
-const VolumeAreaChart = ({
+const VolumeLineChart = ({
+    canInspect,
+    onInspect,
     data,
     config,
     dataKey,
     title,
     description,
-    gradientId,
-    timeRange,
-}: VolumeAreaChartProps): JSX.Element => (
+    granularity,
+}: VolumeLineChartProps): JSX.Element => (
     <Card className="@container/card">
         <CardHeader>
             <CardTitle>{title}</CardTitle>
@@ -75,40 +75,42 @@ const VolumeAreaChart = ({
                 className="aspect-auto h-[250px] w-full"
                 config={config}
             >
-                <AreaChart data={data}>
-                    <defs>
-                        <linearGradient
-                            id={gradientId}
-                            x1="0"
-                            x2="0"
-                            y1="0"
-                            y2="1"
-                        >
-                            <stop
-                                offset="5%"
-                                stopColor={`var(--color-${dataKey})`}
-                                stopOpacity={1}
-                            />
-                            <stop
-                                offset="95%"
-                                stopColor={`var(--color-${dataKey})`}
-                                stopOpacity={0.1}
-                            />
-                        </linearGradient>
-                    </defs>
+                <LineChart
+                    accessibilityLayer
+                    data={data}
+                    onClick={
+                        canInspect
+                            ? (state): void => {
+                                  const point = data.find(
+                                      (item) =>
+                                          item.bucket_start ===
+                                          state.activeLabel,
+                                  );
+                                  if (point !== undefined) {
+                                      onInspect(point);
+                                  }
+                              }
+                            : undefined
+                    }
+                    style={{ cursor: canInspect ? "pointer" : "default" }}
+                >
                     <CartesianGrid vertical={false} />
                     <XAxis
                         axisLine={false}
-                        dataKey="date"
+                        dataKey="bucket_start"
                         minTickGap={32}
                         tickFormatter={(value: string) =>
-                            formatTimeSeriesTick(value, timeRange)
+                            formatTimeSeriesTick(value, granularity)
                         }
                         tickLine={false}
                         tickMargin={8}
                     />
                     <YAxis
+                        allowDecimals={false}
                         axisLine={false}
+                        tickFormatter={(value: number) =>
+                            formatLocaleNumber(value)
+                        }
                         tickLine={false}
                         tickMargin={8}
                         width={48}
@@ -116,66 +118,89 @@ const VolumeAreaChart = ({
                     <ChartTooltip
                         content={
                             <ChartTooltipContent
-                                indicator="dot"
+                                indicator="line"
                                 labelFormatter={(value) =>
                                     formatTimeSeriesTooltipLabel(
-                                        typeof value === "string" ||
-                                            typeof value === "number"
-                                            ? String(value)
-                                            : "",
-                                        timeRange,
+                                        value,
+                                        granularity,
                                     )
                                 }
                             />
                         }
-                        cursor={false}
                     />
-                    <Area
+                    <Line
+                        connectNulls={false}
                         dataKey={dataKey}
-                        fill={`url(#${gradientId})`}
+                        dot={
+                            canInspect || data.length === 1 ? (
+                                <ChartInteractivePoint
+                                    canActivate={canInspect}
+                                    getActionLabel={(index) => {
+                                        const point = data[index];
+                                        return point === undefined
+                                            ? undefined
+                                            : `Open ${dataKey === "conversations" ? "chats" : "turns"}: ${formatLocaleNumber(point[dataKey])} · ${formatTimeSeriesTooltipLabel(point.bucket_start, granularity)}`;
+                                    }}
+                                    itemCount={data.length}
+                                    markerColor={
+                                        data.length === 1
+                                            ? `var(--color-${dataKey})`
+                                            : undefined
+                                    }
+                                    onActivate={(index) => {
+                                        const point = data[index];
+                                        if (point !== undefined) {
+                                            onInspect(point);
+                                        }
+                                    }}
+                                />
+                            ) : (
+                                false
+                            )
+                        }
+                        isAnimationActive={false}
                         stroke={`var(--color-${dataKey})`}
-                        type="natural"
+                        strokeWidth={2}
+                        type="linear"
                     />
-                    <ChartLegend
-                        content={<ChartLegendContent />}
-                        verticalAlign="bottom"
-                    />
-                </AreaChart>
+                </LineChart>
             </ChartContainer>
         </CardContent>
     </Card>
 );
 
 export const ChatVolumeChart = ({
+    canInspect,
+    onInspect,
     data,
-    timeRange,
+    granularity,
 }: ChatVolumeChartProps): JSX.Element => (
-    <VolumeAreaChart
+    <VolumeLineChart
+        canInspect={canInspect}
         config={chatsChartConfig}
         data={data}
         dataKey="conversations"
-        description={
-            isHourlyTimeRange(timeRange) ? "Hourly chats" : "Daily chats"
-        }
-        gradientId="fillChats"
-        timeRange={timeRange}
+        description={`${timeGranularityLabel[granularity]} chat starts`}
+        granularity={granularity}
+        onInspect={onInspect}
         title="Chats over time"
     />
 );
 
-export const MessagesVolumeChart = ({
+export const TurnsVolumeChart = ({
+    canInspect,
+    onInspect,
     data,
-    timeRange,
+    granularity,
 }: ChatVolumeChartProps): JSX.Element => (
-    <VolumeAreaChart
-        config={messagesChartConfig}
+    <VolumeLineChart
+        canInspect={canInspect}
+        config={turnsChartConfig}
         data={data}
-        dataKey="messages"
-        description={
-            isHourlyTimeRange(timeRange) ? "Hourly messages" : "Daily messages"
-        }
-        gradientId="fillMessages"
-        timeRange={timeRange}
-        title="Messages over time"
+        dataKey="turns"
+        description={`${timeGranularityLabel[granularity]} turns in selected chats`}
+        granularity={granularity}
+        onInspect={onInspect}
+        title="Turns over time"
     />
 );

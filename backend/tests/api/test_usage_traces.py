@@ -215,6 +215,16 @@ async def test_usage_summary_aggregates_otel_spans(transactional_session: AsyncS
     assert abs(summary["total_embedding_avg_duration"] - 0.1) < 0.000001
     assert summary["total_errors"] == 1
     assert abs(summary["avg_duration"] - 0.9) < 0.000001
+    assert body["time_granularity"] == "hour"
+    assert len(body["series"]) == 49
+    assert datetime.fromisoformat(body["series"][0]["bucket_start"]) == (
+        started_at - timedelta(days=1)
+    )
+    assert datetime.fromisoformat(body["series"][-1]["bucket_end"]) == (
+        started_at + timedelta(days=1, microseconds=1)
+    )
+    assert sum(point["requests"] for point in body["series"]) == 2
+    assert any(point["requests"] == 0 for point in body["series"])
     expected_embedding_model = f"azure:{EMBEDDING_MODEL}"
     assert {entry["model"] for entry in body["models"]} == {
         "azure:gpt-5.5",
@@ -951,7 +961,7 @@ async def test_usage_summary_filters_by_user_group_and_email(
     exact_body = exact_response.json()
     assert exact_response.status_code == 200
     assert exact_body["summary"]["total_tokens"] == 15
-    assert sum(row["tokens"] for row in exact_body["daily"]) == 15
+    assert sum(row["tokens"] for row in exact_body["series"]) == 15
     assert exact_body["models"] == [
         {"model": "azure:gpt-5.5", "requests": 1, "tokens": 15, "cost": 0.01}
     ]

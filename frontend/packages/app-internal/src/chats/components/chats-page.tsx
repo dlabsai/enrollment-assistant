@@ -48,6 +48,7 @@ import {
     RefreshCw,
     ThumbsDown,
     ThumbsUp,
+    X,
 } from "lucide-react";
 import { type JSX, useCallback, useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
@@ -104,12 +105,10 @@ import { UserFilterPopover } from "../../components/user-filter-popover";
 import { formatTableTimestamp } from "../../lib/date-format";
 import {
     downloadApiBlob,
-    getBrowserExportTimeSettings,
+    formatExportDate,
+    getExportFormatSettings,
 } from "../../lib/file-export";
-import {
-    formatLocaleNumber,
-    formatUsdCost,
-} from "../../lib/number-format";
+import { formatLocaleNumber, formatUsdCost } from "../../lib/number-format";
 import {
     type CustomTimeRange,
     isTimeRangeValue,
@@ -124,12 +123,15 @@ import {
     fetchChatsExport,
     fetchChatUsers,
 } from "../lib/api";
+import { routeUserOption } from "../lib/review-search-state";
+import type { ChatsSearch } from "../lib/search-state";
 import {
     buildOwnerGroupFilterOptions,
     buildUserFilterParams,
     parseStoredUserFilter,
 } from "../lib/user-filter-options";
 import type {
+    ChatAnalyticsFilter,
     ChatListPage as ChatListPageResponse,
     ChatListRow,
     ChatUserOption,
@@ -472,10 +474,19 @@ type ReviewCollectionKind = keyof typeof chatFilterStorageKeys;
 
 type ReviewRoutePath = "/chats" | "/investigations";
 
+interface ChatAnalyticsDrilldown extends ChatAnalyticsFilter {
+    platform?: Exclude<PlatformFilter, "both">;
+    timeRange: "all" | "custom";
+    userEmail?: string;
+    userGroup?: "staff" | "devs";
+}
+
 interface ReviewPageProps {
     kind?: ReviewCollectionKind;
+    onClearAnalyticsDrilldown?: () => void;
     routePath?: ReviewRoutePath;
     title?: string;
+    analyticsDrilldown?: ChatAnalyticsDrilldown;
 }
 
 interface FeedbackChange {
@@ -522,6 +533,28 @@ const parseStoredCustomRange = (
     start: parseStoredDate(range?.start),
     end: parseStoredDate(range?.end),
 });
+
+const getAnalyticsDrilldownLabel = (
+    drilldown: ChatAnalyticsDrilldown,
+): string => {
+    const platformLabel =
+        drilldown.platform === "internal"
+            ? "Internal · "
+            : drilldown.platform === "public"
+              ? "Public · "
+              : "";
+    if (drilldown.minTurns === undefined) {
+        return `${platformLabel}Chats created in selected range`;
+    }
+    if (drilldown.maxTurns === undefined) {
+        return `${platformLabel}${formatLocaleNumber(drilldown.minTurns)}+ turns in selected range`;
+    }
+    if (drilldown.minTurns === drilldown.maxTurns) {
+        const turnLabel = drilldown.minTurns === 1 ? "turn" : "turns";
+        return `${platformLabel}${formatLocaleNumber(drilldown.minTurns)} ${turnLabel} in selected range`;
+    }
+    return `${platformLabel}${formatLocaleNumber(drilldown.minTurns)}–${formatLocaleNumber(drilldown.maxTurns)} turns in selected range`;
+};
 
 const parseStoredChatFilters = (
     value: string,
@@ -1150,8 +1183,10 @@ export const ChatDetailContent = ({
 
 const ChatReviewListPage = ({
     kind = "chat",
+    onClearAnalyticsDrilldown,
     routePath = "/chats",
     title = "Chats",
+    analyticsDrilldown,
 }: ReviewPageProps): JSX.Element => {
     const api = useAuthenticatedApi();
     const { user } = useAuth();
@@ -1188,7 +1223,7 @@ const ChatReviewListPage = ({
         [user],
     );
     const search = useSearch({ from: routePath });
-    const navigate = useNavigate();
+    const navigate = useNavigate({ from: routePath });
     const storageKey = chatFilterStorageKeys[kind];
     const showPlatformFilter = kind === "chat" && SHOW_PLATFORM_FILTER;
     const itemName = kind === "investigation" ? "investigation" : "chat";
@@ -1201,10 +1236,14 @@ const ChatReviewListPage = ({
         [storageKey],
     );
     const [searchInput, setSearchInput] = useState(
-        storedFilters?.searchInput ?? "",
+        analyticsDrilldown === undefined
+            ? (storedFilters?.searchInput ?? "")
+            : "",
     );
     const [searchQuery, setSearchQuery] = useState(
-        storedFilters?.searchInput?.trim() ?? "",
+        analyticsDrilldown === undefined
+            ? (storedFilters?.searchInput?.trim() ?? "")
+            : "",
     );
     const [phraseSearch, setPhraseSearch] = useState(
         storedFilters?.phraseSearch ?? true,
@@ -1220,7 +1259,19 @@ const ChatReviewListPage = ({
     const [selectedUserState, setSelectedUserState] = useState<
         ChatUserOption | undefined
     >(storedFilters?.selectedUser);
-    const selectedUser = canFilterUsers ? selectedUserState : undefined;
+    const selectedUser = useMemo(
+        () =>
+            canFilterUsers
+                ? analyticsDrilldown === undefined
+                  ? selectedUserState
+                  : routeUserOption(
+                        analyticsDrilldown.userEmail,
+                        analyticsDrilldown.userGroup,
+                        analyticsDrilldown.platform,
+                    )
+                : undefined,
+        [analyticsDrilldown, canFilterUsers, selectedUserState],
+    );
     const currentUserOption = useMemo<ChatUserOption | undefined>(
         () =>
             canViewCurrentUserChats &&
@@ -1247,15 +1298,29 @@ const ChatReviewListPage = ({
         }
         return "both";
     });
-    const [timeRange, setTimeRange] = useState<TimeRangeValue>(() => {
-        const storedTimeRange = storedFilters?.timeRange;
-        if (storedTimeRange !== undefined) {
-            return storedTimeRange;
-        }
-        return "30d";
-    });
-    const [customRange, setCustomRange] = useState<CustomTimeRange>(() =>
-        parseStoredCustomRange(storedFilters?.customRange),
+    const effectivePlatform =
+        analyticsDrilldown === undefined
+            ? platform
+            : (analyticsDrilldown.platform ?? "both");
+    const [timeRangeState, setTimeRangeState] = useState<TimeRangeValue>(
+        storedFilters?.timeRange ?? "30d",
+    );
+    const [customRangeState, setCustomRangeState] = useState<CustomTimeRange>(
+        () => parseStoredCustomRange(storedFilters?.customRange),
+    );
+    const timeRange = analyticsDrilldown?.timeRange ?? timeRangeState;
+    const customRange = useMemo(
+        () =>
+            analyticsDrilldown === undefined
+                ? customRangeState
+                : {
+                      start: parseStoredDate(analyticsDrilldown.start),
+                      end: parseStoredDate(
+                          analyticsDrilldown.endBefore ??
+                              analyticsDrilldown.end,
+                      ),
+                  },
+        [analyticsDrilldown, customRangeState],
     );
     const [pageIndex, setPageIndex] = useState(0);
     const [pageSize, setPageSize] = useState(getDefaultDataTablePageSize);
@@ -1268,6 +1333,20 @@ const ChatReviewListPage = ({
     const [page, setPage] = useState<ChatListPageResponse | undefined>();
     const [refreshToken, setRefreshToken] = useState(0);
 
+    // Restore a changed URL scope before committing a render or starting a request.
+    const [previousDrilldown, setPreviousDrilldown] =
+        useState(analyticsDrilldown);
+    if (previousDrilldown !== analyticsDrilldown) {
+        setPreviousDrilldown(analyticsDrilldown);
+        setPageIndex(0);
+        setPage(undefined);
+        setLoading(true);
+        if (analyticsDrilldown !== undefined) {
+            setSearchInput("");
+            setSearchQuery("");
+        }
+    }
+
     const [detailLoadState, setDetailLoadState] =
         useState<ChatDetailLoadState>();
     const [tracePanelOpen, setTracePanelOpen] = useState(false);
@@ -1275,9 +1354,9 @@ const ChatReviewListPage = ({
     const requestPlatform =
         kind === "investigation"
             ? "internal"
-            : platform === "both"
+            : effectivePlatform === "both"
               ? undefined
-              : platform;
+              : effectivePlatform;
     const tableData = useMemo(() => page?.items ?? [], [page]);
     const selectedChat =
         search.chat === undefined
@@ -1291,7 +1370,8 @@ const ChatReviewListPage = ({
             : undefined;
     const detail = activeDetailLoadState?.detail;
     const detailError = activeDetailLoadState?.error;
-    const activeDetailLoading = sheetOpen && activeDetailLoadState === undefined;
+    const activeDetailLoading =
+        sheetOpen && activeDetailLoadState === undefined;
 
     const applyFeedbackChange = useCallback(
         (change: FeedbackChange): void => {
@@ -1348,7 +1428,7 @@ const ChatReviewListPage = ({
     }, [searchInput]);
 
     useEffect(() => {
-        if (typeof window === "undefined") {
+        if (typeof window === "undefined" || analyticsDrilldown !== undefined) {
             return;
         }
         const payload: StoredChatFilters = {
@@ -1372,6 +1452,7 @@ const ChatReviewListPage = ({
         };
         window.localStorage.setItem(storageKey, JSON.stringify(payload));
     }, [
+        analyticsDrilldown,
         customRange,
         highlightMatches,
         phraseSearch,
@@ -1464,6 +1545,7 @@ const ChatReviewListPage = ({
                     offset: pageIndex * pageSize,
                     sortBy: sortKey,
                     descending,
+                    analyticsFilter: analyticsDrilldown,
                     timeRange,
                     customRange,
                 });
@@ -1501,7 +1583,6 @@ const ChatReviewListPage = ({
         kind,
         pageIndex,
         pageSize,
-        platform,
         requestPlatform,
         searchQuery,
         phraseSearch,
@@ -1510,6 +1591,7 @@ const ChatReviewListPage = ({
         sorting,
         refreshToken,
         timeRange,
+        analyticsDrilldown,
     ]);
 
     useEffect((): (() => void) | undefined => {
@@ -1581,7 +1663,7 @@ const ChatReviewListPage = ({
     );
 
     const orderedUserOptions = useMemo(() => {
-        if (platform === "public" || !currentUserOption) {
+        if (effectivePlatform === "public" || !currentUserOption) {
             return userOptionsWithOwnerGroups;
         }
 
@@ -1606,7 +1688,7 @@ const ChatReviewListPage = ({
         return [currentUserOption, ...filtered];
     }, [
         currentUserOption,
-        platform,
+        effectivePlatform,
         userOptionsWithOwnerGroups,
         userSearchInput,
     ]);
@@ -1692,13 +1774,13 @@ const ChatReviewListPage = ({
                 userGroup: userFilterParams.userGroup,
                 sortBy: sortKey,
                 descending,
+                analyticsFilter: analyticsDrilldown,
                 timeRange,
                 customRange,
                 chatUrlBase: getResponseLinkBaseUrl(),
-                ...getBrowserExportTimeSettings(),
+                ...getExportFormatSettings(),
             });
-            const date = new Date().toISOString().slice(0, 10);
-            downloadApiBlob(response, `chats-${date}.zip`);
+            downloadApiBlob(response, `chats-${formatExportDate()}.zip`);
             toast.success("Exported chats");
         } catch (error_) {
             toast.error(
@@ -1721,6 +1803,7 @@ const ChatReviewListPage = ({
         selectedUser,
         sorting,
         timeRange,
+        analyticsDrilldown,
     ]);
 
     const detailContent = (
@@ -1760,6 +1843,24 @@ const ChatReviewListPage = ({
             variant="dashboard"
         >
             <PageHeader title={title}>
+                {analyticsDrilldown !== undefined &&
+                    onClearAnalyticsDrilldown !== undefined && (
+                        <Badge
+                            className="gap-1"
+                            variant="secondary"
+                        >
+                            {getAnalyticsDrilldownLabel(analyticsDrilldown)}
+                            <button
+                                aria-label="Clear Analytics filter"
+                                className="hover:bg-muted-foreground/20 focus-visible:ring-ring rounded-sm p-0.5 focus-visible:ring-2 focus-visible:outline-none"
+                                onClick={onClearAnalyticsDrilldown}
+                                title="Clear Analytics filter"
+                                type="button"
+                            >
+                                <X className="size-3" />
+                            </button>
+                        </Badge>
+                    )}
                 {showPlatformFilter && (
                     <PageHeaderGroup>
                         <ToggleGroup
@@ -1770,9 +1871,10 @@ const ChatReviewListPage = ({
                                     ? nextValue
                                     : "both";
                                 setPlatform(next);
+                                onClearAnalyticsDrilldown?.();
                                 setPageIndex(0);
                             }}
-                            value={[platform]}
+                            value={[effectivePlatform]}
                             variant="outline"
                         >
                             {platformOptions.map((option) => (
@@ -1791,7 +1893,20 @@ const ChatReviewListPage = ({
                         label={selectedUserLabel}
                         loading={userLoading}
                         onChange={(option) => {
-                            setSelectedUserState(option);
+                            if (analyticsDrilldown === undefined) {
+                                setSelectedUserState(option);
+                            } else {
+                                const owner = buildUserFilterParams(option);
+                                void navigate({
+                                    from: "/chats",
+                                    to: "/chats",
+                                    search: (previous: ChatsSearch) => ({
+                                        ...previous,
+                                        userEmail: owner.userEmail,
+                                        userGroup: owner.userGroup,
+                                    }),
+                                });
+                            }
                             setPageIndex(0);
                             setUserPopoverOpen(false);
                         }}
@@ -1812,11 +1927,16 @@ const ChatReviewListPage = ({
                     <TimeRangeFilter
                         customRange={customRange}
                         onChange={(value) => {
-                            setTimeRange(value);
+                            setSelectedUserState(selectedUser);
+                            onClearAnalyticsDrilldown?.();
+                            setTimeRangeState(value);
                             setPageIndex(0);
                         }}
                         onCustomRangeChange={(value) => {
-                            setCustomRange(value);
+                            setSelectedUserState(selectedUser);
+                            onClearAnalyticsDrilldown?.();
+                            setTimeRangeState("custom");
+                            setCustomRangeState(value);
                             setPageIndex(0);
                         }}
                         value={timeRange}
@@ -1870,8 +1990,9 @@ const ChatReviewListPage = ({
                             setPhraseSearch(true);
                             setHighlightMatches(true);
                             setPlatform("both");
-                            setTimeRange("30d");
-                            setCustomRange({});
+                            onClearAnalyticsDrilldown?.();
+                            setTimeRangeState("30d");
+                            setCustomRangeState({});
                             setPageIndex(0);
                         }}
                         variant="outline"
@@ -1940,7 +2061,7 @@ const ChatReviewListPage = ({
                     onRowClick={(chat) => {
                         resetChatDetail();
                         void navigate({
-                            search: (prev) => ({
+                            search: (prev: ChatsSearch) => ({
                                 ...prev,
                                 chat: chat.id,
                             }),
@@ -1965,7 +2086,7 @@ const ChatReviewListPage = ({
                         setTracePanelOpen(false);
                         setTraceMessageId(undefined);
                         void navigate({
-                            search: (prev) => ({
+                            search: (prev: ChatsSearch) => ({
                                 ...prev,
                                 chat: undefined,
                             }),
@@ -2024,7 +2145,7 @@ const ChatReviewListPage = ({
                                             tableData[selectedIndex + 1];
                                         resetChatDetail();
                                         void navigate({
-                                            search: (prev) => ({
+                                            search: (prev: ChatsSearch) => ({
                                                 ...prev,
                                                 chat: next.id,
                                             }),
@@ -2039,7 +2160,7 @@ const ChatReviewListPage = ({
                                             tableData[selectedIndex - 1];
                                         resetChatDetail();
                                         void navigate({
-                                            search: (prev) => ({
+                                            search: (prev: ChatsSearch) => ({
                                                 ...prev,
                                                 chat: previous.id,
                                             }),
@@ -2120,7 +2241,71 @@ const ChatReviewListPage = ({
     );
 };
 
-export const ChatsPage = (): JSX.Element => <ChatReviewListPage />;
+export const ChatsPage = (): JSX.Element => {
+    const search = useSearch({ from: "/chats" });
+    const navigate = useNavigate({ from: "/chats" });
+    const analyticsDrilldown = useMemo<ChatAnalyticsDrilldown | undefined>(
+        () =>
+            search.minTurns === undefined &&
+            search.analyticsStart === undefined &&
+            search.analyticsEnd === undefined &&
+            search.analyticsEndBefore === undefined
+                ? undefined
+                : {
+                      minTurns: search.minTurns,
+                      maxTurns: search.maxTurns,
+                      platform: search.platform,
+                      start: search.analyticsStart,
+                      end: search.analyticsEnd,
+                      endBefore: search.analyticsEndBefore,
+                      timeRange:
+                          search.analyticsStart === undefined &&
+                          search.analyticsEnd === undefined &&
+                          search.analyticsEndBefore === undefined
+                              ? "all"
+                              : "custom",
+                      userEmail: search.userEmail,
+                      userGroup: search.userGroup,
+                  },
+        [
+            search.maxTurns,
+            search.minTurns,
+            search.platform,
+            search.analyticsEnd,
+            search.analyticsEndBefore,
+            search.analyticsStart,
+            search.userEmail,
+            search.userGroup,
+        ],
+    );
+    const clearAnalyticsDrilldown = useCallback((): void => {
+        void navigate({
+            to: "/chats",
+            search: (previous: ChatsSearch) => ({
+                ...previous,
+                maxTurns: undefined,
+                minTurns: undefined,
+                platform: undefined,
+                analyticsEnd: undefined,
+                analyticsEndBefore: undefined,
+                analyticsStart: undefined,
+                userEmail: undefined,
+                userGroup: undefined,
+            }),
+        });
+    }, [navigate]);
+
+    return (
+        <ChatReviewListPage
+            analyticsDrilldown={analyticsDrilldown}
+            onClearAnalyticsDrilldown={
+                analyticsDrilldown === undefined
+                    ? undefined
+                    : clearAnalyticsDrilldown
+            }
+        />
+    );
+};
 
 export const InvestigationsPage = (): JSX.Element => (
     <ChatReviewListPage

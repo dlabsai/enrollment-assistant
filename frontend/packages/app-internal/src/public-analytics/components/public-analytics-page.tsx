@@ -11,9 +11,10 @@ import {
     isTimeRangeValue,
     type TimeRangeValue,
 } from "../../lib/time-range";
-import { usePublicUsageData } from "../../usage/hooks/use-public-usage-data";
+import { usePublicAnalyticsData } from "../hooks/use-public-analytics-data";
+import { PublicDepthChart } from "./public-depth-chart";
 import { PublicLeadsChart } from "./public-leads-chart";
-import { PublicUsageSummaryCards } from "./public-usage-summary";
+import { PublicAnalyticsSummaryCards } from "./public-summary-cards";
 
 const publicAnalyticsFilterStorageKey = "internal-public-analytics-filters";
 
@@ -77,8 +78,7 @@ const parseStoredPublicAnalyticsFilters = (
 };
 
 const getStoredPublicAnalyticsFilters = ():
-    | StoredPublicAnalyticsFilters
-    | undefined => {
+    StoredPublicAnalyticsFilters | undefined => {
     if (typeof window === "undefined") {
         return undefined;
     }
@@ -101,10 +101,8 @@ export const PublicAnalyticsPage = (): JSX.Element => {
     const [customRange, setCustomRange] = useState<CustomTimeRange>(() =>
         parseStoredCustomRange(storedFilters?.customRange),
     );
-    const { summary, loading, hasLoaded, error, refresh } = usePublicUsageData(
-        timeRange,
-        customRange,
-    );
+    const { summary, loading, hasLoaded, error, refresh } =
+        usePublicAnalyticsData(timeRange, customRange);
 
     useEffect(() => {
         if (typeof window === "undefined") {
@@ -167,14 +165,15 @@ export const PublicAnalyticsPage = (): JSX.Element => {
             </PageHeader>
 
             <PageSection>
-                <PublicUsageSummaryCards summary={summary} />
+                <PublicAnalyticsSummaryCards summary={summary} />
             </PageSection>
 
-            <PageSection className="grid grid-cols-1 gap-4">
+            <PageSection className="grid grid-cols-1 gap-4 @3xl/main:grid-cols-2">
                 <PublicLeadsChart
-                    data={summary.daily}
-                    timeRange={timeRange}
+                    data={summary.series}
+                    granularity={summary.time_granularity}
                 />
+                <PublicDepthChart data={summary.depth_buckets} />
             </PageSection>
         </PageShell>
     );

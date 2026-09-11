@@ -185,10 +185,10 @@ export const UsagePage = (): JSX.Element => {
     const [modelFilterOpen, setModelFilterOpen] = useState(false);
     const [modelFilterSearch, setModelFilterSearch] = useState("");
     const [referenceDate, setReferenceDate] = useState(() => new Date());
-
     const {
         summary,
-        dailyData,
+        timeGranularity,
+        seriesData,
         modelData,
         latestTraces,
         loading,
@@ -499,23 +499,23 @@ export const UsagePage = (): JSX.Element => {
                 <div className="flex flex-col gap-4">
                     <LlmSummaryCards summary={summary} />
                     <UsageChart
-                        data={dailyData}
-                        timeRange={timeRange}
+                        data={seriesData}
+                        granularity={timeGranularity}
                     />
                     <CostChart
-                        data={dailyData}
-                        timeRange={timeRange}
+                        data={seriesData}
+                        granularity={timeGranularity}
                     />
                 </div>
                 <div className="flex flex-col gap-4">
                     <EmbeddingSummaryCards summary={summary} />
                     <EmbeddingUsageChart
-                        data={dailyData}
-                        timeRange={timeRange}
+                        data={seriesData}
+                        granularity={timeGranularity}
                     />
                     <EmbeddingCostChart
-                        data={dailyData}
-                        timeRange={timeRange}
+                        data={seriesData}
+                        granularity={timeGranularity}
                     />
                 </div>
                 <div className="@3xl/main:col-span-2">

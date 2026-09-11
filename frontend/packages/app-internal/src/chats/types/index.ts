@@ -21,6 +21,14 @@ export interface ChatListPage {
     total: number;
 }
 
+export interface ChatAnalyticsFilter {
+    minTurns?: number;
+    maxTurns?: number;
+    start?: string;
+    end?: string;
+    endBefore?: string;
+}
+
 type ChatUserOwnerGroup = "staff" | "devs";
 
 export interface ChatUserOption {

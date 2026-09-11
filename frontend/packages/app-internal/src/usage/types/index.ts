@@ -1,3 +1,5 @@
+import type { TimeGranularity } from "../../lib/time-series";
+
 export interface UsageTraceBasic {
     created_at: string;
     model: string;
@@ -9,8 +11,9 @@ export interface UsageTraceBasic {
     is_public: boolean | null;
 }
 
-export interface UsageDaily {
-    date: string;
+export interface UsageTimeSeriesPoint {
+    bucket_start: string;
+    bucket_end: string;
     requests: number;
     tokens: number;
     cost: number;
@@ -40,8 +43,9 @@ export interface UsageSummary {
     avgDuration: number;
 }
 
-interface UsageDailyApi {
-    date: string;
+interface UsageTimeSeriesPointApi {
+    bucket_start: string;
+    bucket_end: string;
     requests: number;
     tokens: number;
     cost: number;
@@ -73,86 +77,8 @@ interface UsageSummaryApi {
 
 export interface UsageOverviewApi {
     summary: UsageSummaryApi;
-    daily: UsageDailyApi[];
+    time_granularity: TimeGranularity;
+    series: UsageTimeSeriesPointApi[];
     models: UsageModelApi[];
     latest_traces: UsageTraceBasic[];
-}
-
-export interface ChatAnalyticsDaily {
-    date: string;
-    conversations: number;
-    messages: number;
-    avg_messages_per_conversation: number;
-    single_message_rate: number;
-}
-
-export interface ChatAnalyticsBucket {
-    label: string;
-    conversations: number;
-}
-
-export interface ChatAnalyticsHourly {
-    hour: number;
-    messages: number;
-}
-
-export interface ChatAnalyticsStats {
-    min: number | null;
-    p50: number | null;
-    median: number | null;
-    avg: number | null;
-    p75: number | null;
-    p90: number | null;
-    p95: number | null;
-    p99: number | null;
-    max: number | null;
-}
-
-export interface ChatAnalyticsResponseTimeBucket {
-    label: string;
-    responses: number;
-}
-
-export interface ChatAnalyticsSummary {
-    total_conversations: number;
-    total_messages: number;
-    avg_messages_per_conversation: number;
-    single_message_rate: number;
-    daily: ChatAnalyticsDaily[];
-    length_buckets: ChatAnalyticsBucket[];
-    hourly_activity: ChatAnalyticsHourly[];
-    length_stats: ChatAnalyticsStats | null;
-    response_time_buckets: ChatAnalyticsResponseTimeBucket[];
-    response_time_stats: ChatAnalyticsStats | null;
-}
-
-export interface PublicUsageDaily {
-    date: string;
-    conversations: number;
-    messages: number;
-    avg_messages_per_conversation: number;
-    drop_off_rate: number;
-    leads: number;
-}
-
-export interface PublicUsageSummary {
-    total_conversations: number;
-    total_messages: number;
-    avg_messages_per_conversation: number;
-    drop_off_rate: number;
-    total_leads: number;
-    lead_capture_rate: number;
-    daily: PublicUsageDaily[];
-    depth_buckets: PublicUsageBucket[];
-    hourly_activity: PublicUsageHourly[];
-}
-
-export interface PublicUsageBucket {
-    label: string;
-    conversations: number;
-}
-
-export interface PublicUsageHourly {
-    hour: number;
-    messages: number;
 }

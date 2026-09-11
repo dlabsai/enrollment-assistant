@@ -423,7 +423,7 @@ const parseGroundingSourceStatus = (
 };
 
 export const sendMessageStream = async (
-    api: AuthenticatedApi,
+    api: Pick<AuthenticatedApi, "postStream">,
     params: {
         userMessage: string;
         generationAttemptId: string;

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from contextlib import asynccontextmanager
+import asyncio
+from contextlib import asynccontextmanager, suppress
 from typing import TYPE_CHECKING
 
 from fastapi import FastAPI, Request, Response, status
@@ -11,6 +12,7 @@ from starlette.middleware.cors import CORSMiddleware
 from app.api.main import api_router
 from app.chat.provider_http import close_provider_http_clients
 from app.chat.tools.utils import close_embedding_client
+from app.compliance.worker import start_worker
 from app.core.config import settings
 from app.core.db import close_database_pools
 from app.db_observability import DatabaseObservabilityMiddleware
@@ -46,6 +48,7 @@ def custom_generate_unique_id(route: APIRoute) -> str:
 @asynccontextmanager
 async def lifespan(_app: FastAPI) -> AsyncGenerator[None]:
     scheduler_started = False
+    compliance_worker = start_worker()
     try:
         if settings.SCHEDULER:
             logger.info("Starting scheduler")
@@ -58,6 +61,10 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None]:
 
         yield
     finally:
+        if compliance_worker is not None:
+            compliance_worker.cancel()
+            with suppress(asyncio.CancelledError):
+                await compliance_worker
         try:
             if scheduler_started:
                 logger.info("Shutting down scheduler")

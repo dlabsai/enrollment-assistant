@@ -19,6 +19,7 @@ from app.api import grounding_agent
 from app.api.deps import get_db_session
 from app.api.message_sources import MessageSourceUsed, build_canned_response_source
 from app.api.routes import chat as chat_routes
+from app.api.routes import conversations as conversation_routes
 from app.api.routes import messages as message_routes
 from app.api.routes import rag as rag_routes
 from app.chat import internal_summary
@@ -2737,6 +2738,137 @@ async def test_paginated_conversations_returns_and_sorts_role_message_counts(
 
 
 @pytest.mark.asyncio
+async def test_paginated_conversations_filters_turns_in_an_exact_created_cohort(
+    transactional_session: AsyncSession,
+) -> None:
+    reviewer = await _create_user(
+        transactional_session, group_slug=SystemGroupSlug.DEV, email_prefix="turn-filter-reviewer"
+    )
+    range_start = current_time_utc() - timedelta(days=2)
+    range_end = current_time_utc() - timedelta(days=1)
+    one_turn = Conversation(
+        title="One turn in range",
+        user=False,
+        project="postuni",
+        user_id=reviewer.id,
+        is_public=False,
+        created_at=range_start + timedelta(hours=1),
+    )
+    two_turns = Conversation(
+        title="Two turns in range",
+        user=False,
+        project="postuni",
+        user_id=reviewer.id,
+        is_public=False,
+        created_at=range_start + timedelta(hours=2),
+    )
+    zero_turns = Conversation(
+        title="Zero turns in range",
+        user=False,
+        project="postuni",
+        user_id=reviewer.id,
+        is_public=False,
+        created_at=range_start + timedelta(hours=3),
+    )
+    outside_cohort = Conversation(
+        title="Created before range",
+        user=False,
+        project="postuni",
+        user_id=reviewer.id,
+        is_public=False,
+        created_at=range_start - timedelta(hours=1),
+    )
+    transactional_session.add_all([one_turn, two_turns, zero_turns, outside_cohort])
+    await transactional_session.flush()
+    transactional_session.add_all(
+        [
+            Message(
+                role="user",
+                content="In range",
+                conversation=one_turn,
+                created_at=range_start + timedelta(hours=4),
+            ),
+            Message(
+                role="user",
+                content="After range",
+                conversation=one_turn,
+                created_at=range_end + timedelta(hours=1),
+            ),
+            Message(
+                role="user",
+                content="First in range",
+                conversation=two_turns,
+                created_at=range_start + timedelta(hours=5),
+            ),
+            Message(
+                role="user",
+                content="Second in range",
+                conversation=two_turns,
+                created_at=range_start + timedelta(hours=6),
+            ),
+            Message(
+                role="assistant",
+                content="Not a turn",
+                conversation=zero_turns,
+                created_at=range_start + timedelta(hours=7),
+            ),
+            Message(
+                role="user",
+                content="In range but outside cohort",
+                conversation=outside_cohort,
+                created_at=range_start + timedelta(hours=8),
+            ),
+        ]
+    )
+    await transactional_session.commit()
+
+    range_params = {
+        "analytics_start": range_start.isoformat(),
+        "analytics_end": range_end.isoformat(),
+        "limit": 20,
+        "offset": 0,
+    }
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://testserver"
+    ) as client:
+        authenticate_client(client, reviewer.id)
+        one_response = await client.get(
+            "/api/conversations/paginated", params={**range_params, "min_turns": 1, "max_turns": 1}
+        )
+        overflow_response = await client.get(
+            "/api/conversations/paginated", params={**range_params, "min_turns": 2}
+        )
+        zero_response = await client.get(
+            "/api/conversations/paginated", params={**range_params, "min_turns": 0, "max_turns": 0}
+        )
+        invalid_response = await client.get(
+            "/api/conversations/paginated", params={**range_params, "min_turns": 2, "max_turns": 1}
+        )
+        invalid_range_response = await client.get(
+            "/api/conversations/paginated",
+            params={
+                **range_params,
+                "analytics_start": range_end.isoformat(),
+                "analytics_end": range_start.isoformat(),
+                "min_turns": 1,
+            },
+        )
+
+    assert one_response.status_code == 200
+    assert one_response.json()["total"] == 1
+    assert one_response.json()["items"][0]["id"] == str(one_turn.id)
+    assert one_response.json()["items"][0]["user_message_count"] == 2
+    assert overflow_response.status_code == 200
+    assert [item["id"] for item in overflow_response.json()["items"]] == [str(two_turns.id)]
+    assert zero_response.status_code == 200
+    assert [item["id"] for item in zero_response.json()["items"]] == [str(zero_turns.id)]
+    assert invalid_response.status_code == 400
+    assert invalid_response.json()["detail"] == "Invalid turn count range"
+    assert invalid_range_response.status_code == 400
+    assert invalid_range_response.json()["detail"] == "Invalid Analytics range"
+
+
+@pytest.mark.asyncio
 async def test_chats_export_builds_filtered_zip_with_complete_current_branch_transcripts(
     transactional_session: AsyncSession,
 ) -> None:
@@ -2850,6 +2982,8 @@ async def test_chats_export_builds_filtered_zip_with_complete_current_branch_tra
 
     assert response.status_code == 200
     assert response.headers["content-type"].startswith("application/zip")
+    assert response.headers["x-chat-export-truncated"] == "false"
+    assert response.headers["x-chat-export-included-count"] == "2"
     assert "chats-" in response.headers["content-disposition"]
 
     with ZipFile(BytesIO(response.content)) as archive:
@@ -2862,8 +2996,19 @@ async def test_chats_export_builds_filtered_zip_with_complete_current_branch_tra
             "transcripts/002 - Admissions export question.txt",
         }
         workbook = load_workbook(BytesIO(archive.read(workbook_name)))
-        worksheet = workbook.active
-        assert worksheet is not None
+        assert workbook.sheetnames == ["Export information", "Chats"]
+        information = {
+            str(row[0]): row[1]
+            for row in workbook["Export information"].iter_rows(min_row=2, values_only=True)
+            if row[0] is not None
+        }
+        assert information == {
+            "Chats included": 2,
+            "Export limit": 10_000,
+            "Additional matching chats omitted": "No",
+            "Notice": "All matching chats were included.",
+        }
+        worksheet = workbook["Chats"]
         rows = list(worksheet.iter_rows(values_only=True))
         assert rows[0] == (
             "Chat",
@@ -2936,13 +3081,71 @@ async def test_chats_export_builds_filtered_zip_with_complete_current_branch_tra
     with ZipFile(BytesIO(no_cost_response.content)) as archive:
         workbook_name = next(name for name in archive.namelist() if name.endswith(".xlsx"))
         workbook = load_workbook(BytesIO(archive.read(workbook_name)), read_only=True)
-        worksheet = workbook.active
-        assert worksheet is not None
+        worksheet = workbook["Chats"]
         headers = next(worksheet.iter_rows(values_only=True))
         workbook.close()
         text_file = archive.read("transcripts/002 - Admissions export question.txt").decode()
     assert headers[-1] == "Updated"
     assert "\nCost:" not in text_file
+
+
+@pytest.mark.asyncio
+async def test_chats_export_limits_results_and_records_omitted_matches(
+    transactional_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    reviewer = await _create_user(
+        transactional_session, group_slug=SystemGroupSlug.USER, email_prefix="chat-export-cap"
+    )
+    await replace_user_permission_overrides(
+        transactional_session,
+        reviewer,
+        {PermissionKey.ACCESS_CHATS: True, PermissionKey.CHATS_VIEW_OWN: True},
+    )
+    transactional_session.add_all(
+        [
+            Conversation(
+                title=f"Export cap {index}",
+                user=False,
+                project="demo",
+                user_id=reviewer.id,
+                is_public=False,
+            )
+            for index in range(2)
+        ]
+    )
+    await transactional_session.commit()
+    monkeypatch.setattr(conversation_routes, "_CHAT_EXPORT_MAX_CONVERSATIONS", 1)
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://testserver"
+    ) as client:
+        authenticate_client(client, reviewer.id)
+        response = await client.get("/api/conversations/export")
+
+    assert response.status_code == 200
+    assert response.headers["x-chat-export-truncated"] == "true"
+    assert response.headers["x-chat-export-included-count"] == "1"
+    with ZipFile(BytesIO(response.content)) as archive:
+        transcript_names = [name for name in archive.namelist() if name.startswith("transcripts/")]
+        assert len(transcript_names) == 1
+        workbook_name = next(name for name in archive.namelist() if name.endswith(".xlsx"))
+        workbook = load_workbook(BytesIO(archive.read(workbook_name)), read_only=True)
+        information = {
+            str(row[0]): row[1]
+            for row in workbook["Export information"].iter_rows(min_row=2, values_only=True)
+            if row[0] is not None
+        }
+        workbook.close()
+
+    assert information == {
+        "Chats included": 1,
+        "Export limit": 1,
+        "Additional matching chats omitted": "Yes",
+        "Notice": (
+            "The selected filters matched more chats than the export limit of 1. "
+            "This export contains 1 chat. Additional matching chats were not included."
+        ),
+    }
 
 
 @pytest.mark.asyncio

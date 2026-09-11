@@ -3,13 +3,15 @@ import { useCallback } from "react";
 import { useAuthenticatedApi } from "../../auth/hooks/use-authenticated-api";
 import { useAsyncData } from "../../lib/hooks/use-async-data";
 import type { CustomTimeRange, TimeRangeValue } from "../../lib/time-range";
-import type { ChatAnalyticsSummary } from "../../usage/types";
 import {
     type ChatAnalyticsPlatform,
     fetchChatAnalyticsSummary,
+    type FetchedChatAnalyticsSummary,
 } from "../lib/api";
+import type { ChatAnalyticsSummary } from "../types";
 
 interface UseChatAnalyticsDataResult {
+    appliedRange: FetchedChatAnalyticsSummary["appliedRange"] | undefined;
     summary: ChatAnalyticsSummary | undefined;
     loading: boolean;
     hasLoaded: boolean;
@@ -39,12 +41,19 @@ export const useChatAnalyticsData = (
         [api, customRange, platform, timeRange, userEmail, userGroup],
     );
     const { data, loading, hasLoaded, error, refresh } = useAsyncData<
-        ChatAnalyticsSummary | undefined
+        FetchedChatAnalyticsSummary | undefined
     >({
         errorMessage: "Failed to fetch analytics data",
         initialData: undefined,
         load,
     });
 
-    return { summary: data, loading, hasLoaded, error, refresh };
+    return {
+        appliedRange: data?.appliedRange,
+        summary: data?.summary,
+        loading,
+        hasLoaded,
+        error,
+        refresh,
+    };
 };

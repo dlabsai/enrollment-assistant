@@ -4,6 +4,7 @@ import {
     getTimeRangeQueryParams,
     type TimeRangeValue,
 } from "../../lib/time-range";
+import { getAppFormatSettings } from "../../lib/time-zone";
 import type { AdoptionSummary } from "../types";
 
 export const fetchAdoptionSummary = async (
@@ -17,10 +18,7 @@ export const fetchAdoptionSummary = async (
     const params = new URLSearchParams(
         getTimeRangeQueryParams(timeRange, new Date(), customRange),
     );
-    params.set(
-        "browser_time_zone",
-        new Intl.DateTimeFormat().resolvedOptions().timeZone,
-    );
+    params.set("browser_time_zone", getAppFormatSettings().timeZone);
     if (userEmail !== undefined && userEmail !== "") {
         params.set("user_email", userEmail);
     }

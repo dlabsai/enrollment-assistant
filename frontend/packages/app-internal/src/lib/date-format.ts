@@ -1,23 +1,37 @@
-const currentYearMessageTimestampFormatter = new Intl.DateTimeFormat(undefined, {
-    day: "numeric",
-    month: "short",
-    hour: "numeric",
-    minute: "2-digit",
-});
+import { getAppFormatSettings } from "./time-zone";
 
-const olderMessageTimestampFormatter = new Intl.DateTimeFormat(undefined, {
+const { locale: appLocale, timeZone: appTimeZone } = getAppFormatSettings();
+const currentYearMessageTimestampFormatter = new Intl.DateTimeFormat(
+    appLocale,
+    {
+        day: "numeric",
+        month: "short",
+        hour: "numeric",
+        minute: "2-digit",
+        timeZone: appTimeZone,
+    },
+);
+
+const olderMessageTimestampFormatter = new Intl.DateTimeFormat(appLocale, {
     day: "numeric",
     month: "short",
     year: "numeric",
     hour: "numeric",
     minute: "2-digit",
+    timeZone: appTimeZone,
 });
 
-const tableTimestampFormatter = new Intl.DateTimeFormat(undefined, {
+const tableTimestampFormatter = new Intl.DateTimeFormat(appLocale, {
     month: "short",
     day: "numeric",
     hour: "2-digit",
     minute: "2-digit",
+    timeZone: appTimeZone,
+});
+
+const yearFormatter = new Intl.DateTimeFormat(appLocale, {
+    timeZone: appTimeZone,
+    year: "numeric",
 });
 
 const toDate = (value: number | string | Date): Date =>
@@ -36,7 +50,7 @@ export const formatMessageTimestamp = (
     if (!isValidDate(date)) {
         return "-";
     }
-    return date.getFullYear() === now.getFullYear()
+    return yearFormatter.format(date) === yearFormatter.format(now)
         ? currentYearMessageTimestampFormatter.format(date)
         : olderMessageTimestampFormatter.format(date);
 };

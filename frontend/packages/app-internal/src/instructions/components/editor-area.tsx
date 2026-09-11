@@ -1,5 +1,6 @@
 import { StreamLanguage } from "@codemirror/language";
 import { jinja2 } from "@codemirror/legacy-modes/mode/jinja2";
+import type { Extension } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
 import { githubDark, githubLight } from "@uiw/codemirror-theme-github";
 import CodeMirror from "@uiw/react-codemirror";
@@ -13,9 +14,7 @@ import {
     useInstructionsStore,
 } from "../contexts/instructions-store-context";
 import { VersionDetailView } from "./version-detail-view";
-
 const jinja2Language = StreamLanguage.define(jinja2);
-
 const EmptyState = (): JSX.Element => (
     <div className="text-muted-foreground flex flex-1 items-center justify-center">
         <div className="text-center">
@@ -27,20 +26,16 @@ const EmptyState = (): JSX.Element => (
         </div>
     </div>
 );
-
 interface TemplateEditorProps {
     filename: string;
 }
-
 const CodeEditor = ({ filename }: TemplateEditorProps): JSX.Element => {
     const editedContent = useInstructionsStore((state) => state.editedContent);
     const wrapLines = useInstructionsStore((state) => state.wrapLines);
     const editorKey = useInstructionsStore((state) => state.editorKey);
-
     const { updateContent } = useInstructionsActions();
-
     const isDarkMode = useDarkMode();
-
+    const editorTheme: Extension = isDarkMode ? githubDark : githubLight;
     const editorExtensions = useMemo(
         () =>
             wrapLines
@@ -48,11 +43,9 @@ const CodeEditor = ({ filename }: TemplateEditorProps): JSX.Element => {
                 : [jinja2Language],
         [wrapLines],
     );
-
     const handleChange = (value: string): void => {
         updateContent(filename, value);
     };
-
     return (
         <CodeMirror
             basicSetup={{
@@ -68,22 +61,19 @@ const CodeEditor = ({ filename }: TemplateEditorProps): JSX.Element => {
             height="100%"
             key={editorKey}
             onChange={handleChange}
-            theme={isDarkMode ? githubDark : githubLight}
+            theme={editorTheme}
             value={editedContent}
         />
     );
 };
-
 const DiffEditor = ({ filename }: TemplateEditorProps): JSX.Element => {
     const editedContent = useInstructionsStore((state) => state.editedContent);
     const diskTemplates = useInstructionsStore((state) => state.diskTemplates);
     const wrapLines = useInstructionsStore((state) => state.wrapLines);
     const editorKey = useInstructionsStore((state) => state.editorKey);
-
     const { updateContent } = useInstructionsActions();
-
     const isDarkMode = useDarkMode();
-
+    const editorTheme: Extension = isDarkMode ? githubDark : githubLight;
     const editorExtensions = useMemo(
         () =>
             wrapLines
@@ -91,25 +81,21 @@ const DiffEditor = ({ filename }: TemplateEditorProps): JSX.Element => {
                 : [jinja2Language],
         [wrapLines],
     );
-
     const originalContent = useMemo(() => {
         const template = diskTemplates.find(
             (template) => template.filename === filename,
         );
         return template?.content ?? "";
     }, [filename, diskTemplates]);
-
     const handleChange = (value: string): void => {
         updateContent(filename, value);
     };
-
     const editorInstanceKey = [
         filename,
         editorKey,
         wrapLines ? "wrap" : "nowrap",
         isDarkMode ? "dark" : "light",
     ].join(":");
-
     return (
         <CodeMirrorMerge
             className="h-full [&_.cm-editor]:h-full [&_.cm-mergeView]:h-full [&_.cm-scroller]:overflow-auto"
@@ -120,7 +106,7 @@ const DiffEditor = ({ filename }: TemplateEditorProps): JSX.Element => {
             destroyRerender={false}
             key={editorInstanceKey}
             revertControls="a-to-b"
-            theme={isDarkMode ? githubDark : githubLight}
+            theme={editorTheme}
         >
             <CodeMirrorMerge.Original
                 extensions={editorExtensions}
@@ -135,10 +121,8 @@ const DiffEditor = ({ filename }: TemplateEditorProps): JSX.Element => {
         </CodeMirrorMerge>
     );
 };
-
 const TemplateEditor = ({ filename }: TemplateEditorProps): JSX.Element => {
     const showDiff = useInstructionsStore((state) => state.showDiff);
-
     return (
         <div className="flex-1 overflow-hidden">
             {showDiff ? (
@@ -149,7 +133,6 @@ const TemplateEditor = ({ filename }: TemplateEditorProps): JSX.Element => {
         </div>
     );
 };
-
 export const EditorArea = (): JSX.Element => {
     const selectedTemplate = useInstructionsStore(
         (state) => state.selectedTemplate,
@@ -157,7 +140,6 @@ export const EditorArea = (): JSX.Element => {
     const selectedVersionDetail = useInstructionsStore(
         (state) => state.selectedVersionDetail,
     );
-
     return (
         <div className="flex flex-1 flex-col overflow-hidden">
             {selectedTemplate === undefined ? (

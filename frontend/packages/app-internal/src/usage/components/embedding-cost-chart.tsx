@@ -6,7 +6,7 @@ import {
     CardTitle,
 } from "@va/shared/components/ui/card";
 import type { JSX } from "react";
-import { Area, AreaChart, CartesianGrid, XAxis, YAxis } from "recharts";
+import { CartesianGrid, Line, LineChart, XAxis, YAxis } from "recharts";
 
 import {
     type ChartConfig,
@@ -16,17 +16,17 @@ import {
 } from "@/components/ui/chart";
 
 import { formatUsdCost } from "../../lib/number-format";
-import type { TimeRangeValue } from "../../lib/time-range";
 import {
     formatTimeSeriesTick,
     formatTimeSeriesTooltipLabel,
-    isHourlyTimeRange,
+    type TimeGranularity,
+    timeGranularityLabel,
 } from "../../lib/time-series";
-import type { UsageDaily } from "../types";
+import type { UsageTimeSeriesPoint } from "../types";
 
 interface EmbeddingCostChartProps {
-    data: UsageDaily[];
-    timeRange: TimeRangeValue;
+    data: UsageTimeSeriesPoint[];
+    granularity: TimeGranularity;
 }
 
 const chartConfig = {
@@ -38,94 +38,71 @@ const chartConfig = {
 
 export const EmbeddingCostChart = ({
     data,
-    timeRange,
-}: EmbeddingCostChartProps): JSX.Element => {
-    const isHourly = isHourlyTimeRange(timeRange);
-
-    return (
-        <Card className="@container/card">
-            <CardHeader>
-                <CardTitle>Embedding cost over time</CardTitle>
-                <CardDescription>
-                    {isHourly
-                        ? "Hourly embedding spend"
-                        : "Daily embedding spend"}
-                </CardDescription>
-            </CardHeader>
-            <CardContent className="px-2 pt-4 sm:px-6 sm:pt-6">
-                <ChartContainer
-                    className="aspect-auto h-[250px] w-full"
-                    config={chartConfig}
+    granularity,
+}: EmbeddingCostChartProps): JSX.Element => (
+    <Card className="@container/card">
+        <CardHeader>
+            <CardTitle>Embedding cost over time</CardTitle>
+            <CardDescription>
+                {timeGranularityLabel[granularity]} embedding spend
+            </CardDescription>
+        </CardHeader>
+        <CardContent className="px-2 pt-4 sm:px-6 sm:pt-6">
+            <ChartContainer
+                className="aspect-auto h-[250px] w-full"
+                config={chartConfig}
+            >
+                <LineChart
+                    accessibilityLayer
+                    data={data}
                 >
-                    <AreaChart data={data}>
-                        <defs>
-                            <linearGradient
-                                id="fillEmbeddingCost"
-                                x1="0"
-                                x2="0"
-                                y1="0"
-                                y2="1"
-                            >
-                                <stop
-                                    offset="5%"
-                                    stopColor="var(--color-embeddingCost)"
-                                    stopOpacity={0.8}
-                                />
-                                <stop
-                                    offset="95%"
-                                    stopColor="var(--color-embeddingCost)"
-                                    stopOpacity={0.1}
-                                />
-                            </linearGradient>
-                        </defs>
-                        <CartesianGrid vertical={false} />
-                        <XAxis
-                            axisLine={false}
-                            dataKey="date"
-                            minTickGap={32}
-                            tickFormatter={(value: string) =>
-                                formatTimeSeriesTick(value, timeRange)
-                            }
-                            tickLine={false}
-                            tickMargin={8}
-                        />
-                        <YAxis
-                            axisLine={false}
-                            tickFormatter={(value: number) => formatUsdCost(value)}
-                            tickLine={false}
-                            width={64}
-                        />
-                        <ChartTooltip
-                            content={
-                                <ChartTooltipContent
-                                    formatter={(value) =>
-                                        typeof value === "number"
-                                            ? formatUsdCost(value)
-                                            : value
-                                    }
-                                    indicator="line"
-                                    labelFormatter={(value) =>
-                                        formatTimeSeriesTooltipLabel(
-                                            typeof value === "string" ||
-                                                typeof value === "number"
-                                                ? String(value)
-                                                : "",
-                                            timeRange,
-                                        )
-                                    }
-                                />
-                            }
-                            cursor={false}
-                        />
-                        <Area
-                            dataKey="embeddingCost"
-                            fill="url(#fillEmbeddingCost)"
-                            stroke="var(--color-embeddingCost)"
-                            type="natural"
-                        />
-                    </AreaChart>
-                </ChartContainer>
-            </CardContent>
-        </Card>
-    );
-};
+                    <CartesianGrid vertical={false} />
+                    <XAxis
+                        axisLine={false}
+                        dataKey="bucket_start"
+                        minTickGap={32}
+                        tickFormatter={(value: string) =>
+                            formatTimeSeriesTick(value, granularity)
+                        }
+                        tickLine={false}
+                        tickMargin={8}
+                    />
+                    <YAxis
+                        axisLine={false}
+                        tickFormatter={(value: number) => formatUsdCost(value)}
+                        tickLine={false}
+                        tickMargin={8}
+                        width={64}
+                    />
+                    <ChartTooltip
+                        content={
+                            <ChartTooltipContent
+                                indicator="line"
+                                labelFormatter={(value) =>
+                                    formatTimeSeriesTooltipLabel(
+                                        value,
+                                        granularity,
+                                    )
+                                }
+                                valueFormatter={(value) =>
+                                    typeof value === "number"
+                                        ? formatUsdCost(value)
+                                        : value
+                                }
+                            />
+                        }
+                    />
+                    <Line
+                        connectNulls={false}
+                        dataKey="embeddingCost"
+                        dot={false}
+                        isAnimationActive={false}
+                        stroke="var(--color-embeddingCost)"
+                        strokeWidth={2}
+                        type="linear"
+                    />
+                </LineChart>
+            </ChartContainer>
+        </CardContent>
+    </Card>
+);

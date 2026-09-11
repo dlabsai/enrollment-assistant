@@ -157,11 +157,25 @@ Backend settings come from process environment variables and, for host-based dev
 | `MAX_GUARDRAILS_RETRIES` | Number of chatbot retries after guardrails reject a draft answer. |
 | `GUARDRAILS_BLOCKED_MESSAGE` | Canned message shown when all guardrails retries are rejected. |
 
-### Auth, sessions, and Teams SSO
+### Compliance screening
+
+Fresh installations contain no substantive compliance rulebook. An authorized instruction owner must save the institution-approved screening instructions before manual or scheduled runs can start.
 
 | Variable | Purpose |
 | --- | --- |
-| `USER_REGISTRATION_TOKEN` | Registration token for the user group. |
+| `COMPLIANCE_WORKER_ENABLED` | Enables the lifespan-owned background screening executor in each web process. |
+| `COMPLIANCE_MODEL` | Model used for transcript-only structured screening. |
+| `COMPLIANCE_MAX_MESSAGES` | Admission ceiling for selected assistant messages; defaults to `10000`. |
+| `COMPLIANCE_MAX_INPUT_CHARACTERS` | Maximum complete-chat input characters per screening model call; defaults to `200000`. |
+
+### Auth, sessions, and Microsoft SSO
+
+Browser Microsoft SSO setup is documented in [browser-microsoft-sso-admin-setup.md](./browser-microsoft-sso-admin-setup.md).
+
+| Variable | Purpose |
+| --- | --- |
+| `PASSWORD_REGISTRATION_ENABLED` | Enables registration-token account creation. Disabled by default; password login remains available. |
+| `USER_REGISTRATION_TOKEN` | Registration token for the user group when registration is enabled. |
 | `ADMIN_REGISTRATION_TOKEN` | Registration token for the admin group. |
 | `DEV_REGISTRATION_TOKEN` | Registration token for the dev group. |
 | `JWT_SECRET_KEY` | Secret used to sign auth tokens; set a long random value outside local demos. |
@@ -179,12 +193,23 @@ Backend settings come from process environment variables and, for host-based dev
 | `TEAMS_SSO_CLIENT_ID` | Microsoft app/client ID for Teams SSO. |
 | `TEAMS_SSO_RESOURCE` | Teams SSO resource URI. |
 | `TEAMS_SSO_ALLOWED_AUDIENCES` | Extra comma-separated token audiences accepted for Teams SSO. |
+| `BROWSER_SSO_ENABLED` | Enables browser Microsoft SSO after Entra/certificate setup. Disabled by default. |
+| `BROWSER_SSO_TENANT_ID` | Exact Microsoft Entra tenant ID accepted by browser SSO. |
+| `BROWSER_SSO_CLIENT_ID` | Confidential-client application ID. |
+| `BROWSER_SSO_REDIRECT_URI` | Exact backend Web callback URL; production requires HTTPS. |
+| `BROWSER_SSO_ALLOWED_EMAIL_DOMAIN` | Exact institutional email domain without `@`. |
+| `BROWSER_SSO_CERTIFICATE_THUMBPRINT` | Public certificate thumbprint registered in Entra. |
+| `BROWSER_SSO_CERTIFICATE_PRIVATE_KEY` | Protected PEM private key supplied inline. |
+| `BROWSER_SSO_CERTIFICATE_PRIVATE_KEY_PATH` | Protected PEM file alternative to the inline key. |
+| `BROWSER_SSO_REQUEST_TIMEOUT_SECONDS` | Microsoft request timeout; defaults to `10`. |
+| `BROWSER_SSO_FLOW_EXPIRE_MINUTES` | Stored authorization-flow lifetime; defaults to `10`. |
+| `BROWSER_SSO_FLOW_COOKIE_NAME` | HttpOnly browser-binding cookie name. |
 
 ### Scheduler and observability
 
 | Variable | Purpose |
 | --- | --- |
-| `SCHEDULER` | Enables the standalone scheduler process when truthy. Compose and Azure force web workers to `SCHEDULER=false` and run at most one scheduler process separately. |
+| `SCHEDULER` | Enables scheduled Compliance screening at 2:30 AM Eastern and RAG sync at 3:00 AM Eastern. Compose and Azure force web workers to `SCHEDULER=false` and run one scheduler process separately. |
 | `LANGFUSE_OTEL_ENABLED` | Enables optional Langfuse OTLP trace export. |
 | `LANGFUSE_OTEL_ENDPOINT` | Langfuse OTLP endpoint. `/api/public/otel` is normalized to `/api/public/otel/v1/traces`. |
 | `LANGFUSE_PUBLIC_KEY` | Langfuse public key. |

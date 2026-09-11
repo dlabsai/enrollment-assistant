@@ -103,7 +103,7 @@ const getTreeItemIds = (items: BranchTreeItem[]): string[] =>
 interface ConversationBranchSwitcherProps {
     currentMessageId: string;
     disabled?: boolean;
-    onSelectMessage: (messageId: string) => Promise<boolean>;
+    onSelectMessage: (messageId: string) => boolean | Promise<boolean>;
     tree: ConversationTreeState | undefined;
 }
 

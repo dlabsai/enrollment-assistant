@@ -17,6 +17,7 @@ export interface MessageListRow {
     responseCost?: number;
     toolCallCount: number;
     guardrailFailureCount: number;
+    guardrailRetryCount?: number;
     guardrailsBlocked: boolean;
     traceId?: string;
     spanId?: string;

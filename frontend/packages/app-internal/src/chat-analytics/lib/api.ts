@@ -4,9 +4,18 @@ import {
     getTimeRangeQueryParams,
     type TimeRangeValue,
 } from "../../lib/time-range";
-import type { ChatAnalyticsSummary } from "../../usage/types";
+import { getAppFormatSettings } from "../../lib/time-zone";
+import type { ChatAnalyticsSummary } from "../types";
 
 export type ChatAnalyticsPlatform = "both" | "internal" | "public";
+
+export interface FetchedChatAnalyticsSummary {
+    appliedRange: {
+        start?: string;
+        end?: string;
+    };
+    summary: ChatAnalyticsSummary;
+}
 
 export const fetchChatAnalyticsSummary = async (
     api: AuthenticatedApi,
@@ -16,10 +25,10 @@ export const fetchChatAnalyticsSummary = async (
     userEmail?: string,
     userGroup?: "staff" | "devs",
     signal?: AbortSignal,
-): Promise<ChatAnalyticsSummary> => {
-    const params = new URLSearchParams(
-        getTimeRangeQueryParams(timeRange, new Date(), customRange),
-    );
+): Promise<FetchedChatAnalyticsSummary> => {
+    const range = getTimeRangeQueryParams(timeRange, new Date(), customRange);
+    const params = new URLSearchParams(range);
+    params.set("browser_time_zone", getAppFormatSettings().timeZone);
     if (platform !== "both") {
         params.set("platform", platform);
     }
@@ -29,8 +38,9 @@ export const fetchChatAnalyticsSummary = async (
     if (userGroup !== undefined) {
         params.set("user_group", userGroup);
     }
-    return api.get<ChatAnalyticsSummary>(
+    const summary = await api.get<ChatAnalyticsSummary>(
         `/analytics/conversations?${params.toString()}`,
         { signal },
     );
+    return { appliedRange: range, summary };
 };

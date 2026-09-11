@@ -25,6 +25,7 @@ interface MessageListItemResponse {
     response_cost?: number | null;
     tool_call_count: number;
     guardrail_failure_count: number;
+    guardrail_retry_count?: number | null;
     guardrails_blocked: boolean;
     trace_id?: string | null;
     span_id?: string | null;
@@ -38,17 +39,24 @@ interface MessageListResponse {
 }
 
 export const fetchMessageListPage = async (
-    api: AuthenticatedApi,
+    api: Pick<AuthenticatedApi, "get">,
     params: {
         search?: string;
         platform?: "internal" | "public";
         userEmail?: string;
         userGroup?: "staff" | "devs";
         role?: "user" | "assistant" | "all";
+        guardrailStatus?: "all" | "retried" | "blocked";
+        minGenerationTimeMs?: number;
+        maxGenerationTimeMs?: number;
+        excludeDraft?: boolean;
+        conversationStart?: string;
+        conversationEnd?: string;
         limit: number;
         offset: number;
         sortBy?: string;
         descending?: boolean;
+        endBefore?: string;
         timeRange: TimeRangeValue;
         customRange: CustomTimeRange;
     },
@@ -59,6 +67,24 @@ export const fetchMessageListPage = async (
     }
     if (params.role !== undefined) {
         query.set("role", params.role);
+    }
+    if (params.guardrailStatus !== undefined) {
+        query.set("guardrail_status", params.guardrailStatus);
+    }
+    if (params.excludeDraft === true) {
+        query.set("exclude_draft", "true");
+    }
+    if (params.minGenerationTimeMs !== undefined) {
+        query.set("min_generation_time_ms", String(params.minGenerationTimeMs));
+    }
+    if (params.maxGenerationTimeMs !== undefined) {
+        query.set("max_generation_time_ms", String(params.maxGenerationTimeMs));
+    }
+    if (params.conversationStart !== undefined) {
+        query.set("conversation_start", params.conversationStart);
+    }
+    if (params.conversationEnd !== undefined) {
+        query.set("conversation_end", params.conversationEnd);
     }
     query.set("limit", String(params.limit));
     query.set("offset", String(params.offset));
@@ -86,7 +112,9 @@ export const fetchMessageListPage = async (
     if (timeRangeParams.start !== undefined) {
         query.set("start", timeRangeParams.start);
     }
-    if (timeRangeParams.end !== undefined) {
+    if (params.timeRange === "custom" && params.endBefore !== undefined) {
+        query.set("end_before", params.endBefore);
+    } else if (timeRangeParams.end !== undefined) {
         query.set("end", timeRangeParams.end);
     }
 
@@ -115,6 +143,7 @@ export const fetchMessageListPage = async (
             responseCost: item.response_cost ?? undefined,
             toolCallCount: item.tool_call_count,
             guardrailFailureCount: item.guardrail_failure_count,
+            guardrailRetryCount: item.guardrail_retry_count ?? undefined,
             guardrailsBlocked: item.guardrails_blocked,
             traceId: item.trace_id ?? undefined,
             spanId: item.span_id ?? undefined,

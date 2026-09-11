@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from sqlalchemy import text
 
+from app.compliance.scheduled import SCHEDULER_TIMEZONE, admit_daily_screening
 from app.core.db import engine
 from app.rag.pipeline import RagPipelineAlreadyRunningError, run_rag_sync_pipeline
 
@@ -16,9 +17,21 @@ logger = logging.getLogger(__name__)
 scheduler = AsyncIOScheduler()
 
 _SYNC_DATA_LOCK_ID = 20_260_407_03
+_SCHEDULED_SCREENING_LOCK_ID = 20_260_407_04
 
 
 def configure_scheduler_jobs() -> None:
+    scheduler.add_job(  # type: ignore[call-arg]
+        scheduled_screening_job,
+        trigger="cron",
+        hour=2,
+        minute=30,
+        timezone=SCHEDULER_TIMEZONE,
+        max_instances=1,
+        coalesce=True,
+        id="scheduled_screening",
+        replace_existing=True,
+    )
     scheduler.add_job(  # type: ignore[call-arg]
         sync_data_job,
         trigger="cron",
@@ -48,6 +61,19 @@ async def _job_lock(lock_id: int, *, job_name: str) -> AsyncGenerator[bool]:
             yield True
         finally:
             await conn.execute(text("SELECT pg_advisory_unlock(:lock_id)"), {"lock_id": lock_id})
+
+
+async def scheduled_screening_job() -> None:
+    async with _job_lock(
+        _SCHEDULED_SCREENING_LOCK_ID, job_name="scheduled_screening_job"
+    ) as acquired:
+        if not acquired:
+            return
+
+        try:
+            await admit_daily_screening()
+        except Exception:
+            logger.exception("Scheduled screening failed")
 
 
 async def sync_data_job() -> None:

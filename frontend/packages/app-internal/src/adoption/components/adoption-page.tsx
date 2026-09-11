@@ -184,14 +184,16 @@ export const AdoptionPage = (): JSX.Element => {
 
             <PageSection className="grid grid-cols-1 gap-4 @3xl/main:grid-cols-2">
                 <AdoptionChart
-                    data={summary.daily}
-                    description="Distinct users who sent a message each day"
-                    metric="daily_active_users"
-                    title="Daily active users"
+                    data={summary.series}
+                    description="Distinct users who sent a message in each displayed period"
+                    granularity={summary.time_granularity}
+                    metric="active_users"
+                    title="Active users"
                 />
                 <AdoptionChart
-                    data={summary.daily}
-                    description="Distinct users active in each rolling 30-day window"
+                    data={summary.series}
+                    description="Distinct users active in the rolling 30 days ending in each period"
+                    granularity={summary.time_granularity}
                     metric="monthly_active_users"
                     title="Monthly active users"
                 />

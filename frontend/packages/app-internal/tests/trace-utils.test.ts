@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { describe, it } from "node:test";
+import { describe, it } from "vitest";
 
 import {
     getAggregateFailedResultCount,
@@ -722,6 +722,7 @@ describe("structured trace response rendering data", () => {
             started_at: "2026-04-27T12:00:00Z",
             duration_ms: 1000,
             span_count: 1,
+            total_cost: null,
             is_public: false,
             conversation_id: "conversation-1",
             spans: [

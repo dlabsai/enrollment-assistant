@@ -1,6 +1,9 @@
-export interface AdoptionDaily {
-    date: string;
-    daily_active_users: number;
+import type { TimeGranularity } from "../../lib/time-series";
+
+export interface AdoptionTimeSeriesPoint {
+    bucket_start: string;
+    bucket_end: string;
+    active_users: number;
     monthly_active_users: number;
 }
 
@@ -9,5 +12,6 @@ export interface AdoptionSummary {
     monthly_active_users: number;
     average_daily_active_users: number;
     stickiness: number;
-    daily: AdoptionDaily[];
+    time_granularity: TimeGranularity;
+    series: AdoptionTimeSeriesPoint[];
 }

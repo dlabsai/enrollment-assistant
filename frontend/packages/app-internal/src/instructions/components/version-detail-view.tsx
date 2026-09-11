@@ -1,5 +1,6 @@
 import { StreamLanguage } from "@codemirror/language";
 import { jinja2 } from "@codemirror/legacy-modes/mode/jinja2";
+import type { Extension } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
 import { githubDark, githubLight } from "@uiw/codemirror-theme-github";
 import { ScrollArea } from "@va/shared/components/ui/scroll-area";
@@ -10,16 +11,13 @@ import { useDarkMode } from "../../lib/hooks/use-dark-mode";
 import { useInstructionsStore } from "../contexts/instructions-store-context";
 import { formatInstructionName } from "../lib/utils";
 import { InstructionIcon } from "./instruction-icon";
-
 const jinja2Language = StreamLanguage.define(jinja2);
-
 interface PromptDiffCardProps {
     filename: string;
     content: string;
     originalContent: string;
     fillHeight?: boolean;
 }
-
 const PromptDiffCard = ({
     filename,
     content,
@@ -28,7 +26,7 @@ const PromptDiffCard = ({
 }: PromptDiffCardProps): JSX.Element => {
     const wrapLines = useInstructionsStore((state) => state.wrapLines);
     const isDarkMode = useDarkMode();
-
+    const editorTheme: Extension = isDarkMode ? githubDark : githubLight;
     const editorExtensions = useMemo(
         () =>
             wrapLines
@@ -36,7 +34,6 @@ const PromptDiffCard = ({
                 : [jinja2Language],
         [wrapLines],
     );
-
     return (
         <div
             className={
@@ -58,7 +55,7 @@ const PromptDiffCard = ({
                         margin: 3,
                         minSize: 4,
                     }}
-                    theme={isDarkMode ? githubDark : githubLight}
+                    theme={editorTheme}
                 >
                     <CodeMirrorMerge.Original
                         extensions={editorExtensions}
@@ -75,26 +72,21 @@ const PromptDiffCard = ({
         </div>
     );
 };
-
 export const VersionDetailView = (): JSX.Element | undefined => {
     const selectedVersionDetail = useInstructionsStore(
         (state) => state.selectedVersionDetail,
     );
     const diskTemplates = useInstructionsStore((state) => state.diskTemplates);
-
     if (!selectedVersionDetail) {
         return undefined;
     }
-
     const modifiedPrompts = selectedVersionDetail.prompts.filter((prompt) => {
         const diskTemplate = diskTemplates.find(
             (template) => template.filename === prompt.filename,
         );
         return diskTemplate?.content !== prompt.content;
     });
-
     const fillHeight = modifiedPrompts.length === 1;
-
     return (
         <ScrollArea className="min-h-0 flex-1">
             <div

@@ -15,10 +15,10 @@ pytestmark = [pytest.mark.slow, pytest.mark.llm]
 
 @pytest.mark.asyncio
 @pytest.mark.eval
-async def test_chatbot_evaluation(db_engine: object, request: pytest.FixtureRequest) -> None:
+async def test_chatbot_evaluation(rag_db_engine: object, request: pytest.FixtureRequest) -> None:
     """Run all chatbot eval cases with optional repeats for statistical confidence."""
-    if not isinstance(db_engine, AsyncEngine):
-        raise TypeError("db_engine fixture must provide an AsyncEngine")
+    if not isinstance(rag_db_engine, AsyncEngine):
+        raise TypeError("rag_db_engine fixture must provide an AsyncEngine")
     config = EvalRunConfig(
         suite=EvalSuite.CHATBOT,
         repeat=cast(int, request.config.getoption("--repeat")),
@@ -28,7 +28,7 @@ async def test_chatbot_evaluation(db_engine: object, request: pytest.FixtureRequ
         chatbot_model=request.config.getoption("--chatbot-model"),
         guardrail_model=request.config.getoption("--guardrail-model"),
         evaluation_model=request.config.getoption("--evaluation-model"),
-        session_factory=create_session_factory(db_engine),
+        session_factory=create_session_factory(rag_db_engine),
     )
     report = await run_chatbot_evaluation(config)
     report.print_summary()

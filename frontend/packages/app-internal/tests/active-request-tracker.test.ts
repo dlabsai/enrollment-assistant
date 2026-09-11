@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
-import { describe, it } from "node:test";
 
-import { createActiveRequestTracker } from "../src/chat/lib/active-request-tracker.ts";
+import { describe, it } from "vitest";
+
+import { createActiveRequestTracker } from "../src/chat/lib/active-request-tracker";
 
 describe("active request tracking", () => {
     it("keeps an older request stale after a newer request finishes", () => {

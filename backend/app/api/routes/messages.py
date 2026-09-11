@@ -48,6 +48,7 @@ from app.api.routes.owner_group_filter import (
     build_owner_group_filter,
     validate_exclusive_user_filters,
 )
+from app.api.routes.time_filters import AwareTimestamp, validate_time_range
 from app.chat.engine import (
     MessageOut,
     ModelSettings,
@@ -303,6 +304,7 @@ class MessageListItem(BaseModel):
     response_cost: float | None = None
     tool_call_count: int = 0
     guardrail_failure_count: int = 0
+    guardrail_retry_count: int | None = None
     guardrails_blocked: bool = False
     trace_id: str | None = None
     span_id: str | None = None
@@ -611,13 +613,34 @@ async def list_messages(
     search: Annotated[str | None, Query()] = None,
     user_email: Annotated[str | None, Query()] = None,
     user_group: Annotated[OwnerGroup | None, Query()] = None,
-    start: Annotated[datetime | None, Query()] = None,
-    end: Annotated[datetime | None, Query()] = None,
+    start: Annotated[AwareTimestamp | None, Query()] = None,
+    end: Annotated[AwareTimestamp | None, Query()] = None,
+    end_before: Annotated[AwareTimestamp | None, Query()] = None,
+    conversation_start: Annotated[AwareTimestamp | None, Query()] = None,
+    conversation_end: Annotated[AwareTimestamp | None, Query()] = None,
+    guardrail_status: Annotated[Literal["all", "retried", "blocked"], Query()] = "all",
+    min_generation_time_ms: Annotated[float | None, Query(ge=0)] = None,
+    max_generation_time_ms: Annotated[float | None, Query(ge=0)] = None,
+    exclude_draft: Annotated[bool, Query()] = False,
     limit: Annotated[int, Query(ge=1, le=100)] = 20,
     offset: Annotated[int, Query(ge=0)] = 0,
     sort_by: Annotated[str, Query()] = "created_at",
     descending: Annotated[bool, Query()] = True,
 ) -> MessageListPage:
+    validate_time_range(start, end, end_before)
+    validate_time_range(
+        conversation_start, conversation_end, detail="Invalid conversation creation range"
+    )
+    if (
+        min_generation_time_ms is not None
+        and max_generation_time_ms is not None
+        and min_generation_time_ms >= max_generation_time_ms
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="Minimum generation time must be less than maximum generation time",
+        )
+
     permission_map = await get_effective_permission_map(session, current_user)
     if not permission_map.get(PermissionKey.ACCESS_MESSAGES, False):
         raise HTTPException(status_code=403, detail="Access denied")
@@ -633,6 +656,9 @@ async def list_messages(
     conversation_user_email = owner_user_alias.email.label("conversation_user_email")
     content_length = func.char_length(Message.content).label("content_length")
     generation_time_ms = (AssistantMessageMetadata.total_time * 1000).label("generation_time_ms")
+    guardrail_retry_count = AssistantMessageMetadata.guardrail_retry_count.label(
+        "guardrail_retry_count"
+    )
     latest_trace_span_alias = aliased(OtelSpan)
     token_span_alias = aliased(OtelSpan)
     guardrail_span_alias = aliased(OtelSpan)
@@ -743,6 +769,7 @@ async def list_messages(
             response_cost,
             tool_call_count,
             guardrail_failure_count,
+            guardrail_retry_count,
         )
         .join(Conversation, Message.conversation_id == Conversation.id)
         .outerjoin(owner_user_alias, Conversation.user_id == owner_user_alias.id)
@@ -763,10 +790,32 @@ async def list_messages(
 
     if role != "all":
         base_stmt = base_stmt.where(Message.role == role)
+    if guardrail_status == "retried":
+        base_stmt = base_stmt.where(AssistantMessageMetadata.guardrail_retry_count > 0)
+    elif guardrail_status == "blocked":
+        base_stmt = base_stmt.where(Message.guardrails_blocked.is_(True))
+    if exclude_draft:
+        base_stmt = base_stmt.where(
+            or_(Conversation.prompt_source.is_(None), Conversation.prompt_source != "draft")
+        )
+    if min_generation_time_ms is not None:
+        base_stmt = base_stmt.where(
+            AssistantMessageMetadata.total_time >= min_generation_time_ms / 1000
+        )
+    if max_generation_time_ms is not None:
+        base_stmt = base_stmt.where(
+            AssistantMessageMetadata.total_time < max_generation_time_ms / 1000
+        )
     if start is not None:
         base_stmt = base_stmt.where(Message.created_at >= start)
     if end is not None:
         base_stmt = base_stmt.where(Message.created_at <= end)
+    if end_before is not None:
+        base_stmt = base_stmt.where(Message.created_at < end_before)
+    if conversation_start is not None:
+        base_stmt = base_stmt.where(Conversation.created_at >= conversation_start)
+    if conversation_end is not None:
+        base_stmt = base_stmt.where(Conversation.created_at <= conversation_end)
     if search is not None and search.strip() != "":
         pattern = f"%{search.strip()}%"
         base_stmt = base_stmt.where(
@@ -811,6 +860,7 @@ async def list_messages(
         "output_tokens": output_tokens,
         "tool_call_count": tool_call_count,
         "guardrail_failure_count": guardrail_failure_count,
+        "guardrail_retry_count": guardrail_retry_count,
         "guardrails_blocked": Message.guardrails_blocked,
     }
     if can_view_response_cost:
@@ -823,6 +873,8 @@ async def list_messages(
         "cache_read_input_tokens",
         "output_tokens",
         "response_cost",
+        "generation_time_ms",
+        "guardrail_retry_count",
     }:
         sort_expression = sort_expression.nullslast()
     # Select the page before loading details. Trace sorts add only their requested
@@ -854,6 +906,7 @@ async def list_messages(
         conversation_user_email,
         generation_time_ms,
         tool_call_count,
+        guardrail_retry_count,
         maintain_column_froms=True,
     ).where(Message.id.in_(page_ids))
     page_rows = (await session.execute(page_details_stmt)).all()
@@ -872,6 +925,7 @@ async def list_messages(
         conversation_user_email_value,
         generation_time_ms_value,
         tool_call_count_value,
+        guardrail_retry_count_value,
     ) in ordered_page_rows:
         trace_summary = trace_summaries.get(message.id, _MessageTraceSummary())
         items.append(
@@ -901,6 +955,7 @@ async def list_messages(
                 response_cost=trace_summary.response_cost if can_view_response_cost else None,
                 tool_call_count=tool_call_count_value,
                 guardrail_failure_count=trace_summary.guardrail_failure_count,
+                guardrail_retry_count=guardrail_retry_count_value,
                 guardrails_blocked=message.guardrails_blocked,
                 trace_id=trace_summary.trace_id,
                 span_id=trace_summary.span_id,

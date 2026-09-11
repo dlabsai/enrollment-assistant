@@ -29,7 +29,7 @@ import { useAuthenticatedApi } from "../../auth/hooks/use-authenticated-api";
 import { hasPermission } from "../../auth/lib/permissions";
 import { fetchChatDetail } from "../../chat/lib/api";
 import { getResponseLinkBaseUrl } from "../../chat/lib/response-link";
-import type { ChatDetailResponse, Rating } from "../../chat/types";
+import type { ChatDetailResponse } from "../../chat/types";
 import { ChatReviewSheetActions } from "../../chats/components/chat-review-sheet-actions";
 import { ChatTurnTraceSheet } from "../../chats/components/chat-turn-trace-sheet";
 import { ChatDetailContent } from "../../chats/components/chats-page";
@@ -38,6 +38,10 @@ import {
     usePersistentChatSummary,
 } from "../../chats/hooks/use-chat-review-controls";
 import { fetchChatUsers } from "../../chats/lib/api";
+import {
+    parseRouteDate,
+    routeUserOption,
+} from "../../chats/lib/review-search-state";
 import {
     buildOwnerGroupFilterOptions,
     buildUserFilterParams,
@@ -50,12 +54,14 @@ import { PageSection, PageShell } from "../../components/page-shell";
 import { InlineError } from "../../components/page-state";
 import { ReviewTableToolbar } from "../../components/review-table-toolbar";
 import { formatTableTimestamp } from "../../lib/date-format";
-import type { CustomTimeRange, TimeRangeValue } from "../../lib/time-range";
+import { getExportFormatSettings } from "../../lib/file-export";
 import { fetchFeedbackExport, fetchFeedbackListPage } from "../lib/api";
-import {
-    downloadFeedbackExcel,
-    getFeedbackExportTimeSettings,
-} from "../lib/export";
+import { downloadFeedbackExcel } from "../lib/export";
+import type {
+    FeedbackPlatformFilter,
+    FeedbackRatingFilter,
+    FeedbackSearch,
+} from "../lib/search-state";
 import type {
     FeedbackListPage as FeedbackListPageResponse,
     FeedbackListRow,
@@ -67,8 +73,6 @@ const skeletonLine = (className: string): JSX.Element => (
     <Skeleton className={className} />
 );
 
-type FeedbackRatingFilter = Rating | "all";
-
 const FEEDBACK_RATING_OPTIONS: {
     label: string;
     value: FeedbackRatingFilter;
@@ -76,6 +80,15 @@ const FEEDBACK_RATING_OPTIONS: {
     { label: "All ratings", value: "all" },
     { label: "Thumbs up", value: "thumbs_up" },
     { label: "Thumbs down", value: "thumbs_down" },
+];
+
+const FEEDBACK_PLATFORM_OPTIONS: {
+    label: string;
+    value: FeedbackPlatformFilter;
+}[] = [
+    { label: "All platforms", value: "all" },
+    { label: "Internal", value: "internal" },
+    { label: "Public", value: "public" },
 ];
 
 const buildColumns = (): ColumnDef<FeedbackListRow>[] => [
@@ -183,12 +196,23 @@ const buildColumns = (): ColumnDef<FeedbackListRow>[] => [
 export const FeedbackPage = (): JSX.Element => {
     const api = useAuthenticatedApi();
     const { user } = useAuth();
-    const search = useSearch({ from: "/feedback" });
-    const navigate = useNavigate();
+    const routeSearch = useSearch({ from: "/feedback" });
+    const navigate = useNavigate({ from: "/feedback" });
     const canFilterUsers =
         hasPermission(user, "chats_view_users") ||
         hasPermission(user, "chats_view_admins") ||
         hasPermission(user, "chats_view_devs");
+    const canViewPublic =
+        user?.group.slug === "admin" || user?.group.slug === "dev";
+    const availablePlatformOptions = useMemo(
+        () =>
+            canViewPublic
+                ? FEEDBACK_PLATFORM_OPTIONS
+                : FEEDBACK_PLATFORM_OPTIONS.filter(
+                      (option) => option.value !== "public",
+                  ),
+        [canViewPublic],
+    );
     const ownerGroupFilterOptions = useMemo(
         () => buildOwnerGroupFilterOptions(user),
         [user],
@@ -203,14 +227,56 @@ export const FeedbackPage = (): JSX.Element => {
     const canViewSources = hasPermission(user, "chat_view_sources");
     const canViewTools = hasPermission(user, "chat_view_tools");
 
-    const [searchInput, setSearchInput] = useState("");
-    const [searchQuery, setSearchQuery] = useState("");
-    const [rating, setRating] = useState<FeedbackRatingFilter>("all");
-    const [timeRange, setTimeRange] = useState<TimeRangeValue>("30d");
-    const [customRange, setCustomRange] = useState<CustomTimeRange>({});
-    const [selectedUser, setSelectedUser] = useState<
-        ChatUserOption | undefined
-    >();
+    const requestedPlatform: FeedbackPlatformFilter =
+        routeSearch.platform ?? "all";
+    const platform: FeedbackPlatformFilter =
+        requestedPlatform === "public" && !canViewPublic
+            ? "all"
+            : requestedPlatform;
+    const rating: FeedbackRatingFilter = routeSearch.rating ?? "all";
+    const excludeDraft = routeSearch.excludeDraft === true;
+    const timeRange =
+        routeSearch.timeRange ??
+        (routeSearch.start === undefined ? "30d" : "custom");
+    const customRange = useMemo(
+        () => ({
+            start: parseRouteDate(routeSearch.start),
+            end: parseRouteDate(routeSearch.endBefore ?? routeSearch.end),
+        }),
+        [routeSearch.end, routeSearch.endBefore, routeSearch.start],
+    );
+    const selectedUser = useMemo(
+        () =>
+            routeUserOption(
+                routeSearch.userEmail,
+                routeSearch.userGroup,
+                platform === "all" ? undefined : platform,
+            ),
+        [platform, routeSearch.userEmail, routeSearch.userGroup],
+    );
+    const updateSearch = useCallback(
+        (updates: Partial<FeedbackSearch>): void => {
+            void navigate({
+                replace: true,
+                search: (previous) => ({ ...previous, ...updates }),
+                to: "/feedback",
+            });
+        },
+        [navigate],
+    );
+
+    const searchQuery = routeSearch.search ?? "";
+    const [searchDraft, setSearchDraft] = useState(() => ({
+        routeValue: searchQuery,
+        value: searchQuery,
+    }));
+    if (searchDraft.routeValue !== searchQuery) {
+        setSearchDraft({ routeValue: searchQuery, value: searchQuery });
+    }
+    const searchInput = searchDraft.value;
+    const setSearchInput = (value: string): void => {
+        setSearchDraft({ routeValue: searchQuery, value });
+    };
     const [userSearchInput, setUserSearchInput] = useState("");
     const [userSearchQuery, setUserSearchQuery] = useState("");
     const [userOptions, setUserOptions] = useState<ChatUserOption[]>([]);
@@ -240,13 +306,19 @@ export const FeedbackPage = (): JSX.Element => {
 
     useEffect(() => {
         const timeout = setTimeout(() => {
-            setSearchQuery(searchInput.trim());
+            const nextSearch = searchInput.trim();
+            if (nextSearch === searchQuery) {
+                return;
+            }
+            updateSearch({
+                search: nextSearch === "" ? undefined : nextSearch,
+            });
             setPageIndex(0);
         }, 300);
         return (): void => {
             clearTimeout(timeout);
         };
-    }, [searchInput]);
+    }, [searchInput, searchQuery, updateSearch]);
 
     useEffect(() => {
         const timeout = setTimeout(() => {
@@ -267,6 +339,7 @@ export const FeedbackPage = (): JSX.Element => {
             try {
                 const response = await fetchChatUsers(api, {
                     search: userSearchQuery,
+                    platform: platform === "all" ? undefined : platform,
                     limit: 50,
                 });
                 if (isMounted) {
@@ -286,7 +359,7 @@ export const FeedbackPage = (): JSX.Element => {
         return (): void => {
             isMounted = false;
         };
-    }, [api, canFilterUsers, userPopoverOpen, userSearchQuery]);
+    }, [api, canFilterUsers, platform, userPopoverOpen, userSearchQuery]);
 
     const buildFeedbackBaseParams = useCallback(() => {
         const userFilterParams = canFilterUsers
@@ -297,15 +370,21 @@ export const FeedbackPage = (): JSX.Element => {
             search: searchQuery,
             userEmail: userFilterParams.userEmail,
             userGroup: userFilterParams.userGroup,
+            platform: platform === "all" ? undefined : platform,
             rating: rating === "all" ? undefined : rating,
+            excludeDraft,
             sortBy: sorting[0]?.id ?? "created_at",
             descending: sorting[0]?.desc ?? true,
             timeRange,
             customRange,
+            endBefore: routeSearch.endBefore,
         };
     }, [
         canFilterUsers,
         customRange,
+        routeSearch.endBefore,
+        excludeDraft,
+        platform,
         rating,
         searchQuery,
         selectedUser,
@@ -349,12 +428,12 @@ export const FeedbackPage = (): JSX.Element => {
 
     const selectedFeedback =
         selectedFeedbackState !== undefined &&
-        selectedFeedbackState.conversationId === search.chat &&
-        selectedFeedbackState.messageId === search.message
+        selectedFeedbackState.conversationId === routeSearch.chat &&
+        selectedFeedbackState.messageId === routeSearch.message
             ? selectedFeedbackState
             : undefined;
-    const selectedConversationId = search.chat;
-    const selectedMessageId = search.message;
+    const selectedConversationId = routeSearch.chat;
+    const selectedMessageId = routeSearch.message;
     const sheetOpen =
         selectedConversationId !== undefined && selectedMessageId !== undefined;
 
@@ -413,19 +492,25 @@ export const FeedbackPage = (): JSX.Element => {
     const tableData = useMemo(() => page?.items ?? [], [page]);
     const pageCount = Math.max(1, Math.ceil((page?.total ?? 0) / pageSize));
     const userOptionsWithOwnerGroups = useMemo(
-        () => [...ownerGroupFilterOptions, ...userOptions],
-        [ownerGroupFilterOptions, userOptions],
+        () =>
+            platform === "public"
+                ? userOptions
+                : [...ownerGroupFilterOptions, ...userOptions],
+        [ownerGroupFilterOptions, platform, userOptions],
     );
     const selectedUserLabel =
         selectedUser?.name ?? selectedUser?.email ?? "All users";
     const selectedRatingLabel =
         FEEDBACK_RATING_OPTIONS.find((option) => option.value === rating)
             ?.label ?? "All ratings";
+    const selectedPlatformLabel =
+        FEEDBACK_PLATFORM_OPTIONS.find((option) => option.value === platform)
+            ?.label ?? "All platforms";
     const detailTitle =
         selectedFeedback?.conversationTitle ?? detail?.title ?? "Chat";
     const detailPlatformLabel =
         selectedFeedback?.isPublic === true ? "Public" : "Internal";
-    const detailUpdatedAt = selectedFeedback?.updatedAt;
+    const detailCreatedAt = selectedFeedback?.createdAt;
     const selectedIndex = selectedFeedback
         ? tableData.findIndex((row) => row.id === selectedFeedback.id)
         : -1;
@@ -433,7 +518,9 @@ export const FeedbackPage = (): JSX.Element => {
     const canGoNext =
         selectedIndex >= 0 && selectedIndex < tableData.length - 1;
     const handleRatingChange = (value: FeedbackRatingFilter | null): void => {
-        setRating(value ?? "all");
+        updateSearch({
+            rating: value === null || value === "all" ? undefined : value,
+        });
         setPageIndex(0);
     };
     const handleOverlayFeedbackChange = useCallback((): void => {
@@ -448,7 +535,7 @@ export const FeedbackPage = (): JSX.Element => {
         try {
             const response = await fetchFeedbackExport(api, {
                 ...buildFeedbackBaseParams(),
-                ...getFeedbackExportTimeSettings(),
+                ...getExportFormatSettings(),
                 messageUrlBase: getResponseLinkBaseUrl(),
             });
             downloadFeedbackExcel(response);
@@ -487,6 +574,7 @@ export const FeedbackPage = (): JSX.Element => {
         void navigate({
             to: "/feedback",
             search: {
+                ...routeSearch,
                 chat: row.conversationId,
                 message: row.messageId,
             },
@@ -527,6 +615,49 @@ export const FeedbackPage = (): JSX.Element => {
                     extraFilters={
                         <PageHeaderGroup>
                             <Select
+                                onValueChange={(value) => {
+                                    if (
+                                        value === "all" ||
+                                        value === "internal" ||
+                                        value === "public"
+                                    ) {
+                                        updateSearch({
+                                            platform:
+                                                value === "all"
+                                                    ? undefined
+                                                    : value,
+                                            userEmail: undefined,
+                                            userGroup: undefined,
+                                        });
+                                        setPageIndex(0);
+                                    }
+                                }}
+                                value={platform}
+                            >
+                                <SelectTrigger
+                                    aria-label="Platform"
+                                    className="w-[150px]"
+                                >
+                                    <SelectValue>
+                                        {selectedPlatformLabel}
+                                    </SelectValue>
+                                </SelectTrigger>
+                                <SelectContent>
+                                    <SelectGroup>
+                                        {availablePlatformOptions.map(
+                                            (option) => (
+                                                <SelectItem
+                                                    key={option.value}
+                                                    value={option.value}
+                                                >
+                                                    {option.label}
+                                                </SelectItem>
+                                            ),
+                                        )}
+                                    </SelectGroup>
+                                </SelectContent>
+                            </Select>
+                            <Select
                                 onValueChange={handleRatingChange}
                                 value={rating}
                             >
@@ -553,19 +684,62 @@ export const FeedbackPage = (): JSX.Element => {
                                     </SelectGroup>
                                 </SelectContent>
                             </Select>
+                            <Select
+                                onValueChange={(value) => {
+                                    updateSearch({
+                                        excludeDraft:
+                                            value === "live" ? true : undefined,
+                                    });
+                                    setPageIndex(0);
+                                }}
+                                value={excludeDraft ? "live" : "all"}
+                            >
+                                <SelectTrigger
+                                    aria-label="Prompt scope"
+                                    className="w-[140px]"
+                                >
+                                    <SelectValue>
+                                        {excludeDraft
+                                            ? "Live prompts"
+                                            : "All prompts"}
+                                    </SelectValue>
+                                </SelectTrigger>
+                                <SelectContent>
+                                    <SelectGroup>
+                                        <SelectItem value="all">
+                                            All prompts
+                                        </SelectItem>
+                                        <SelectItem value="live">
+                                            Live prompts
+                                        </SelectItem>
+                                    </SelectGroup>
+                                </SelectContent>
+                            </Select>
                         </PageHeaderGroup>
                     }
                     onClear={() => {
                         setSearchInput("");
-                        setSearchQuery("");
-                        setRating("all");
-                        setSelectedUser(undefined);
-                        setTimeRange("30d");
-                        setCustomRange({});
+                        updateSearch({
+                            excludeDraft: undefined,
+                            search: undefined,
+                            platform: undefined,
+                            rating: undefined,
+                            start: undefined,
+                            end: undefined,
+                            endBefore: undefined,
+                            timeRange: "30d",
+                            userEmail: undefined,
+                            userGroup: undefined,
+                        });
                         setPageIndex(0);
                     }}
                     onCustomRangeChange={(value) => {
-                        setCustomRange(value);
+                        updateSearch({
+                            start: value.start?.toISOString(),
+                            end: value.end?.toISOString(),
+                            endBefore: undefined,
+                            timeRange: "custom",
+                        });
                         setPageIndex(0);
                     }}
                     onRefresh={() => {
@@ -573,12 +747,27 @@ export const FeedbackPage = (): JSX.Element => {
                     }}
                     onSearchInputChange={setSearchInput}
                     onSelectedUserChange={(next) => {
-                        setSelectedUser(next);
+                        const userFilter = buildUserFilterParams(next);
+                        updateSearch({
+                            userEmail: userFilter.userEmail,
+                            userGroup: userFilter.userGroup,
+                        });
                         setUserPopoverOpen(false);
                         setPageIndex(0);
                     }}
                     onTimeRangeChange={(value) => {
-                        setTimeRange(value);
+                        updateSearch({
+                            timeRange: value,
+                            endBefore: undefined,
+                            start:
+                                value === "custom"
+                                    ? routeSearch.start
+                                    : undefined,
+                            end:
+                                value === "custom"
+                                    ? routeSearch.end
+                                    : undefined,
+                        });
                         setPageIndex(0);
                     }}
                     onUserPopoverOpenChange={setUserPopoverOpen}
@@ -645,7 +834,11 @@ export const FeedbackPage = (): JSX.Element => {
                         setTraceMessageId(undefined);
                         void navigate({
                             to: "/feedback",
-                            search: { chat: undefined, message: undefined },
+                            search: {
+                                ...routeSearch,
+                                chat: undefined,
+                                message: undefined,
+                            },
                         });
                     }
                 }}
@@ -690,7 +883,7 @@ export const FeedbackPage = (): JSX.Element => {
                             />
                         </div>
                         <SheetDescription>
-                            {detailUpdatedAt === undefined ? (
+                            {detailCreatedAt === undefined ? (
                                 "Feedback chat context"
                             ) : (
                                 <span className="inline-flex flex-wrap items-center gap-2">
@@ -705,7 +898,7 @@ export const FeedbackPage = (): JSX.Element => {
                                     </Badge>
                                     <span>
                                         Feedback{" "}
-                                        {formatTimestamp(detailUpdatedAt)}
+                                        {formatTimestamp(detailCreatedAt)}
                                     </span>
                                 </span>
                             )}

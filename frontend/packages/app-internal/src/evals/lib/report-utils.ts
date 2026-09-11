@@ -1,5 +1,5 @@
-import { formatTableTimestamp } from "../../lib/date-format.ts";
-import { formatLocaleNumber } from "../../lib/number-format.ts";
+import { formatTableTimestamp } from "../../lib/date-format";
+import { formatLocaleNumber } from "../../lib/number-format";
 import type { EvalReportDetail, EvalReportSummary } from "../types";
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>

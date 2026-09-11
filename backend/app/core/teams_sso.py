@@ -1,4 +1,3 @@
-from dataclasses import dataclass
 from typing import Any
 
 import httpx
@@ -10,6 +9,7 @@ from joserfc.jwt import JWTClaimsRegistry
 from pydantic import BaseModel, TypeAdapter, ValidationError
 
 from app.core.config import settings
+from app.core.entra_identity import EntraIdentity
 
 _OPENID_CONFIGURATION_TIMEOUT_SECONDS = 10.0
 _OPENID_CONFIGURATION_ADAPTER = TypeAdapter(dict[str, Any])
@@ -19,15 +19,7 @@ class _JwksPayload(BaseModel):
     keys: list[dict[str, str | list[str]]]
 
 
-@dataclass(frozen=True, slots=True)
-class TeamsSsoIdentity:
-    tenant_id: str
-    object_id: str
-    email: str
-    name: str
-
-
-async def validate_teams_sso_token(token: str) -> TeamsSsoIdentity:
+async def validate_teams_sso_token(token: str) -> EntraIdentity:
     _ensure_teams_sso_is_configured()
 
     openid_configuration = await _fetch_openid_configuration()
@@ -61,7 +53,7 @@ async def validate_teams_sso_token(token: str) -> TeamsSsoIdentity:
     email = _extract_email(claims_dict)
     name = _extract_name(claims_dict, email)
 
-    return TeamsSsoIdentity(tenant_id=tenant_id, object_id=object_id, email=email, name=name)
+    return EntraIdentity(tenant_id=tenant_id, object_id=object_id, email=email, name=name)
 
 
 def _ensure_teams_sso_is_configured() -> None:

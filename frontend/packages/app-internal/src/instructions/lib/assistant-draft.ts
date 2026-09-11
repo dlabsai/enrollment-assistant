@@ -1,10 +1,10 @@
-import type { PromptFile } from "../types/index.ts";
+import type { PromptFile } from "../types";
 import {
     getSectionIdForScope,
     getTemplateFilenamesForScope,
     INTERNAL_PROMPT_PLATFORM,
-} from "./sections.ts";
-import type { InstructionsStoreState } from "./store.ts";
+} from "./sections";
+import type { InstructionsStoreState } from "./store";
 
 const ASSISTANT_SECTION_ID = getSectionIdForScope(
     "assistant",
@@ -28,9 +28,7 @@ type AssistantDraftState = Pick<
     | "selectedVersionIdBySection"
 >;
 
-export const selectHasAssistantDraft = (
-    state: AssistantDraftState,
-): boolean =>
+export const selectHasAssistantDraft = (state: AssistantDraftState): boolean =>
     ASSISTANT_TEMPLATE_FILENAMES.some(
         (filename) => state.drafts[filename] !== undefined,
     );
@@ -38,7 +36,8 @@ export const selectHasAssistantDraft = (
 export const selectAssistantDraftBaseVersionId = (
     state: AssistantDraftState,
 ): string | undefined => {
-    const storedDefault = state.isDefaultSelectedBySection[ASSISTANT_SECTION_ID];
+    const storedDefault =
+        state.isDefaultSelectedBySection[ASSISTANT_SECTION_ID];
     const isActiveAssistantSection =
         state.activeSectionId === ASSISTANT_SECTION_ID;
     const isDefault =

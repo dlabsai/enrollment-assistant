@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 
-import { getTimeRangeQueryParams } from "../src/lib/time-range.ts";
+import { test } from "vitest";
+
+import { getTimeRangeQueryParams } from "../src/lib/time-range";
 
 const getCustomQuery = (start: Date, end?: Date): Record<string, string> =>
     Object.fromEntries(

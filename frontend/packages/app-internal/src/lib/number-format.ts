@@ -1,17 +1,17 @@
-const browserLocale = undefined;
+import { getAppFormatSettings } from "./time-zone";
+
+const { locale: appLocale } = getAppFormatSettings();
 
 export const formatLocaleNumber = (
     value: number,
     options?: Intl.NumberFormatOptions,
-): string => value.toLocaleString(browserLocale, options);
+): string => value.toLocaleString(appLocale, options);
 
 export const makeLocaleNumberFormatter = (
     options?: Intl.NumberFormatOptions,
-): Intl.NumberFormat => new Intl.NumberFormat(browserLocale, options);
+): Intl.NumberFormat => new Intl.NumberFormat(appLocale, options);
 
-export const formatUsdCost = (
-    value: number | null | undefined,
-): string => {
+export const formatUsdCost = (value: number | null | undefined): string => {
     if (value === null || value === undefined || !Number.isFinite(value)) {
         return "-";
     }

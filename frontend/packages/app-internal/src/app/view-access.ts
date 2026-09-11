@@ -16,6 +16,9 @@ export const canAccessView = (
         case "messages": {
             return hasPermission(user, "access_messages");
         }
+        case "compliance": {
+            return hasPermission(user, "access_compliance");
+        }
         case "feedback": {
             return hasPermission(user, "access_chats");
         }
@@ -45,7 +48,8 @@ export const canAccessView = (
         case "usage": {
             return hasPermission(user, "access_usage");
         }
-        case "analytics": {
+        case "analytics":
+        case "quality": {
             return hasPermission(user, "access_analytics");
         }
         case "adoption": {

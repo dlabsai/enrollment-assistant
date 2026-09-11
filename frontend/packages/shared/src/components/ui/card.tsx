@@ -1,3 +1,4 @@
+import { cva, type VariantProps } from "class-variance-authority";
 import * as React from "react";
 
 import { cn } from "@va/shared/lib/utils";
@@ -79,14 +80,26 @@ function CardContent({ className, ...props }: React.ComponentProps<"div">) {
     );
 }
 
-function CardFooter({ className, ...props }: React.ComponentProps<"div">) {
+const cardFooterVariants = cva("flex items-center", {
+    variants: {
+        variant: {
+            muted: "bg-muted/50 rounded-b-xl border-t p-4 group-data-[size=sm]/card:p-3",
+            plain: "px-4 pb-4 group-data-[size=sm]/card:px-3 group-data-[size=sm]/card:pb-3",
+        },
+    },
+    defaultVariants: { variant: "muted" },
+});
+
+function CardFooter({
+    className,
+    variant = "muted",
+    ...props
+}: React.ComponentProps<"div"> & VariantProps<typeof cardFooterVariants>) {
     return (
         <div
             data-slot="card-footer"
-            className={cn(
-                "bg-muted/50 flex items-center rounded-b-xl border-t p-4 group-data-[size=sm]/card:p-3",
-                className,
-            )}
+            data-variant={variant}
+            className={cn(cardFooterVariants({ variant }), className)}
             {...props}
         />
     );

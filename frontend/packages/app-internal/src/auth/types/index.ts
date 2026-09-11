@@ -2,6 +2,8 @@ export type PermissionKey =
     | "access_chats"
     | "access_investigations"
     | "access_messages"
+    | "access_compliance"
+    | "edit_compliance_instructions"
     | "access_instructions"
     | "access_traces"
     | "access_rag"

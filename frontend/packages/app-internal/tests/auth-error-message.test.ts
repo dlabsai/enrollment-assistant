@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
-import { describe, it } from "node:test";
 
-import { getAuthFormErrorMessage } from "../src/auth/lib/error-message.ts";
+import { describe, it } from "vitest";
+
+import { getAuthFormErrorMessage } from "../src/auth/lib/error-message";
 
 describe("auth form error messages", () => {
     it("gives clear next steps for known sign-in failures", () => {
@@ -23,6 +24,10 @@ describe("auth form error messages", () => {
         assert.equal(
             getAuthFormErrorMessage("Email already registered"),
             "An account with this email already exists. Try signing in instead.",
+        );
+        assert.equal(
+            getAuthFormErrorMessage("Password registration is not enabled"),
+            "Registration is not available. Sign in with an existing account.",
         );
     });
 

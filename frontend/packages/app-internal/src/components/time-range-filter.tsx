@@ -1,4 +1,4 @@
-import { Time } from "@internationalized/date";
+import { CalendarDateTime, fromDate, Time } from "@internationalized/date";
 import { Button } from "@va/shared/components/ui/button";
 import { Calendar } from "@va/shared/components/ui/calendar";
 import {
@@ -32,20 +32,42 @@ import {
     timeRangeOptions,
     type TimeRangeValue,
 } from "../lib/time-range";
+import { createDateInTimeZone, getAppFormatSettings } from "../lib/time-zone";
 
 const WHEEL_DELTA_THRESHOLD = 40;
-const browserDateTimeFormatter = new Intl.DateTimeFormat(undefined, {
+const { locale: appLocale, timeZone: appTimeZone } = getAppFormatSettings();
+const dateTimeFormatter = new Intl.DateTimeFormat(appLocale, {
     year: "numeric",
     month: "short",
     day: "numeric",
     hour: "numeric",
     minute: "2-digit",
+    timeZone: appTimeZone,
 });
-const browserDateTimeFormatOptions = browserDateTimeFormatter.resolvedOptions();
-const BROWSER_LOCALE = browserDateTimeFormatOptions.locale;
-const BROWSER_HOUR_CYCLE: 12 | 24 =
-    browserDateTimeFormatOptions.hour12 === true ? 12 : 24;
-const ENDPOINT_CAPACITY_SAMPLE = new Date(2028, 0, 28, 23, 58);
+const dateTimeFormatOptions = dateTimeFormatter.resolvedOptions();
+const monthFormatter = new Intl.DateTimeFormat(appLocale, { month: "short" });
+const APP_HOUR_CYCLE: 12 | 24 = dateTimeFormatOptions.hour12 === true ? 12 : 24;
+const toAbsoluteDate = (
+    year: number,
+    month: number,
+    day: number,
+    hour = 0,
+    minute = 0,
+    second = 0,
+    millisecond = 0,
+): Date =>
+    createDateInTimeZone(
+        appTimeZone,
+        year,
+        month,
+        day,
+        hour,
+        minute,
+        second,
+        millisecond,
+    );
+
+const ENDPOINT_CAPACITY_SAMPLE = toAbsoluteDate(2028, 1, 28, 23, 58);
 
 interface KeyedDateTimePart {
     key: string;
@@ -54,7 +76,7 @@ interface KeyedDateTimePart {
 
 const getKeyedDateTimeParts = (date: Date): KeyedDateTimePart[] => {
     const occurrences = new Map<string, number>();
-    return browserDateTimeFormatter.formatToParts(date).map((part) => {
+    return dateTimeFormatter.formatToParts(date).map((part) => {
         const occurrence = occurrences.get(part.type) ?? 0;
         occurrences.set(part.type, occurrence + 1);
         return {
@@ -69,7 +91,7 @@ const buildEndpointCapacity = (): Map<string, string[]> => {
     for (let month = 0; month < 12; month += 1) {
         for (let day = 1; day <= 28; day += 27) {
             for (let hour = 0; hour < 24; hour += 1) {
-                const sample = new Date(2028, month, day, hour, 58);
+                const sample = toAbsoluteDate(2028, month + 1, day, hour, 58);
                 for (const part of getKeyedDateTimeParts(sample)) {
                     const candidates =
                         values.get(part.key) ?? new Set<string>();
@@ -87,6 +109,7 @@ const buildEndpointCapacity = (): Map<string, string[]> => {
 const ENDPOINT_CAPACITY = buildEndpointCapacity();
 
 interface TimeRangeFilterProps {
+    compact?: boolean;
     value: TimeRangeValue;
     customRange: CustomTimeRange;
     onCustomRangeChange: (value: CustomTimeRange) => void;
@@ -94,6 +117,7 @@ interface TimeRangeFilterProps {
 }
 
 interface CustomRangePickerProps {
+    compact?: boolean;
     initialRange: CustomTimeRange;
     onChange: (value: CustomTimeRange) => void;
 }
@@ -141,9 +165,28 @@ const RangeEndpoint = ({ date }: { date?: Date }): JSX.Element => {
     );
 };
 
-const RangeLabel = ({ range }: { range: CustomTimeRange }): JSX.Element => {
+const RangeLabel = ({
+    range,
+    compact = false,
+}: {
+    range: CustomTimeRange;
+    compact?: boolean;
+}): JSX.Element => {
     if (!range.start) {
         return <>Pick range</>;
+    }
+    if (compact) {
+        const formatter = new Intl.DateTimeFormat(appLocale, {
+            dateStyle: "medium",
+            timeZone: appTimeZone,
+        });
+        return (
+            <span>
+                {range.end
+                    ? formatter.formatRange(range.start, range.end)
+                    : formatter.format(range.start)}
+            </span>
+        );
     }
     return (
         <span
@@ -158,23 +201,33 @@ const RangeLabel = ({ range }: { range: CustomTimeRange }): JSX.Element => {
 };
 
 const getDefaultCustomRange = (): { start: Date; end: Date } => {
-    const end = new Date();
-    end.setHours(23, 59, 59, 999);
-    const start = new Date(end);
-    start.setDate(end.getDate() - 29);
-    start.setHours(0, 0, 0, 0);
+    const now = fromDate(new Date(), appTimeZone);
+    const end = toAbsoluteDate(now.year, now.month, now.day, 23, 59, 59, 999);
+    const startDay = new CalendarDateTime(
+        now.year,
+        now.month,
+        now.day,
+    ).subtract({ days: 29 });
+    const start = toAbsoluteDate(startDay.year, startDay.month, startDay.day);
     return { start, end };
 };
 
+const toCalendarDisplayDate = (date: Date): Date => {
+    const zoned = fromDate(date, appTimeZone);
+    return new Date(zoned.year, zoned.month - 1, zoned.day);
+};
+
 const withDate = (date: Date, timeSource: Date, isEnd: boolean): Date => {
-    const result = new Date(date);
-    result.setHours(
-        timeSource.getHours(),
-        timeSource.getMinutes(),
+    const zonedTime = fromDate(timeSource, appTimeZone);
+    return toAbsoluteDate(
+        date.getFullYear(),
+        date.getMonth() + 1,
+        date.getDate(),
+        zonedTime.hour,
+        zonedTime.minute,
         isEnd ? 59 : 0,
         isEnd ? 999 : 0,
     );
-    return result;
 };
 
 const ensureOrderedRange = (
@@ -292,27 +345,32 @@ const TimeBoundaryInput = ({
     onChange,
     onCommit,
 }: TimeBoundaryInputProps): JSX.Element => {
-    const value = date ? new Time(date.getHours(), date.getMinutes()) : null;
+    const zonedDate = date ? fromDate(date, appTimeZone) : undefined;
+    const value = zonedDate ? new Time(zonedDate.hour, zonedDate.minute) : null;
 
     return (
-        <I18nProvider locale={BROWSER_LOCALE}>
+        <I18nProvider locale={appLocale}>
             <TimeField
                 className="flex flex-1 flex-col gap-2"
                 granularity="minute"
-                hourCycle={BROWSER_HOUR_CYCLE}
+                hourCycle={APP_HOUR_CYCLE}
                 isDisabled={!date}
                 onChange={(time) => {
                     if (!date || !time) {
                         return;
                     }
-                    const nextDate = new Date(date);
-                    nextDate.setHours(
-                        time.hour,
-                        time.minute,
-                        isEnd ? 59 : 0,
-                        isEnd ? 999 : 0,
+                    const zoned = fromDate(date, appTimeZone);
+                    onChange(
+                        toAbsoluteDate(
+                            zoned.year,
+                            zoned.month,
+                            zoned.day,
+                            time.hour,
+                            time.minute,
+                            isEnd ? 59 : 0,
+                            isEnd ? 999 : 0,
+                        ),
                     );
-                    onChange(nextDate);
                 }}
                 value={value}
             >
@@ -335,6 +393,7 @@ const TimeBoundaryInput = ({
 const CustomRangePicker = ({
     initialRange,
     onChange,
+    compact,
 }: CustomRangePickerProps): JSX.Element => {
     const [draftRange, setDraftRange] = useState(initialRange);
     const [open, setOpen] = useState(false);
@@ -360,12 +419,17 @@ const CustomRangePicker = ({
     };
 
     const selectedRange = draftRange.start
-        ? { from: draftRange.start, to: draftRange.end }
+        ? {
+              from: toCalendarDisplayDate(draftRange.start),
+              to: draftRange.end
+                  ? toCalendarDisplayDate(draftRange.end)
+                  : undefined,
+          }
         : undefined;
     const triggerLabel = draftRange.start
-        ? `Select custom range: ${browserDateTimeFormatter.format(
+        ? `Select custom range: ${dateTimeFormatter.format(
               draftRange.start,
-          )} – ${draftRange.end ? browserDateTimeFormatter.format(draftRange.end) : "not selected"}`
+          )} – ${draftRange.end ? dateTimeFormatter.format(draftRange.end) : "not selected"}`
         : "Pick custom range";
 
     return (
@@ -389,7 +453,10 @@ const CustomRangePicker = ({
                         variant="outline"
                     >
                         <CalendarIcon data-icon="inline-start" />
-                        <RangeLabel range={draftRange} />
+                        <RangeLabel
+                            compact={compact}
+                            range={draftRange}
+                        />
                     </Button>
                 }
             />
@@ -400,6 +467,10 @@ const CustomRangePicker = ({
                 <Calendar
                     autoFocus
                     captionLayout="dropdown"
+                    formatters={{
+                        formatMonthDropdown: (date) =>
+                            monthFormatter.format(date),
+                    }}
                     mode="range"
                     numberOfMonths={1}
                     onSelect={(range) => {
@@ -460,6 +531,7 @@ const CustomRangePicker = ({
 };
 
 export const TimeRangeFilter = ({
+    compact,
     value,
     customRange,
     onCustomRangeChange,
@@ -508,6 +580,7 @@ export const TimeRangeFilter = ({
             </Select>
             {value === "custom" && (
                 <CustomRangePicker
+                    compact={compact}
                     initialRange={customRange}
                     onChange={onCustomRangeChange}
                 />

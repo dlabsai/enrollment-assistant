@@ -35,12 +35,14 @@ interface FeedbackListResponse {
 
 interface FeedbackBaseParams {
     search?: string;
+    excludeDraft?: boolean;
     platform?: "internal" | "public";
     userEmail?: string;
     userGroup?: "staff" | "devs";
     rating?: Rating;
     sortBy?: string;
     descending?: boolean;
+    endBefore?: string;
     timeRange: TimeRangeValue;
     customRange: CustomTimeRange;
 }
@@ -51,15 +53,18 @@ interface FeedbackListParams extends FeedbackBaseParams {
 }
 
 interface FeedbackExportParams extends FeedbackBaseParams {
+    locale: string;
     messageUrlBase: string;
-    browserTimeZone: string;
-    browserLocale: string;
+    timeZone: string;
 }
 
 const appendFeedbackListQueryParams = (
     query: URLSearchParams,
     params: FeedbackBaseParams,
 ): void => {
+    if (params.excludeDraft === true) {
+        query.set("exclude_draft", "true");
+    }
     if (params.platform !== undefined) {
         query.set("platform", params.platform);
     }
@@ -90,12 +95,16 @@ const appendFeedbackListQueryParams = (
     if (timeRangeParams.start !== undefined) {
         query.set("start", timeRangeParams.start);
     }
-    if (timeRangeParams.end !== undefined) {
+    if (params.timeRange === "custom" && params.endBefore !== undefined) {
+        query.set("end_before", params.endBefore);
+    } else if (timeRangeParams.end !== undefined) {
         query.set("end", timeRangeParams.end);
     }
 };
 
-const buildFeedbackListQuery = (params: FeedbackListParams): URLSearchParams => {
+const buildFeedbackListQuery = (
+    params: FeedbackListParams,
+): URLSearchParams => {
     const query = new URLSearchParams();
     query.set("limit", String(params.limit));
     query.set("offset", String(params.offset));
@@ -103,17 +112,19 @@ const buildFeedbackListQuery = (params: FeedbackListParams): URLSearchParams => 
     return query;
 };
 
-const buildFeedbackExportQuery = (params: FeedbackExportParams): URLSearchParams => {
+const buildFeedbackExportQuery = (
+    params: FeedbackExportParams,
+): URLSearchParams => {
     const query = new URLSearchParams();
     appendFeedbackListQueryParams(query, params);
     query.set("message_url_base", params.messageUrlBase);
-    query.set("browser_time_zone", params.browserTimeZone);
-    query.set("browser_locale", params.browserLocale);
+    query.set("browser_time_zone", params.timeZone);
+    query.set("browser_locale", params.locale);
     return query;
 };
 
 export const fetchFeedbackListPage = async (
-    api: AuthenticatedApi,
+    api: Pick<AuthenticatedApi, "get">,
     params: FeedbackListParams,
 ): Promise<FeedbackListPage> => {
     const query = buildFeedbackListQuery(params);
@@ -145,7 +156,7 @@ export const fetchFeedbackListPage = async (
 };
 
 export const fetchFeedbackExport = async (
-    api: AuthenticatedApi,
+    api: Pick<AuthenticatedApi, "getBlob">,
     params: FeedbackExportParams,
 ): Promise<ApiBlobResponse> => {
     const query = buildFeedbackExportQuery(params);

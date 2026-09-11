@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { describe, it } from "node:test";
+import { describe, it } from "vitest";
 
 import {
     buildModelRoleMap,
@@ -25,6 +25,9 @@ const report: EvalReportDetail = {
     caseCount: 2,
     runCount: 2,
     isInternal: true,
+    passRateAverage: 0.5,
+    durationMedianAverage: 1.25,
+    totalCost: 0.01,
     config: {},
     additionalSettings: {},
     modelConfigs: {

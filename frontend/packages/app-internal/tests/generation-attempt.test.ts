@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
-import { describe, it } from "node:test";
+
+import { describe, it } from "vitest";
 
 import {
     type GenerationAttemptRecord,
     reconcileGenerationAttempt,
-} from "../src/chat/lib/generation-attempt.ts";
-import type { ChatDetailResponse } from "../src/chat/types/index.ts";
+} from "../src/chat/lib/generation-attempt";
+import type { ChatDetailResponse } from "../src/chat/types";
 
 const attempt = (
     status: GenerationAttemptRecord["status"],

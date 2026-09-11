@@ -1,3 +1,4 @@
+from datetime import UTC, datetime, timedelta
 from io import BytesIO
 from uuid import uuid4
 
@@ -14,7 +15,7 @@ from app.core.rbac import (
 )
 from app.core.security import get_password_hash
 from app.main import app
-from app.models import Conversation, Message, User
+from app.models import Conversation, Message, MessageFeedback, User
 from app.models import Rating as MessageRating
 from tests.api.auth_helpers import authenticate_client
 
@@ -72,6 +73,10 @@ async def test_message_feedback_routes_support_create_update_list_and_delete(
         transport=ASGITransport(app=app), base_url="http://testserver"
     ) as owner_client:
         authenticate_client(owner_client, owner.id)
+        invalid_role_response = await owner_client.post(
+            f"/api/conversations/messages/{user_message.id}/feedback",
+            json={"rating": MessageRating.THUMBS_UP.value, "text": "Invalid target"},
+        )
         create_response = await owner_client.post(
             f"/api/conversations/messages/{assistant_message.id}/feedback",
             json={"rating": MessageRating.THUMBS_UP.value, "text": "Helpful"},
@@ -85,6 +90,8 @@ async def test_message_feedback_routes_support_create_update_list_and_delete(
         )
         owner_detail_response = await owner_client.get(f"/api/conversations/{conversation.id}")
 
+    assert invalid_role_response.status_code == 400
+    assert invalid_role_response.json() == {"detail": "Feedback requires an assistant message"}
     assert create_response.status_code == 200
     created_feedback = create_response.json()
     assert created_feedback["rating"] == MessageRating.THUMBS_UP.value
@@ -180,6 +187,127 @@ async def test_message_feedback_routes_support_create_update_list_and_delete(
     assert delete_response.status_code == 204
     assert feedback_after_delete_response.status_code == 200
     assert feedback_after_delete_response.json() == []
+
+
+@pytest.mark.asyncio
+async def test_feedback_list_and_export_filter_by_feedback_creation_time(
+    transactional_session: AsyncSession,
+) -> None:
+    owner = await _create_user(
+        transactional_session, group_slug=SystemGroupSlug.USER, email_prefix="feedback-time-owner"
+    )
+    reviewer = await _create_user(
+        transactional_session, group_slug=SystemGroupSlug.DEV, email_prefix="feedback-time-reviewer"
+    )
+    response_at = datetime(2026, 7, 1, 12, tzinfo=UTC)
+    feedback_at = response_at + timedelta(days=10)
+    conversation = Conversation(
+        title="Feedback creation time",
+        user=False,
+        project="demo",
+        user_id=owner.id,
+        is_public=False,
+    )
+    assistant_message = Message(
+        role="assistant",
+        content="Rated response",
+        conversation=conversation,
+        created_at=response_at,
+        updated_at=response_at,
+    )
+    feedback = MessageFeedback(
+        message=assistant_message,
+        user_id=reviewer.id,
+        rating=MessageRating.THUMBS_UP,
+        created_at=feedback_at,
+        updated_at=feedback_at,
+    )
+    draft_conversation = Conversation(
+        title="Draft feedback creation time",
+        user=False,
+        project="demo",
+        user_id=owner.id,
+        is_public=False,
+        prompt_source="draft",
+    )
+    draft_message = Message(
+        role="assistant",
+        content="Draft rated response",
+        conversation=draft_conversation,
+        created_at=response_at,
+        updated_at=response_at,
+    )
+    draft_feedback = MessageFeedback(
+        message=draft_message,
+        user_id=reviewer.id,
+        rating=MessageRating.THUMBS_DOWN,
+        created_at=feedback_at,
+        updated_at=feedback_at,
+    )
+    user_message = Message(
+        role="user",
+        content="Unsupported feedback target",
+        conversation=conversation,
+        created_at=response_at,
+        updated_at=response_at,
+    )
+    user_feedback = MessageFeedback(
+        message=user_message,
+        user_id=reviewer.id,
+        rating=MessageRating.THUMBS_DOWN,
+        created_at=feedback_at,
+        updated_at=feedback_at,
+    )
+    transactional_session.add_all(
+        [
+            conversation,
+            assistant_message,
+            feedback,
+            draft_conversation,
+            draft_message,
+            draft_feedback,
+            user_message,
+            user_feedback,
+        ]
+    )
+    await transactional_session.commit()
+
+    response_window = {
+        "start": (response_at - timedelta(hours=1)).isoformat(),
+        "end": (response_at + timedelta(hours=1)).isoformat(),
+    }
+    feedback_window = {
+        "start": (feedback_at - timedelta(hours=1)).isoformat(),
+        "end": (feedback_at + timedelta(hours=1)).isoformat(),
+    }
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://testserver"
+    ) as client:
+        authenticate_client(client, reviewer.id)
+        response_time_response = await client.get("/api/feedback", params=response_window)
+        feedback_time_response = await client.get("/api/feedback", params=feedback_window)
+        quality_scope_response = await client.get(
+            "/api/feedback", params={**feedback_window, "exclude_draft": True}
+        )
+        quality_scope_export = await client.get(
+            "/api/feedback/export", params={**feedback_window, "exclude_draft": True}
+        )
+
+    assert response_time_response.status_code == 200
+    assert response_time_response.json()["total"] == 0
+    assert feedback_time_response.status_code == 200
+    assert feedback_time_response.json()["total"] == 2
+    assert quality_scope_response.status_code == 200
+    assert quality_scope_response.json()["total"] == 1
+    assert quality_scope_response.json()["items"][0]["id"] == str(feedback.id)
+    assert quality_scope_export.status_code == 200
+    workbook = load_workbook(BytesIO(quality_scope_export.content), read_only=True)
+    worksheet = workbook.active
+    assert worksheet is not None
+    rows = list(worksheet.iter_rows(values_only=True))
+    assert len(rows) == 2
+    assert rows[1][3] == "Rated response"
+    workbook.close()
 
 
 @pytest.mark.asyncio

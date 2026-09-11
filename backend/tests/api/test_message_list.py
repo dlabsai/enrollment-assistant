@@ -8,7 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.rbac import SystemGroupSlug, get_group_for_slug
 from app.core.security import get_password_hash
 from app.main import app
-from app.models import Conversation, Message, OtelSpan, User
+from app.models import AssistantMessageMetadata, Conversation, Message, OtelSpan, User
 from tests.api.auth_helpers import authenticate_client
 
 
@@ -82,6 +82,7 @@ async def test_message_list_returns_latest_trace_diagnostics(
         role="assistant",
         content="No trace",
         conversation=conversation,
+        guardrails_blocked=True,
         created_at=now - timedelta(seconds=1),
     )
     message = Message(
@@ -92,6 +93,20 @@ async def test_message_list_returns_latest_trace_diagnostics(
 
     transactional_session.add_all(
         [
+            AssistantMessageMetadata(
+                message=message_without_trace,
+                system_prompt_rendered="System",
+                conversation_turn=1,
+                chatbot_model_settings={"model": "azure/test"},
+                guardrail_retry_count=0,
+            ),
+            AssistantMessageMetadata(
+                message=message,
+                system_prompt_rendered="System",
+                conversation_turn=2,
+                chatbot_model_settings={"model": "azure/test"},
+                guardrail_retry_count=2,
+            ),
             _span(
                 trace_id="older-trace",
                 span_id="older-span",
@@ -175,9 +190,110 @@ async def test_message_list_returns_latest_trace_diagnostics(
     assert item["output_tokens"] == 3
     assert item["response_cost"] == pytest.approx(0.15)
     assert item["guardrail_failure_count"] == 1
+    assert item["guardrail_retry_count"] == 2
 
     assert cost_sorted_response.status_code == 200
     assert [item["id"] for item in cost_sorted_response.json()["items"]] == [
         str(message.id),
         str(message_without_trace.id),
     ]
+
+
+@pytest.mark.asyncio
+async def test_message_list_filters_and_sorts_guardrail_outcomes(
+    transactional_session: AsyncSession,
+) -> None:
+    group = await get_group_for_slug(transactional_session, SystemGroupSlug.DEV)
+    reviewer = User(
+        email=f"message-guardrails-{uuid4()}@example.com",
+        name="Guardrail reviewer",
+        password_hash=get_password_hash("StrongPassword123"),
+        is_active=True,
+        group_id=group.id,
+    )
+    transactional_session.add(reviewer)
+    await transactional_session.flush()
+    conversation = Conversation(
+        title="Guardrail outcomes",
+        user=False,
+        project="postuni",
+        user_id=reviewer.id,
+        is_public=False,
+    )
+    clean = Message(role="assistant", content="Clean", conversation=conversation)
+    blocked = Message(
+        role="assistant", content="Blocked", conversation=conversation, guardrails_blocked=True
+    )
+    retried = Message(role="assistant", content="Retried", conversation=conversation)
+    transactional_session.add_all([conversation, clean, blocked, retried])
+    await transactional_session.flush()
+    transactional_session.add_all(
+        [
+            AssistantMessageMetadata(
+                message=clean,
+                system_prompt_rendered="System",
+                conversation_turn=1,
+                chatbot_model_settings={"model": "azure/test"},
+                guardrail_retry_count=0,
+                total_time=1,
+            ),
+            AssistantMessageMetadata(
+                message=blocked,
+                system_prompt_rendered="System",
+                conversation_turn=2,
+                chatbot_model_settings={"model": "azure/test"},
+                guardrail_retry_count=1,
+                total_time=2,
+            ),
+            AssistantMessageMetadata(
+                message=retried,
+                system_prompt_rendered="System",
+                conversation_turn=3,
+                chatbot_model_settings={"model": "azure/test"},
+                guardrail_retry_count=2,
+                total_time=3,
+            ),
+        ]
+    )
+    await transactional_session.commit()
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://testserver"
+    ) as client:
+        authenticate_client(client, reviewer.id)
+        retried_response = await client.get("/api/messages", params={"guardrail_status": "retried"})
+        blocked_response = await client.get("/api/messages", params={"guardrail_status": "blocked"})
+        sorted_response = await client.get(
+            "/api/messages", params={"sort_by": "guardrail_retry_count", "descending": True}
+        )
+        duration_response = await client.get(
+            "/api/messages", params={"min_generation_time_ms": 1500, "max_generation_time_ms": 3000}
+        )
+        duration_sorted_response = await client.get(
+            "/api/messages", params={"sort_by": "generation_time_ms", "descending": True}
+        )
+        invalid_duration_response = await client.get(
+            "/api/messages", params={"min_generation_time_ms": 3000, "max_generation_time_ms": 3000}
+        )
+
+    assert retried_response.status_code == 200
+    assert [item["id"] for item in retried_response.json()["items"]] == [
+        str(retried.id),
+        str(blocked.id),
+    ]
+    assert blocked_response.status_code == 200
+    assert [item["id"] for item in blocked_response.json()["items"]] == [str(blocked.id)]
+    assert sorted_response.status_code == 200
+    assert [item["id"] for item in sorted_response.json()["items"]] == [
+        str(retried.id),
+        str(blocked.id),
+        str(clean.id),
+    ]
+    assert duration_response.status_code == 200
+    assert [item["id"] for item in duration_response.json()["items"]] == [str(blocked.id)]
+    assert [item["id"] for item in duration_sorted_response.json()["items"]] == [
+        str(retried.id),
+        str(blocked.id),
+        str(clean.id),
+    ]
+    assert invalid_duration_response.status_code == 400

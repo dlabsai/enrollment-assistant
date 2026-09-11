@@ -16,9 +16,9 @@ from sqlalchemy.orm import aliased
 from app.api.deps import CurrentUser, SessionDep
 from app.api.excel_export import (
     XLSX_MEDIA_TYPE,
-    BrowserDateTimeFormatter,
     ExcelExportCell,
     ExcelExportWorkbook,
+    ExportDateTimeFormatter,
     excel_safe_text,
 )
 from app.api.routes.owner_group_filter import (
@@ -26,6 +26,7 @@ from app.api.routes.owner_group_filter import (
     build_owner_group_filter,
     validate_exclusive_user_filters,
 )
+from app.api.routes.time_filters import AwareTimestamp, validate_time_range
 from app.core.rbac import (
     PermissionKey,
     get_allowed_chat_owner_group_slugs,
@@ -158,11 +159,14 @@ def _build_feedback_base_stmt(
     platform: Literal["internal", "public"] | None,
     rating: MessageRating | None,
     search: str | None,
+    exclude_draft: bool,
     user_email: str | None,
     user_group: OwnerGroup | None,
     start: datetime | None,
     end: datetime | None,
+    end_before: datetime | None,
 ) -> Any:
+    validate_time_range(start, end, end_before)
     include_internal, include_public = _get_platform_scope(current_user, platform)
     internal_visibility_condition = _internal_visibility_condition(
         current_user, permission_map=permission_map
@@ -207,7 +211,11 @@ def _build_feedback_base_stmt(
         platform_conditions.append(Conversation.is_public.is_(True))
     if platform_conditions:
         base_stmt = base_stmt.where(or_(*platform_conditions))
-    base_stmt = base_stmt.where(Conversation.kind == "chat")
+    base_stmt = base_stmt.where(Conversation.kind == "chat", Message.role == "assistant")
+    if exclude_draft:
+        base_stmt = base_stmt.where(
+            or_(Conversation.prompt_source.is_(None), Conversation.prompt_source != "draft")
+        )
 
     if rating is not None:
         base_stmt = base_stmt.where(MessageFeedback.rating == rating)
@@ -215,6 +223,8 @@ def _build_feedback_base_stmt(
         base_stmt = base_stmt.where(MessageFeedback.created_at >= start)
     if end is not None:
         base_stmt = base_stmt.where(MessageFeedback.created_at <= end)
+    if end_before is not None:
+        base_stmt = base_stmt.where(MessageFeedback.created_at < end_before)
     if search is not None and search.strip() != "":
         pattern = f"%{search.strip()}%"
         base_stmt = base_stmt.where(
@@ -327,14 +337,10 @@ def _build_feedback_workbook(
     items: list[FeedbackQueryItem],
     *,
     message_url_base: str,
-    browser_time_zone: str,
-    browser_locale: str,
+    timestamp_formatter: ExportDateTimeFormatter,
 ) -> bytes:
     workbook = ExcelExportWorkbook(
         sheet_title="Feedback", headers=_EXPORT_HEADERS, column_widths=_EXPORT_COLUMN_WIDTHS
-    )
-    timestamp_formatter = BrowserDateTimeFormatter.resolve(
-        time_zone=browser_time_zone, locale=browser_locale
     )
 
     for item in items:
@@ -360,9 +366,9 @@ def _build_feedback_workbook(
     return buffer.getvalue()
 
 
-def _feedback_export_filename() -> str:
-    date = datetime.now(UTC).date().isoformat()
-    return f"feedback-{date}.xlsx"
+def _feedback_export_filename(timestamp_formatter: ExportDateTimeFormatter) -> str:
+    export_date = timestamp_formatter.format_date(datetime.now(UTC))
+    return f"feedback-{export_date}.xlsx"
 
 
 @router.get("/export")
@@ -372,10 +378,12 @@ async def export_feedback(
     platform: Annotated[Literal["internal", "public"] | None, Query()] = None,
     rating: Annotated[MessageRating | None, Query()] = None,
     search: Annotated[str | None, Query()] = None,
+    exclude_draft: Annotated[bool, Query()] = False,
     user_email: Annotated[str | None, Query()] = None,
     user_group: Annotated[OwnerGroup | None, Query()] = None,
-    start: Annotated[datetime | None, Query()] = None,
-    end: Annotated[datetime | None, Query()] = None,
+    start: Annotated[AwareTimestamp | None, Query()] = None,
+    end: Annotated[AwareTimestamp | None, Query()] = None,
+    end_before: Annotated[AwareTimestamp | None, Query()] = None,
     sort_by: Annotated[str, Query()] = "created_at",
     descending: Annotated[bool, Query()] = True,
     message_url_base: Annotated[str, Query()] = "",
@@ -389,21 +397,23 @@ async def export_feedback(
         platform=platform,
         rating=rating,
         search=search,
+        exclude_draft=exclude_draft,
         user_email=user_email,
         user_group=user_group,
         start=start,
         end=end,
+        end_before=end_before,
     )
     stmt = _sort_feedback_stmt(base_stmt, sort_by=sort_by, descending=descending)
     rows = (await session.execute(stmt)).all()
     items = [_row_to_feedback_query_item(row) for row in rows]
-    workbook = _build_feedback_workbook(
-        items,
-        message_url_base=message_url_base,
-        browser_time_zone=browser_time_zone,
-        browser_locale=browser_locale,
+    timestamp_formatter = ExportDateTimeFormatter.resolve(
+        time_zone=browser_time_zone, locale=browser_locale
     )
-    filename = _feedback_export_filename()
+    workbook = _build_feedback_workbook(
+        items, message_url_base=message_url_base, timestamp_formatter=timestamp_formatter
+    )
+    filename = _feedback_export_filename(timestamp_formatter)
 
     return StreamingResponse(
         BytesIO(workbook),
@@ -419,10 +429,12 @@ async def list_feedback(
     platform: Annotated[Literal["internal", "public"] | None, Query()] = None,
     rating: Annotated[MessageRating | None, Query()] = None,
     search: Annotated[str | None, Query()] = None,
+    exclude_draft: Annotated[bool, Query()] = False,
     user_email: Annotated[str | None, Query()] = None,
     user_group: Annotated[OwnerGroup | None, Query()] = None,
-    start: Annotated[datetime | None, Query()] = None,
-    end: Annotated[datetime | None, Query()] = None,
+    start: Annotated[AwareTimestamp | None, Query()] = None,
+    end: Annotated[AwareTimestamp | None, Query()] = None,
+    end_before: Annotated[AwareTimestamp | None, Query()] = None,
     limit: Annotated[int, Query(ge=1, le=100)] = 20,
     offset: Annotated[int, Query(ge=0)] = 0,
     sort_by: Annotated[str, Query()] = "created_at",
@@ -435,10 +447,12 @@ async def list_feedback(
         platform=platform,
         rating=rating,
         search=search,
+        exclude_draft=exclude_draft,
         user_email=user_email,
         user_group=user_group,
         start=start,
         end=end,
+        end_before=end_before,
     )
 
     filtered_ids_stmt = base_stmt.with_only_columns(MessageFeedback.id, maintain_column_froms=True)

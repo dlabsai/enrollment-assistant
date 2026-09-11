@@ -1,12 +1,13 @@
 import assert from "node:assert/strict";
-import { describe, it } from "node:test";
+
+import { describe, it } from "vitest";
 
 import {
     convertConversationTree,
     createLatestRequestCoordinator,
     hasConversationBranches,
     hasMessageBranchAlternatives,
-} from "../src/chat/lib/conversation-tree.ts";
+} from "../src/chat/lib/conversation-tree";
 
 describe("conversation tree projection", () => {
     it("preserves ordered roots, children, and the canonical path", () => {

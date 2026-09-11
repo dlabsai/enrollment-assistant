@@ -1,26 +1,27 @@
 import assert from "node:assert/strict";
-import { describe, it } from "node:test";
+
+import { describe, it } from "vitest";
 
 import {
-    readRagOperationStream,
     type RagOperationLogEntry,
     type RagOperationProgressEvent,
     type RagOperationStatusEvent,
     type RagOperationStreamCallbacks,
-} from "../src/rag/lib/operation-stream.ts";
+    readRagOperationStream,
+} from "../src/rag/lib/operation-stream";
 
 const emptyCallbacks = (): RagOperationStreamCallbacks => ({
-    onError: () => undefined,
-    onLog: () => undefined,
-    onProgress: () => undefined,
-    onStatus: () => undefined,
+    onError: (): void => undefined,
+    onLog: (): void => undefined,
+    onProgress: (): void => undefined,
+    onStatus: (): void => undefined,
 });
 
 const createStreamingResponse = (chunks: string[]): Response => {
     const encoder = new TextEncoder();
     return new Response(
         new ReadableStream<Uint8Array>({
-            start: (controller) => {
+            start: (controller): void => {
                 for (const chunk of chunks) {
                     controller.enqueue(encoder.encode(chunk));
                 }
@@ -37,10 +38,18 @@ describe("readRagOperationStream", () => {
         const errors: string[] = [];
         const progressEvents: RagOperationProgressEvent[] = [];
         const callbacks: RagOperationStreamCallbacks = {
-            onError: (message) => errors.push(message),
-            onLog: (entry) => logs.push(entry),
-            onProgress: (progress) => progressEvents.push(progress),
-            onStatus: (status) => statuses.push(status),
+            onError: (message): void => {
+                errors.push(message);
+            },
+            onLog: (entry): void => {
+                logs.push(entry);
+            },
+            onProgress: (progress): void => {
+                progressEvents.push(progress);
+            },
+            onStatus: (status): void => {
+                statuses.push(status);
+            },
         };
         const body = [
             'event: status\r\ndata: {"status":"start"}\r\n\r\n',

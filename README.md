@@ -31,16 +31,18 @@ Built by [DLabs.AI](https://dlabs.ai).
 - Guardrails feedback loop: check the draft answer, send feedback back to the chatbot when it fails, retry, then store and show the final approved or blocked response.
 - Canned blocked response when guardrails reject all retries, while preserving the raw blocked response for diagnostics.
 - Assistant-message guardrails icon and modal showing failed attempts, guardrails feedback, invalid URLs, and blocked status.
+- Compliance Screenings for manual and nightly transcript review against immutable institution-owned instructions, with message-linked AI flags, complete request-time Chat context, and revisioned Confirm/Dismiss decisions. AI results are review aids, not legal judgments or certification.
 - Knowledge base with website, catalog, and internal training-material content.
 - Public chat excludes internal training materials.
 - Knowledge-base viewer with phrase search, full-text search, similarity search, chunks, and tree views.
 - Knowledge-base build controls for incremental builds, force rebuilds, live progress, logs, resume, cancellation, and copying the runtime knowledge base into the eval database.
 - Knowledge-base build jobs with status and trigger filters, source statistics, and new, changed, and deleted document details.
 - Knowledge-base controls for content visibility, folder views, and exclusion audit events.
-- Chat analytics with platform and user filters, preset and minute-precision custom time ranges, conversation volume, message volume, chat length, response time, and messages-by-hour charts.
+- Chat analytics with platform and user filters, adaptive time buckets, conversation and user-turn volume, turn-count distributions, hour-of-day activity, and permission-aware drill-down into exact Chats/Messages scopes.
+- Quality dashboard for persisted response-time Responsiveness, submitted feedback, guardrail retries and blocks, and known durable generation failures, with exact permission-aware review drill-downs.
 - Adoption dashboard with daily and rolling 30-day active users, average daily users, DAU/MAU stickiness, and time and user filters.
 - Public widget analytics with lead totals and leads over time charts.
-- Usage dashboard for model calls, embeddings, tokens, latency, cost, model breakdowns, platform, model, and user filters, and recent traces.
+- Usage dashboard for model calls, embeddings, tokens, latency, cost, adaptive trends, model breakdowns, platform/model/user filters, and recent traces.
 - OpenTelemetry trace storage using GenAI semantic conventions, with optional OTLP export to compatible observability backends.
 - Privacy-safe database request spans with aggregate pool-wait, connection-hold, SQL-count, error, and timing metrics, without SQL text or bind values.
 - Trace browser for chat turns, chatbot, guardrails, grounding, eval judges, helper-model calls, tool calls, knowledge-base lookups, URL guardrails, eval case runs and results, knowledge-base builds, embedding batches, assistant instructions, inputs, outputs, tokens, total and rolled-up costs, and eval outcomes, with raw span details, compact debug summaries, durations, relative offsets, and span timeline visualization.
@@ -51,7 +53,8 @@ Built by [DLabs.AI](https://dlabs.ai).
 - Eval trace browser linked from report runs.
 - Separate database for eval and test artifacts.
 - User, admin, and dev groups with fine-grained page and action permissions and per-user overrides.
-- Optional Teams SSO.
+- Optional Teams SSO and disabled-by-default browser Microsoft SSO; password registration is independently configurable.
+- Developer Browser/Eastern regional-formatting preference applied consistently to dates, ranges, numbers, currency, analytics, and exports.
 - Application settings overrides for institution details and the canned guardrails blocked response.
 - Configurable model list and per-agent defaults, output-token limits, reasoning effort, and Azure Standard or Priority processing tiers.
 - Internal chat model selector with saved model favorites and presets.
@@ -62,7 +65,8 @@ Built by [DLabs.AI](https://dlabs.ai).
 
 The internal app uses user, admin, and dev groups, plus per-user overrides, to control:
 
-- Page access for Chats, Investigations, Messages, Instructions editor, Traces, KB Builder, KB Viewer, KB Controls, Access Controls, Usage, Chat Analytics, Adoption, Public Analytics, Evals, and Settings.
+- Page access for Chats, Investigations, Messages, Compliance Screenings, Instructions editor, Traces, KB Builder, KB Viewer, KB Controls, Access Controls, Usage, Chat Analytics/Quality, Adoption, Public Analytics, Evals, and Settings.
+- Compliance instruction editing separately from screening/review access; both reuse existing Chats owner scopes and default to developers.
 - Chat actions and diagnostics, including regenerate, activity timeline, trace links, model selection, generation timing tooltip, assistant-message sources, tool details, per-response cost, and guardrails-failure details.
 - Review scope for conversations owned by the current user, admissions employees, admins, and devs.
 - Chats review diagnostics, including trace links and the cost column.

@@ -1,14 +1,12 @@
 import assert from "node:assert/strict";
-import { describe, it } from "node:test";
+
+import { describe, it } from "vitest";
 
 import {
     createMessageRetryRequest,
     trimMessagesToMessageId,
-} from "../src/chat/lib/message-retry.ts";
-import type {
-    Message,
-    ModelOverrides,
-} from "../src/chat/types/index.ts";
+} from "../src/chat/lib/message-retry";
+import type { Message, ModelOverrides } from "../src/chat/types";
 
 describe("message retry", () => {
     it("snapshots all authoring options for an exact regeneration retry", () => {

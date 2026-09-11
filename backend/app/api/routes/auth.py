@@ -1,11 +1,14 @@
 import secrets
 from typing import Any, Literal
+from urllib.parse import urlsplit
 
 from fastapi import APIRouter, HTTPException, Request, Response, status
+from fastapi.responses import RedirectResponse
 from sqlalchemy import func, select
 
 from app.api.deps import CurrentUser, SessionDep, enforce_trusted_cookie_auth_request
 from app.api.schemas import (
+    AuthConfigOut,
     AuthSessionOut,
     TeamsSsoLogin,
     UserCreate,
@@ -14,6 +17,19 @@ from app.api.schemas import (
     UserOut,
 )
 from app.core.config import settings
+from app.core.entra_identity import EntraIdentity
+from app.core.microsoft_auth_flows import (
+    InvalidMicrosoftAuthFlowError,
+    consume_microsoft_auth_flow,
+    store_microsoft_auth_flow,
+)
+from app.core.microsoft_browser_sso import (
+    MicrosoftBrowserSsoAuthenticationError,
+    MicrosoftBrowserSsoConfigurationError,
+    MicrosoftBrowserSsoUnavailableError,
+    complete_microsoft_browser_sso,
+    initiate_microsoft_browser_sso,
+)
 from app.core.rbac import SystemGroupSlug, get_effective_permission_map, get_group_for_slug
 from app.core.refresh_tokens import create_refresh_token, revoke_refresh_token, rotate_refresh_token
 from app.core.security import (
@@ -22,12 +38,16 @@ from app.core.security import (
     validate_password_strength,
     verify_and_update_password,
 )
-from app.core.teams_sso import TeamsSsoIdentity, validate_teams_sso_token
+from app.core.teams_sso import validate_teams_sso_token
 from app.models import RbacGroup, User
+from app.utils import logger
 
 router = APIRouter(prefix="/auth", tags=["authentication"])
 
 _AUTH_COOKIE_NAMES = (settings.ACCESS_TOKEN_COOKIE_NAME, settings.REFRESH_TOKEN_COOKIE_NAME)
+_MICROSOFT_AUTH_COOKIE_PATH = f"{settings.API_STR}/auth/microsoft"
+_MICROSOFT_AUTH_ERROR_PATH = "/?auth_error=microsoft_sso"
+_MAX_AUTH_RETURN_PATH_LENGTH = 2048
 
 
 def _get_client_ip(request: Request) -> str:
@@ -51,6 +71,21 @@ def _get_refresh_cookie_secure() -> bool:
 
 def _normalize_email(email: str) -> str:
     return email.strip().lower()
+
+
+def _browser_sso_email_is_allowed(email: str) -> bool:
+    _, separator, domain = _normalize_email(email).rpartition("@")
+    return (
+        separator != ""
+        and domain.casefold() == settings.BROWSER_SSO_ALLOWED_EMAIL_DOMAIN.strip().casefold()
+    )
+
+
+def _ensure_browser_sso_email_is_allowed(email: str) -> None:
+    if not _browser_sso_email_is_allowed(email):
+        raise MicrosoftBrowserSsoAuthenticationError(
+            "Microsoft identity does not use an allowed email domain"
+        )
 
 
 def _get_cookie_samesite() -> Literal["lax", "strict", "none"]:
@@ -117,6 +152,68 @@ def _clear_access_cookie(response: Response) -> None:
     )
 
 
+def _set_microsoft_auth_flow_cookie(response: Response, browser_binding: str) -> None:
+    response.set_cookie(
+        key=settings.BROWSER_SSO_FLOW_COOKIE_NAME,
+        value=browser_binding,
+        httponly=True,
+        secure=_get_cookie_secure(),
+        samesite="lax",
+        max_age=settings.BROWSER_SSO_FLOW_EXPIRE_MINUTES * 60,
+        path=_MICROSOFT_AUTH_COOKIE_PATH,
+    )
+
+
+def _clear_microsoft_auth_flow_cookie(response: Response) -> None:
+    response.delete_cookie(
+        key=settings.BROWSER_SSO_FLOW_COOKIE_NAME,
+        path=_MICROSOFT_AUTH_COOKIE_PATH,
+        httponly=True,
+        secure=_get_cookie_secure(),
+        samesite="lax",
+    )
+
+
+def _normalize_return_path(return_path: str) -> str:
+    parsed = urlsplit(return_path)
+    if (
+        len(return_path) > _MAX_AUTH_RETURN_PATH_LENGTH
+        or not return_path.startswith("/")
+        or return_path.startswith("//")
+        or "\\" in return_path
+        or not return_path.isprintable()
+        or parsed.scheme != ""
+        or parsed.netloc != ""
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid authentication return path"
+        )
+    return return_path
+
+
+def _frontend_url(path: str) -> str:
+    if settings.ENVIRONMENT != "local":
+        return path
+    return f"{settings.FRONTEND_HOST.rstrip('/')}{path}"
+
+
+def _read_microsoft_auth_uri(flow: dict[str, Any]) -> str:
+    auth_uri = flow.get("auth_uri")
+    if not isinstance(auth_uri, str) or auth_uri == "":
+        raise MicrosoftBrowserSsoUnavailableError(
+            "Microsoft returned an incomplete browser auth flow"
+        )
+    return auth_uri
+
+
+def _microsoft_auth_error_response() -> RedirectResponse:
+    response = RedirectResponse(
+        url=_frontend_url(_MICROSOFT_AUTH_ERROR_PATH), status_code=status.HTTP_302_FOUND
+    )
+    _clear_microsoft_auth_flow_cookie(response)
+    return response
+
+
 def _determine_group_slug(registration_token: str) -> SystemGroupSlug:
     token_to_role: list[tuple[str, SystemGroupSlug]] = []
 
@@ -152,8 +249,8 @@ async def _create_authenticated_response(
     return AuthSessionOut()
 
 
-async def _get_user_by_teams_identity(
-    *, identity: TeamsSsoIdentity, session: SessionDep
+async def _get_user_by_entra_identity(
+    *, identity: EntraIdentity, session: SessionDep
 ) -> User | None:
     return await session.scalar(
         select(User).where(
@@ -190,9 +287,9 @@ async def _build_user_out(session: SessionDep, user: User) -> UserOut:
     )
 
 
-async def _sync_teams_sso_user(*, identity: TeamsSsoIdentity, session: SessionDep) -> User:
+async def _sync_entra_sso_user(*, identity: EntraIdentity, session: SessionDep) -> User:
     normalized_identity_email = _normalize_email(identity.email)
-    user = await _get_user_by_teams_identity(identity=identity, session=session)
+    user = await _get_user_by_entra_identity(identity=identity, session=session)
     if user is None:
         email_user = await _get_user_by_email(email=identity.email, session=session)
         if email_user is not None:
@@ -204,7 +301,7 @@ async def _sync_teams_sso_user(*, identity: TeamsSsoIdentity, session: SessionDe
             else:
                 raise HTTPException(
                     status_code=status.HTTP_409_CONFLICT,
-                    detail="Teams SSO email is already linked to another user",
+                    detail="Microsoft SSO email is already linked to another user",
                 )
 
     if user is not None and not user.is_active:
@@ -233,7 +330,7 @@ async def _sync_teams_sso_user(*, identity: TeamsSsoIdentity, session: SessionDe
             if conflicting_email_owner is not None:
                 raise HTTPException(
                     status_code=status.HTTP_409_CONFLICT,
-                    detail="Teams SSO email is already linked to another user",
+                    detail="Microsoft SSO email is already linked to another user",
                 )
 
         user.email = normalized_identity_email
@@ -250,10 +347,105 @@ async def _sync_teams_sso_user(*, identity: TeamsSsoIdentity, session: SessionDe
     return user
 
 
+@router.get("/config", response_model=AuthConfigOut)
+async def get_auth_config() -> AuthConfigOut:
+    return AuthConfigOut(
+        browser_microsoft_sso_enabled=settings.BROWSER_SSO_ENABLED,
+        password_registration_enabled=settings.PASSWORD_REGISTRATION_ENABLED,
+    )
+
+
+@router.get("/microsoft/start")
+async def start_microsoft_browser_sso(session: SessionDep, return_to: str = "/") -> Response:
+    if not settings.BROWSER_SSO_ENABLED:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Browser Microsoft sign in is not enabled",
+        )
+
+    normalized_return_path = _normalize_return_path(return_to)
+    try:
+        flow = await initiate_microsoft_browser_sso()
+        auth_uri = _read_microsoft_auth_uri(flow)
+        browser_binding = await store_microsoft_auth_flow(
+            session, flow=flow, return_path=normalized_return_path
+        )
+    except MicrosoftBrowserSsoConfigurationError as exc:
+        logger.error("Browser Microsoft SSO start failed: %s", exc)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Browser Microsoft sign in is not configured",
+        ) from exc
+    except MicrosoftBrowserSsoUnavailableError as exc:
+        logger.error("Browser Microsoft SSO start failed: %s", exc)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Browser Microsoft sign in is temporarily unavailable",
+        ) from exc
+    except Exception as exc:
+        logger.exception("Unexpected browser Microsoft SSO start failure")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Browser Microsoft sign in is temporarily unavailable",
+        ) from exc
+
+    redirect = RedirectResponse(url=auth_uri, status_code=status.HTTP_302_FOUND)
+    _set_microsoft_auth_flow_cookie(redirect, browser_binding)
+    return redirect
+
+
+@router.get("/microsoft/callback")
+async def complete_microsoft_browser_sso_callback(
+    session: SessionDep, request: Request
+) -> Response:
+    state = request.query_params.get("state")
+    browser_binding = request.cookies.get(settings.BROWSER_SSO_FLOW_COOKIE_NAME)
+    if not state or not browser_binding:
+        logger.warning("Browser Microsoft SSO callback is missing state or browser binding")
+        return _microsoft_auth_error_response()
+
+    try:
+        stored_flow = await consume_microsoft_auth_flow(
+            session, state=state, browser_binding=browser_binding
+        )
+        identity = await complete_microsoft_browser_sso(
+            flow=stored_flow.flow, auth_response=dict(request.query_params.items())
+        )
+        _ensure_browser_sso_email_is_allowed(identity.email)
+        user = await _sync_entra_sso_user(identity=identity, session=session)
+        redirect = RedirectResponse(
+            url=_frontend_url(stored_flow.return_path), status_code=status.HTTP_302_FOUND
+        )
+        _clear_microsoft_auth_flow_cookie(redirect)
+        await _create_authenticated_response(
+            user=user, session=session, request=request, response=redirect
+        )
+    except (
+        InvalidMicrosoftAuthFlowError,
+        MicrosoftBrowserSsoAuthenticationError,
+        MicrosoftBrowserSsoConfigurationError,
+        MicrosoftBrowserSsoUnavailableError,
+        HTTPException,
+    ) as exc:
+        reason = str(exc) or type(exc).__name__
+        logger.warning("Browser Microsoft SSO callback rejected: %s", reason)
+        return _microsoft_auth_error_response()
+    except Exception:
+        logger.exception("Unexpected browser Microsoft SSO callback failure")
+        return _microsoft_auth_error_response()
+
+    return redirect
+
+
 @router.post("/register", response_model=AuthSessionOut)
 async def register_user(
     user_data: UserCreate, session: SessionDep, request: Request, response: Response
 ) -> Any:
+    if not settings.PASSWORD_REGISTRATION_ENABLED:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN, detail="Password registration is not enabled"
+        )
+
     normalized_email = _normalize_email(user_data.email)
 
     if user_data.password != user_data.confirm_password:
@@ -332,7 +524,7 @@ async def login_user_with_teams_sso(
     payload: TeamsSsoLogin, session: SessionDep, request: Request, response: Response
 ) -> AuthSessionOut:
     identity = await validate_teams_sso_token(payload.token)
-    user = await _sync_teams_sso_user(identity=identity, session=session)
+    user = await _sync_entra_sso_user(identity=identity, session=session)
     return await _create_authenticated_response(
         user=user, session=session, request=request, response=response
     )
@@ -374,6 +566,7 @@ async def logout_user(session: SessionDep, request: Request, response: Response)
         await revoke_refresh_token(session, refresh_token)
     _clear_access_cookie(response)
     _clear_refresh_cookie(response)
+    _clear_microsoft_auth_flow_cookie(response)
     return {"success": True}
 
 

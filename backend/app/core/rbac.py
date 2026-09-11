@@ -24,6 +24,8 @@ class PermissionKey(StrEnum):
     ACCESS_CHATS = "access_chats"
     ACCESS_INVESTIGATIONS = "access_investigations"
     ACCESS_MESSAGES = "access_messages"
+    ACCESS_COMPLIANCE = "access_compliance"
+    EDIT_COMPLIANCE_INSTRUCTIONS = "edit_compliance_instructions"
     ACCESS_INSTRUCTIONS = "access_instructions"
     ACCESS_TRACES = "access_traces"
     ACCESS_RAG = "access_rag"
@@ -62,6 +64,21 @@ class PermissionDefinition:
 
 
 PERMISSION_DEFINITIONS: tuple[PermissionDefinition, ...] = (
+    PermissionDefinition(
+        key=PermissionKey.ACCESS_COMPLIANCE,
+        label="Screenings page",
+        description="Start screenings and review flags within allowed Chat-owner scope.",
+        category="pages",
+    ),
+    PermissionDefinition(
+        key=PermissionKey.EDIT_COMPLIANCE_INSTRUCTIONS,
+        label="Screenings: edit instructions",
+        description=(
+            "Save and restore compliance instructions. "
+            "Delegate to the designated instruction owner."
+        ),
+        category="screenings",
+    ),
     PermissionDefinition(
         key=PermissionKey.ACCESS_CHATS,
         label="Chats page",
@@ -300,6 +317,8 @@ DEFAULT_GROUP_PERMISSIONS: dict[SystemGroupSlug, frozenset[PermissionKey]] = {
             PermissionKey.ACCESS_CHATS,
             PermissionKey.ACCESS_INVESTIGATIONS,
             PermissionKey.ACCESS_MESSAGES,
+            PermissionKey.ACCESS_COMPLIANCE,
+            PermissionKey.EDIT_COMPLIANCE_INSTRUCTIONS,
             PermissionKey.ACCESS_INSTRUCTIONS,
             PermissionKey.ACCESS_TRACES,
             PermissionKey.ACCESS_RAG,

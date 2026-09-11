@@ -31,6 +31,7 @@ dependencies = [
     "tiktoken",
     "joserfc",
     "openpyxl",
+    "msal>=1.38.0",
 ]
 
 [build-system]

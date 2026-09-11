@@ -1,5 +1,5 @@
 import type { ConversationTreeResponse, Message } from "../types";
-import type { ConversationDetailSource } from "./api.ts";
+import type { ConversationDetailSource } from "./api";
 
 export const CONVERSATION_BRANCH_LOAD_ERROR =
     "Conversation branches could not be loaded.";
@@ -10,8 +10,7 @@ export type ReviewConversationDetailSource = Extract<
 >;
 
 type LatestRequestResult<T> =
-    | { status: "current"; value: T }
-    | { status: "stale" };
+    { status: "current"; value: T } | { status: "stale" };
 
 export interface LatestRequestCoordinator {
     invalidate: () => void;

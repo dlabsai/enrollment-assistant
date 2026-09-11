@@ -70,6 +70,11 @@ class AuthSessionOut(BaseModel):
     success: bool = True
 
 
+class AuthConfigOut(BaseModel):
+    browser_microsoft_sso_enabled: bool
+    password_registration_enabled: bool
+
+
 class GlobalFeedbackItem(BaseModel):
     id: UUID
     type: str

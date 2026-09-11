@@ -187,12 +187,24 @@ zip -r ../deploy.zip . -x "*.pyc" -x "__pycache__/*" -x ".git/*"
 
 echo "=== Deploying to Azure Web App ==="
 
-# Enable build automation during deployment
-az webapp config appsettings set \
+# Enable build automation only when needed. App Service configuration writes
+# recycle the worker even when the value is unchanged.
+SCM_BUILD_SETTING="$(az webapp config appsettings list \
     --resource-group "$RESOURCE_GROUP" \
     --name "$WEBAPP_NAME" \
-    --settings SCM_DO_BUILD_DURING_DEPLOYMENT=1 \
-    --output none
+    --query "[?name=='SCM_DO_BUILD_DURING_DEPLOYMENT'].value | [0]" \
+    --output tsv)"
+SCM_BUILD_SETTING_NORMALIZED="$(printf '%s' "$SCM_BUILD_SETTING" | tr '[:upper:]' '[:lower:]')"
+if [ "$SCM_BUILD_SETTING_NORMALIZED" = "1" ] || [ "$SCM_BUILD_SETTING_NORMALIZED" = "true" ]; then
+    echo "=== Build Automation Already Enabled ==="
+else
+    echo "=== Enabling Build Automation ==="
+    az webapp config appsettings set \
+        --resource-group "$RESOURCE_GROUP" \
+        --name "$WEBAPP_NAME" \
+        --settings SCM_DO_BUILD_DURING_DEPLOYMENT=1 \
+        --output none
+fi
 
 # Deploy with clean=true to remove old files
 az webapp deploy \
@@ -202,11 +214,21 @@ az webapp deploy \
     --type zip \
     # --clean true
 
-echo "=== Setting Startup Command ==="
-az webapp config set \
+STARTUP_COMMAND="$(az webapp config show \
     --resource-group "$RESOURCE_GROUP" \
     --name "$WEBAPP_NAME" \
-    --startup-file "startup.sh"
+    --query appCommandLine \
+    --output tsv)"
+if [ "$STARTUP_COMMAND" = "startup.sh" ]; then
+    echo "=== Startup Command Already Configured ==="
+else
+    echo "=== Setting Startup Command ==="
+    az webapp config set \
+        --resource-group "$RESOURCE_GROUP" \
+        --name "$WEBAPP_NAME" \
+        --startup-file "startup.sh" \
+        --output none
+fi
 
 echo "=== Deployment Complete ==="
 

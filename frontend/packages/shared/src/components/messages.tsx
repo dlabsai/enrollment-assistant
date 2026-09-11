@@ -421,11 +421,6 @@ export const Messages = ({
                         (emptyStateContent ?? <WelcomeMessage />)}
                     {messages.map((message) => (
                         <div
-                            className={cn(
-                                "rounded-xl transition-[background-color,box-shadow] duration-700",
-                                flashMessageId === message.id &&
-                                    "bg-yellow-100/70 shadow-[0_0_0_2px_rgba(250,204,21,0.65)] dark:bg-yellow-950/40",
-                            )}
                             key={message.id}
                             ref={(element) => {
                                 setMessageRef(message.id, element);
@@ -452,6 +447,9 @@ export const Messages = ({
                                 }
                                 highlightPhrase={highlightPhrase}
                                 highlightQuery={highlightQuery}
+                                isFocusHighlighted={
+                                    flashMessageId === message.id
+                                }
                                 isPlayingTTS={playingMessageId === message.id}
                                 message={message}
                                 onPlayTTS={onPlayTTS}

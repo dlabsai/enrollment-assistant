@@ -1,5 +1,5 @@
-import { formatTableTimestamp } from "../../lib/date-format.ts";
-import { formatLocaleNumber } from "../../lib/number-format.ts";
+import { formatTableTimestamp } from "../../lib/date-format";
+import { formatLocaleNumber } from "../../lib/number-format";
 import type { TraceSpan } from "../types";
 
 interface SpanNode {
@@ -365,7 +365,9 @@ const normalizeMessageParts = (value: unknown): TraceMessagePart[] => {
             };
         }
         const type = typeof part.type === "string" ? part.type : "unknown";
-        const functionData = isRecord(part.function) ? part.function : undefined;
+        const functionData = isRecord(part.function)
+            ? part.function
+            : undefined;
         const contentValue =
             part.content ??
             part.text ??
@@ -495,7 +497,11 @@ const extractToolCallAttributes = (
     } = attributes;
     const callName = getStringAttribute(attributes, "gen_ai.tool.call.name");
     const toolName = getStringAttribute(attributes, "gen_ai.tool.name");
-    if (callName !== undefined || toolName !== undefined || callArguments !== undefined) {
+    if (
+        callName !== undefined ||
+        toolName !== undefined ||
+        callArguments !== undefined
+    ) {
         calls.push({
             name: callName ?? toolName ?? "tool",
             arguments: stringifyValue(parseJsonValue(callArguments ?? {})),
@@ -535,7 +541,11 @@ const extractDetailedToolCallAttributes = (
     const callName = getStringAttribute(attributes, "gen_ai.tool.call.name");
     const toolName = getStringAttribute(attributes, "gen_ai.tool.name");
     const callId = getStringAttribute(attributes, "gen_ai.tool.call.id");
-    if (callName !== undefined || toolName !== undefined || callArguments !== undefined) {
+    if (
+        callName !== undefined ||
+        toolName !== undefined ||
+        callArguments !== undefined
+    ) {
         calls.push({
             id: callId,
             name: callName ?? toolName ?? "tool",
@@ -573,7 +583,8 @@ const extractAppChatToolInputAttributes = (
     }
     return [
         {
-            name: getStringAttribute(attributes, "app.chat.tool.name") ?? "tool",
+            name:
+                getStringAttribute(attributes, "app.chat.tool.name") ?? "tool",
             arguments: stringifyValue(parseJsonValue(input)),
         },
     ];
@@ -588,7 +599,8 @@ const extractAppChatToolResultAttributes = (
     }
     return [
         {
-            name: getStringAttribute(attributes, "app.chat.tool.name") ?? "tool",
+            name:
+                getStringAttribute(attributes, "app.chat.tool.name") ?? "tool",
             result: stringifyValue(parseJsonValue(result)),
         },
     ];
@@ -643,8 +655,8 @@ const normalizeMessages = (value: unknown): unknown[] => {
                     if (!isRecord(choice)) {
                         return choice;
                     }
-                    const {message} = choice;
-                    const {delta} = choice;
+                    const { message } = choice;
+                    const { delta } = choice;
                     return message ?? delta ?? choice;
                 })
                 .filter((choice) => choice !== undefined);
@@ -948,7 +960,7 @@ export const extractRequestMessages = (
 
 export const extractResponseMessages = (
     attributes: Record<string, unknown>,
-): { role: string; content: string }[] =>
+): TraceMessage[] =>
     firstNonEmpty([
         extractMessages(attributes, "gen_ai.response.messages"),
         extractMessages(attributes, "gen_ai.output.messages"),

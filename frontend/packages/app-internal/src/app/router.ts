@@ -15,15 +15,27 @@ import {
     InvestigationDetailPage,
     InvestigationsPage,
 } from "../chats/components/chats-page";
+import { validateChatsSearch } from "../chats/lib/search-state";
+import {
+    ComplianceFlagPage,
+    ComplianceHomePage,
+    ComplianceInstructionsPage,
+    CompliancePage,
+    ComplianceScreeningPage,
+} from "../compliance/components/compliance-page";
+import { validateComplianceSearch } from "../compliance/lib/presentation";
 import { EvalCasesPage } from "../evals/components/eval-cases-page";
 import { EvalsPage } from "../evals/components/evals-page";
 import { EvalsReportsPage } from "../evals/components/evals-reports-page";
 import { validateEvalCasesSearch } from "../evals/lib/case-search-state";
 import { validateEvalReportsSearch } from "../evals/lib/reports-search-state";
 import { FeedbackPage } from "../feedback/components/feedback-page";
+import { validateFeedbackSearch } from "../feedback/lib/search-state";
 import { InstructionsPage } from "../instructions/components/instructions-page";
 import { MessagesPage } from "../messages/components/messages-page";
+import { validateMessagesSearch } from "../messages/lib/search-state";
 import { PublicAnalyticsPage } from "../public-analytics/components/public-analytics-page";
+import { QualityPage } from "../quality/components/quality-page";
 import { RagPage } from "../rag/components/rag-page";
 import { RagExclusionsPage } from "../rag-exclusions/components/rag-exclusions-page";
 import { validateRagExclusionsSearch } from "../rag-exclusions/lib/search-state";
@@ -73,6 +85,9 @@ const redirectToView = (view: AppView): ReturnType<typeof redirect> => {
                 to: "/messages",
             });
         }
+        case "compliance": {
+            return redirect({ to: "/compliance" });
+        }
         case "feedback": {
             return redirect({
                 to: "/feedback",
@@ -115,6 +130,11 @@ const redirectToView = (view: AppView): ReturnType<typeof redirect> => {
         case "analytics": {
             return redirect({
                 to: "/analytics",
+            });
+        }
+        case "quality": {
+            return redirect({
+                to: "/quality",
             });
         }
         case "adoption": {
@@ -229,9 +249,7 @@ const ChatRouteEntry = createRoute({
 const ChatsRoute = createRoute({
     getParentRoute: () => RootRoute,
     path: "/chats",
-    validateSearch: (search) => ({
-        chat: typeof search.chat === "string" ? search.chat : undefined,
-    }),
+    validateSearch: validateChatsSearch,
     component: ChatsPage,
 });
 
@@ -248,17 +266,54 @@ const ChatDetailRoute = createRoute({
 const MessagesRoute = createRoute({
     getParentRoute: () => RootRoute,
     path: "/messages",
+    validateSearch: validateMessagesSearch,
     component: MessagesPage,
 });
+
+const ComplianceRoute = createRoute({
+    getParentRoute: () => RootRoute,
+    path: "/compliance",
+    validateSearch: () => ({}),
+    component: CompliancePage,
+});
+
+const ComplianceHomeRoute = createRoute({
+    getParentRoute: () => ComplianceRoute,
+    path: "/",
+    component: ComplianceHomePage,
+});
+
+const ComplianceInstructionsRoute = createRoute({
+    getParentRoute: () => ComplianceRoute,
+    path: "/instructions",
+    component: ComplianceInstructionsPage,
+});
+
+const ComplianceScreeningRoute = createRoute({
+    getParentRoute: () => ComplianceRoute,
+    path: "/screenings/$screeningId",
+    validateSearch: validateComplianceSearch,
+    component: ComplianceScreeningPage,
+});
+
+const ComplianceFlagRoute = createRoute({
+    getParentRoute: () => ComplianceRoute,
+    path: "/screenings/$screeningId/flags/$flagId",
+    validateSearch: validateComplianceSearch,
+    component: ComplianceFlagPage,
+});
+
+const ComplianceRouteTree = ComplianceRoute.addChildren([
+    ComplianceHomeRoute,
+    ComplianceInstructionsRoute,
+    ComplianceScreeningRoute,
+    ComplianceFlagRoute,
+]);
 
 const FeedbackRoute = createRoute({
     getParentRoute: () => RootRoute,
     path: "/feedback",
-    validateSearch: (search) => ({
-        chat: typeof search.chat === "string" ? search.chat : undefined,
-        message:
-            typeof search.message === "string" ? search.message : undefined,
-    }),
+    validateSearch: validateFeedbackSearch,
     component: FeedbackPage,
 });
 
@@ -325,6 +380,12 @@ const AnalyticsRoute = createRoute({
     getParentRoute: () => RootRoute,
     path: "/analytics",
     component: AnalyticsPage,
+});
+
+const QualityRoute = createRoute({
+    getParentRoute: () => RootRoute,
+    path: "/quality",
+    component: QualityPage,
 });
 
 const AdoptionRoute = createRoute({
@@ -438,6 +499,7 @@ const routeTree = RootRoute.addChildren([
     ChatsRoute,
     ChatDetailRoute,
     MessagesRoute,
+    ComplianceRouteTree,
     FeedbackRoute,
     InvestigateRoute,
     InvestigationsRoute,
@@ -446,6 +508,7 @@ const routeTree = RootRoute.addChildren([
     TracesRoute,
     TraceDetailRoute,
     AnalyticsRoute,
+    QualityRoute,
     AdoptionRoute,
     PublicAnalyticsRoute,
     EvalsRoute,

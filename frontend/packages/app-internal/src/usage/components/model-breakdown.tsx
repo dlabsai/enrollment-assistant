@@ -9,6 +9,7 @@ import type { JSX } from "react";
 import { Bar, BarChart, CartesianGrid, XAxis, YAxis } from "recharts";
 
 import {
+    ChartCategoryCursor,
     type ChartConfig,
     ChartContainer,
     ChartTooltip,
@@ -46,6 +47,7 @@ export const ModelBreakdown = ({ data }: ModelBreakdownProps): JSX.Element => {
                     config={chartConfig}
                 >
                     <BarChart
+                        accessibilityLayer
                         data={chartData}
                         layout="vertical"
                     >
@@ -59,20 +61,25 @@ export const ModelBreakdown = ({ data }: ModelBreakdownProps): JSX.Element => {
                             width={200}
                         />
                         <XAxis
+                            allowDecimals={false}
                             axisLine={false}
                             tickFormatter={(value: number) =>
                                 formatLocaleNumber(value)
                             }
                             tickLine={false}
+                            tickMargin={8}
                             type="number"
                         />
                         <ChartTooltip
                             content={<ChartTooltipContent />}
-                            cursor={false}
+                            cursor={
+                                <ChartCategoryCursor direction="horizontal" />
+                            }
                         />
                         <Bar
                             dataKey="requests"
                             fill="var(--color-requests)"
+                            isAnimationActive={false}
                             radius={4}
                         />
                     </BarChart>

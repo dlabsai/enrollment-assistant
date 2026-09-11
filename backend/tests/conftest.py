@@ -29,7 +29,7 @@ for _source, _target in _PYTEST_POSTGRES_ENV_MAP.items():
 import pytest
 import pytest_asyncio
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from app.evals.rag_data import create_session_factory
 from app.evals.test_db import (
@@ -57,7 +57,7 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         "--rebuild-rag",
         action="store_true",
         default=False,
-        help="Force rebuild of RAG data (expensive - calls embedding API)",
+        help="Force RAG rebuild for tests using rag_db_engine (expensive - calls embedding API)",
     )
     parser.addoption(
         "--repeat",
@@ -115,18 +115,6 @@ def pytest_addoption(parser: pytest.Parser) -> None:
     )
 
 
-def pytest_configure(config: pytest.Config) -> None:
-    """Migrate the configured guarded test database."""
-    from app.core.config import settings
-
-    run_test_db_migrations(str(settings.SQLALCHEMY_DATABASE_URI))
-
-
-def pytest_unconfigure(config: pytest.Config) -> None:
-    """Pytest shutdown hook."""
-    del config
-
-
 @pytest_asyncio.fixture(autouse=True)
 async def close_process_provider_clients_after_test() -> AsyncGenerator[None]:
     """Keep process-local provider clients inside the event loop of the test that used them."""
@@ -139,34 +127,36 @@ async def close_process_provider_clients_after_test() -> AsyncGenerator[None]:
 
 
 @pytest_asyncio.fixture(scope="session")
-async def db_engine(request: pytest.FixtureRequest):
-    """Create the database engine and tables once per test session.
-
-    Uses the external test database selected in `pytest_configure`.
-    If --rebuild-rag is passed, will rebuild RAG data (expensive).
-    """
+async def db_engine() -> AsyncGenerator[AsyncEngine]:
+    """Migrate and initialize the guarded test database for DB-backed tests."""
     global _test_engine, _test_session_factory  # noqa: PLW0603
 
     from app.core.config import settings
 
-    _test_engine = create_test_db_engine(str(settings.SQLALCHEMY_DATABASE_URI))
+    database_url = str(settings.SQLALCHEMY_DATABASE_URI)
+    run_test_db_migrations(database_url)
+    _test_engine = create_test_db_engine(database_url)
     _test_session_factory = create_session_factory(_test_engine)
 
     await initialize_test_db_schema(_test_engine)
-
-    # Check if RAG data needs to be populated
-    rebuild_rag = cast(bool, request.config.getoption("--rebuild-rag", default=False))
-    stats = await ensure_test_db_rag_data(_test_engine, rebuild_rag=rebuild_rag)
-    status = "RAG data rebuilt/populated" if rebuild_rag else "RAG data ready"
-    print(f"\n✅ {status}: {stats['total_documents']} documents, {stats['total_chunks']} chunks")
 
     yield _test_engine
 
     await _test_engine.dispose()
 
 
+@pytest_asyncio.fixture(scope="session")
+async def rag_db_engine(db_engine: AsyncEngine, request: pytest.FixtureRequest) -> AsyncEngine:
+    """Populate persistent RAG data only for tests that explicitly require it."""
+    rebuild_rag = cast(bool, request.config.getoption("--rebuild-rag", default=False))
+    stats = await ensure_test_db_rag_data(db_engine, rebuild_rag=rebuild_rag)
+    status = "RAG data rebuilt/populated" if rebuild_rag else "RAG data ready"
+    print(f"\n✅ {status}: {stats['total_documents']} documents, {stats['total_chunks']} chunks")
+    return db_engine
+
+
 @pytest_asyncio.fixture
-async def session(db_engine: object) -> AsyncGenerator[AsyncSession]:
+async def session(db_engine: AsyncEngine) -> AsyncGenerator[AsyncSession]:
     """Create a test database session with transaction rollback.
 
     Each test gets its own transaction that is rolled back after the test completes,
@@ -192,7 +182,7 @@ async def session(db_engine: object) -> AsyncGenerator[AsyncSession]:
 
 
 @pytest_asyncio.fixture
-async def transactional_session(db_engine: object) -> AsyncGenerator[AsyncSession]:
+async def transactional_session(db_engine: AsyncEngine) -> AsyncGenerator[AsyncSession]:
     """Create a transactional test session that rolls back all test changes."""
     from app.api.deps import get_db_session
     from app.main import app

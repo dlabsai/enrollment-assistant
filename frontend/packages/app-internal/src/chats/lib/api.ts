@@ -6,7 +6,11 @@ import {
     getTimeRangeQueryParams,
     type TimeRangeValue,
 } from "../../lib/time-range";
-import type { ChatListPage, ChatUserOption } from "../types";
+import type {
+    ChatAnalyticsFilter,
+    ChatListPage,
+    ChatUserOption,
+} from "../types";
 
 const CHATS_BASE = "/conversations";
 
@@ -71,6 +75,7 @@ interface ChatBaseParams {
     userGroup?: "staff" | "devs";
     sortBy?: string;
     descending?: boolean;
+    analyticsFilter?: ChatAnalyticsFilter;
     timeRange: TimeRangeValue;
     customRange: CustomTimeRange;
 }
@@ -83,8 +88,8 @@ interface ChatListParams extends ChatBaseParams {
 
 interface ChatExportParams extends ChatBaseParams {
     chatUrlBase: string;
-    browserTimeZone: string;
-    browserLocale: string;
+    locale: string;
+    timeZone: string;
 }
 
 const appendChatBaseQueryParams = (
@@ -113,6 +118,25 @@ const appendChatBaseQueryParams = (
         query.set("descending", String(params.descending));
     }
 
+    if (params.analyticsFilter !== undefined) {
+        if (params.analyticsFilter.minTurns !== undefined) {
+            query.set("min_turns", String(params.analyticsFilter.minTurns));
+        }
+        if (params.analyticsFilter.maxTurns !== undefined) {
+            query.set("max_turns", String(params.analyticsFilter.maxTurns));
+        }
+        if (params.analyticsFilter.start !== undefined) {
+            query.set("analytics_start", params.analyticsFilter.start);
+        }
+        if (params.analyticsFilter.end !== undefined) {
+            query.set("analytics_end", params.analyticsFilter.end);
+        }
+        if (params.analyticsFilter.endBefore !== undefined) {
+            query.set("analytics_end_before", params.analyticsFilter.endBefore);
+        }
+        return;
+    }
+
     const timeRangeParams = getTimeRangeQueryParams(
         params.timeRange,
         new Date(),
@@ -127,7 +151,7 @@ const appendChatBaseQueryParams = (
 };
 
 export const fetchChatListPage = async (
-    api: AuthenticatedApi,
+    api: Pick<AuthenticatedApi, "get">,
     params: ChatListParams,
 ): Promise<ChatListPage> => {
     const query = new URLSearchParams();
@@ -165,14 +189,14 @@ export const fetchChatListPage = async (
 };
 
 export const fetchChatsExport = async (
-    api: AuthenticatedApi,
+    api: Pick<AuthenticatedApi, "getBlob">,
     params: ChatExportParams,
 ): Promise<ApiBlobResponse> => {
     const query = new URLSearchParams();
     appendChatBaseQueryParams(query, params);
     query.set("chat_url_base", params.chatUrlBase);
-    query.set("browser_time_zone", params.browserTimeZone);
-    query.set("browser_locale", params.browserLocale);
+    query.set("browser_time_zone", params.timeZone);
+    query.set("browser_locale", params.locale);
     return api.getBlob(`${CHATS_BASE}/export?${query.toString()}`, {
         headers: { Accept: "application/zip" },
     });

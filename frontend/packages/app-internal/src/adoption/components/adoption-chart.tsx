@@ -15,31 +15,24 @@ import {
     ChartTooltipContent,
 } from "@/components/ui/chart";
 
-import type { AdoptionDaily } from "../types";
+import {
+    formatTimeSeriesTick,
+    formatTimeSeriesTooltipLabel,
+    type TimeGranularity,
+} from "../../lib/time-series";
+import type { AdoptionTimeSeriesPoint } from "../types";
 
 interface AdoptionChartProps {
-    data: AdoptionDaily[];
-    metric: "daily_active_users" | "monthly_active_users";
+    data: AdoptionTimeSeriesPoint[];
+    granularity: TimeGranularity;
+    metric: "active_users" | "monthly_active_users";
     title: string;
     description: string;
 }
 
-const tickFormatter = new Intl.DateTimeFormat(undefined, {
-    month: "short",
-    day: "numeric",
-});
-const tooltipFormatter = new Intl.DateTimeFormat(undefined, {
-    year: "numeric",
-    month: "short",
-    day: "numeric",
-});
-
-const parseAdoptionDate = (value: string): Date =>
-    new Date(`${value}T00:00:00`);
-
 const chartConfig = {
-    daily_active_users: {
-        label: "Daily active users",
+    active_users: {
+        label: "Active users",
         color: "var(--chart-1)",
     },
     monthly_active_users: {
@@ -53,10 +46,12 @@ export const AdoptionChart = ({
     metric,
     title,
     description,
+    granularity,
 }: AdoptionChartProps): JSX.Element => {
     const gradientId =
-        metric === "daily_active_users" ? "fillAdoptionDaily" : "fillAdoptionMonthly";
-
+        metric === "active_users"
+            ? "fillAdoptionActive"
+            : "fillAdoptionMonthly";
     return (
         <Card className="@container/card">
             <CardHeader>
@@ -92,10 +87,10 @@ export const AdoptionChart = ({
                         <CartesianGrid vertical={false} />
                         <XAxis
                             axisLine={false}
-                            dataKey="date"
+                            dataKey="bucket_start"
                             minTickGap={32}
                             tickFormatter={(value: string) =>
-                                tickFormatter.format(parseAdoptionDate(value))
+                                formatTimeSeriesTick(value, granularity)
                             }
                             tickLine={false}
                             tickMargin={8}
@@ -110,23 +105,21 @@ export const AdoptionChart = ({
                         <ChartTooltip
                             content={
                                 <ChartTooltipContent
-                                    indicator="dot"
+                                    indicator="line"
                                     labelFormatter={(value) =>
-                                        typeof value === "string"
-                                            ? tooltipFormatter.format(
-                                                  parseAdoptionDate(value),
-                                              )
-                                            : ""
+                                        formatTimeSeriesTooltipLabel(
+                                            value,
+                                            granularity,
+                                        )
                                     }
                                 />
                             }
-                            cursor={false}
                         />
                         <Area
                             dataKey={metric}
                             fill={`url(#${gradientId})`}
+                            isAnimationActive={false}
                             stroke={`var(--color-${metric})`}
-                            type="natural"
                         />
                     </AreaChart>
                 </ChartContainer>

@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 
-import { formatUsdCost } from "../src/lib/number-format.ts";
+import { test } from "vitest";
+
+import { formatUsdCost } from "../src/lib/number-format";
 
 const formatFixed = (value: number, fractionDigits: number): string =>
     value.toLocaleString(undefined, {

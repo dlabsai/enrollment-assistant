@@ -19,6 +19,7 @@ from sqlalchemy import (
     Float,
     String,
     and_,
+    any_,
     case,
     cast,
     delete,
@@ -30,6 +31,7 @@ from sqlalchemy import (
     select,
     update,
 )
+from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload
@@ -37,9 +39,10 @@ from starlette.background import BackgroundTask
 
 from app.api.deps import CurrentUser, SessionDep
 from app.api.excel_export import (
-    BrowserDateTimeFormatter,
     ExcelExportCell,
     ExcelExportWorkbook,
+    ExcelScalar,
+    ExportDateTimeFormatter,
     excel_safe_text,
 )
 from app.api.grounding_agent import effective_grounding_source_status
@@ -67,6 +70,7 @@ from app.api.routes.owner_group_filter import (
     build_owner_group_filter,
     validate_exclusive_user_filters,
 )
+from app.api.routes.time_filters import AwareTimestamp, validate_time_range
 from app.api.schemas import PaginationParams
 from app.chat.title import build_fallback_title, generate_conversation_title_from_transcript
 from app.chat.tree_utils import (
@@ -115,12 +119,39 @@ _CHAT_EXPORT_COLUMN_WIDTHS = (32, 48, 80, 42, 64, 24, 32, 22, 22)
 _CHAT_EXPORT_COST_HEADER = "Cost"
 _CHAT_EXPORT_COST_COLUMN_WIDTH = 16
 _CHAT_EXPORT_BATCH_SIZE = 100
+_CHAT_EXPORT_MAX_CONVERSATIONS = 10_000
 _CHAT_EXPORT_TRANSCRIPT_DIR = "transcripts"
 _CHAT_EXPORT_MINIMUM_DISPLAY_COST = 0.0001
 _CHAT_EXPORT_DETAILED_COST_THRESHOLD = 0.01
 _INVALID_FILENAME_CHARACTERS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 
 ConversationDetailSource = Literal["chat", "chats", "messages", "investigate", "investigations"]
+
+
+def _cap_chat_export_ids(conversation_ids: list[UUID]) -> tuple[list[UUID], bool]:
+    return (
+        conversation_ids[:_CHAT_EXPORT_MAX_CONVERSATIONS],
+        len(conversation_ids) > _CHAT_EXPORT_MAX_CONVERSATIONS,
+    )
+
+
+def _chat_export_information_rows(
+    *, included_count: int, truncated: bool
+) -> tuple[tuple[str, ExcelScalar], ...]:
+    included_label = f"{included_count:,} chat{'s' if included_count != 1 else ''}"
+    notice = (
+        "The selected filters matched more chats than the export limit of "
+        f"{_CHAT_EXPORT_MAX_CONVERSATIONS:,}. This export contains {included_label}. "
+        "Additional matching chats were not included."
+        if truncated
+        else "All matching chats were included."
+    )
+    return (
+        ("Chats included", included_count),
+        ("Export limit", _CHAT_EXPORT_MAX_CONVERSATIONS),
+        ("Additional matching chats omitted", "Yes" if truncated else "No"),
+        ("Notice", notice),
+    )
 
 
 class ConversationSummary(BaseModel):
@@ -579,8 +610,13 @@ async def _ensure_conversation_access_for_source(
         raise HTTPException(status_code=403, detail="Access denied")
 
 
-async def _get_conversation_or_404(session: AsyncSession, conversation_id: UUID) -> Conversation:
-    conversation = await session.get(Conversation, conversation_id)
+async def _get_conversation_or_404(
+    session: AsyncSession, conversation_id: UUID, *, lock: bool = False
+) -> Conversation:
+    statement = select(Conversation).where(Conversation.id == conversation_id)
+    if lock:
+        statement = statement.with_for_update()
+    conversation = await session.scalar(statement)
     if conversation is None:
         raise HTTPException(status_code=404, detail="Conversation not found")
     return conversation
@@ -1106,8 +1142,13 @@ async def list_internal_conversations_paginated(
     user_email: Annotated[str | None, Query()] = None,
     user_group: Annotated[OwnerGroup | None, Query()] = None,
     phrase_search: Annotated[bool, Query()] = False,
-    start: Annotated[datetime | None, Query()] = None,
-    end: Annotated[datetime | None, Query()] = None,
+    start: Annotated[AwareTimestamp | None, Query()] = None,
+    end: Annotated[AwareTimestamp | None, Query()] = None,
+    analytics_start: Annotated[AwareTimestamp | None, Query()] = None,
+    analytics_end: Annotated[AwareTimestamp | None, Query()] = None,
+    analytics_end_before: Annotated[AwareTimestamp | None, Query()] = None,
+    min_turns: Annotated[int | None, Query(ge=0)] = None,
+    max_turns: Annotated[int | None, Query(ge=0)] = None,
     kind: Annotated[Literal["chat", "investigation"], Query()] = "chat",
 ) -> ConversationListPage:
     return await _list_internal_conversations(
@@ -1121,6 +1162,11 @@ async def list_internal_conversations_paginated(
         phrase_search=phrase_search,
         start=start,
         end=end,
+        analytics_start=analytics_start,
+        analytics_end=analytics_end,
+        analytics_end_before=analytics_end_before,
+        min_turns=min_turns,
+        max_turns=max_turns,
         kind=kind,
         export_all=False,
     )
@@ -1138,6 +1184,11 @@ async def _list_internal_conversations(
     phrase_search: bool,
     start: datetime | None,
     end: datetime | None,
+    analytics_start: datetime | None,
+    analytics_end: datetime | None,
+    analytics_end_before: datetime | None,
+    min_turns: int | None,
+    max_turns: int | None,
     kind: Literal["chat", "investigation"],
     export_all: bool,
 ) -> ConversationListPage:
@@ -1157,9 +1208,40 @@ async def _list_internal_conversations(
         current_user, permission_map=permission_map
     )
 
-    if start is not None and end is not None and start > end:
-        raise HTTPException(status_code=400, detail="Invalid time range")
+    validate_time_range(start, end)
+    validate_time_range(
+        analytics_start, analytics_end, analytics_end_before, detail="Invalid Analytics range"
+    )
+    if min_turns is not None and max_turns is not None and min_turns > max_turns:
+        raise HTTPException(status_code=400, detail="Invalid turn count range")
     validate_exclusive_user_filters(user_email=user_email, user_group=user_group)
+
+    turn_count_subquery: Any | None = None
+    turn_count: Any | None = None
+    if min_turns is not None or max_turns is not None:
+        turn_count_stmt = (
+            select(
+                Message.conversation_id.label("conversation_id"),
+                func.count(Message.id).label("turn_count"),
+            )
+            .select_from(Message)
+            .where(Message.role == "user")
+        )
+        if analytics_start is not None:
+            turn_count_stmt = turn_count_stmt.where(Message.created_at >= analytics_start)
+        if analytics_end is not None:
+            turn_count_stmt = turn_count_stmt.where(Message.created_at <= analytics_end)
+        if analytics_end_before is not None:
+            turn_count_stmt = turn_count_stmt.where(Message.created_at < analytics_end_before)
+        turn_count_subquery = turn_count_stmt.group_by(Message.conversation_id).subquery()
+        turn_count = func.coalesce(turn_count_subquery.c.turn_count, 0)
+
+    def _join_turn_count(statement: Any) -> Any:
+        if turn_count_subquery is None:
+            return statement
+        return statement.outerjoin(
+            turn_count_subquery, Conversation.id == turn_count_subquery.c.conversation_id
+        )
 
     def _apply_list_filters(statement: Any, updated_at_expression: Any) -> Any:
         platform_conditions: list[Any] = []
@@ -1176,6 +1258,16 @@ async def _list_internal_conversations(
             statement = statement.where(updated_at_expression >= start)
         if end is not None:
             statement = statement.where(updated_at_expression <= end)
+        if analytics_start is not None:
+            statement = statement.where(Conversation.created_at >= analytics_start)
+        if analytics_end is not None:
+            statement = statement.where(Conversation.created_at <= analytics_end)
+        if analytics_end_before is not None:
+            statement = statement.where(Conversation.created_at < analytics_end_before)
+        if min_turns is not None and turn_count is not None:
+            statement = statement.where(turn_count >= min_turns)
+        if max_turns is not None and turn_count is not None:
+            statement = statement.where(turn_count <= max_turns)
         if search is not None and search.strip() != "":
             search_text = search.strip()
             statement = statement.where(
@@ -1208,6 +1300,47 @@ async def _list_internal_conversations(
     # and trace aggregates. Aggregate sorts determine their page after aggregation.
     page_ids: list[UUID] | None = None
     page_total: int | None = None
+    export_match_count: int | None = None
+    if export_all:
+        latest_message_at = (
+            select(Message.created_at)
+            .where(Message.conversation_id == Conversation.id)
+            .order_by(Message.created_at.desc())
+            .limit(1)
+            .correlate(Conversation)
+            .scalar_subquery()
+        )
+        export_ids_stmt = (
+            select(Conversation.id)
+            .outerjoin(User, Conversation.user_id == User.id)
+            .outerjoin(RbacGroup, User.group_id == RbacGroup.id)
+            .outerjoin(PublicChatContact, Conversation.id == PublicChatContact.conversation_id)
+        )
+        export_ids_stmt = _join_turn_count(export_ids_stmt)
+        export_updated_at = func.coalesce(latest_message_at, Conversation.created_at)
+        export_sort_column = {
+            "updated_at": export_updated_at,
+            "created_at": Conversation.created_at,
+            "title": Conversation.title,
+        }.get(page_params.sort_by, Conversation.id)
+        export_ids_stmt = (
+            _apply_list_filters(export_ids_stmt, export_updated_at)
+            .order_by(
+                export_sort_column.desc() if page_params.descending else export_sort_column.asc(),
+                Conversation.id,
+            )
+            .limit(_CHAT_EXPORT_MAX_CONVERSATIONS + 1)
+        )
+        matching_ids = list((await session.scalars(export_ids_stmt)).all())
+        page_ids, export_truncated = _cap_chat_export_ids(matching_ids)
+        export_match_count = len(page_ids) + int(export_truncated)
+
+    def _id_scope(column: Any, conversation_ids: list[UUID]) -> Any:
+        if export_all:
+            id_array = cast(literal(conversation_ids), ARRAY(PGUUID(as_uuid=True)))
+            return column == any_(id_array)
+        return column.in_(conversation_ids)
+
     if not export_all and page_params.sort_by in {"updated_at", "created_at", "title"}:
         latest_message_at = (
             select(Message.created_at)
@@ -1225,6 +1358,7 @@ async def _list_internal_conversations(
             .outerjoin(PublicChatContact, Conversation.id == PublicChatContact.conversation_id)
         )
 
+        page_stmt = _join_turn_count(page_stmt)
         page_stmt = _apply_list_filters(page_stmt, page_updated_at)
         page_sort_column = {
             "updated_at": page_updated_at,
@@ -1257,7 +1391,7 @@ async def _list_internal_conversations(
         func.count(Message.id).filter(Message.role == "assistant").label("assistant_message_count"),
     )
     if page_ids is not None:
-        message_count_stmt = message_count_stmt.where(Message.conversation_id.in_(page_ids))
+        message_count_stmt = message_count_stmt.where(_id_scope(Message.conversation_id, page_ids))
     message_count_subquery = message_count_stmt.group_by(Message.conversation_id).subquery()
 
     last_message_stmt = select(
@@ -1272,7 +1406,7 @@ async def _list_internal_conversations(
         .label("rn"),
     )
     if page_ids is not None:
-        last_message_stmt = last_message_stmt.where(Message.conversation_id.in_(page_ids))
+        last_message_stmt = last_message_stmt.where(_id_scope(Message.conversation_id, page_ids))
     last_message_subquery = last_message_stmt.subquery()
 
     def _build_cost_subquery(conversation_ids: list[UUID] | None = None) -> Any:
@@ -1282,7 +1416,7 @@ async def _list_internal_conversations(
         ).where(OtelSpan.conversation_id.is_not(None))
         if conversation_ids is not None:
             trace_context_stmt = trace_context_stmt.where(
-                OtelSpan.conversation_id.in_(conversation_ids)
+                _id_scope(OtelSpan.conversation_id, conversation_ids)
             )
         trace_context = trace_context_stmt.group_by(OtelSpan.trace_id).subquery()
         conversation_id: Any = func.coalesce(
@@ -1297,7 +1431,7 @@ async def _list_internal_conversations(
             stmt = stmt.where(conversation_id.is_not(None))
         else:
             stmt = stmt.join(trace_context, trace_context.c.trace_id == OtelSpan.trace_id)
-            stmt = stmt.where(conversation_id.in_(conversation_ids))
+            stmt = stmt.where(_id_scope(conversation_id, conversation_ids))
         return (
             stmt.where(OtelSpan.total_cost.is_not(None))
             .where(response_cost_span_condition(OtelSpan))
@@ -1315,7 +1449,9 @@ async def _list_internal_conversations(
         ),
     ).join(MessageFeedback, MessageFeedback.message_id == Message.id)
     if page_ids is not None:
-        message_feedback_stmt = message_feedback_stmt.where(Message.conversation_id.in_(page_ids))
+        message_feedback_stmt = message_feedback_stmt.where(
+            _id_scope(Message.conversation_id, page_ids)
+        )
     message_feedback_subquery = message_feedback_stmt.group_by(Message.conversation_id).subquery()
 
     conversation_feedback_stmt = select(
@@ -1329,7 +1465,7 @@ async def _list_internal_conversations(
     )
     if page_ids is not None:
         conversation_feedback_stmt = conversation_feedback_stmt.where(
-            ConversationFeedback.conversation_id.in_(page_ids)
+            _id_scope(ConversationFeedback.conversation_id, page_ids)
         )
     conversation_feedback_subquery = conversation_feedback_stmt.group_by(
         ConversationFeedback.conversation_id
@@ -1364,7 +1500,9 @@ async def _list_internal_conversations(
         (Conversation.is_public.is_(True), PublicChatContact.email), else_=User.email
     ).label("user_email")
 
-    include_cost_in_query = page_params.sort_by == "total_cost" or export_all
+    include_cost_in_query = page_params.sort_by == "total_cost" or (
+        export_all and permission_map.get(PermissionKey.CHATS_VIEW_COST_COLUMN, False)
+    )
 
     base_stmt = (
         select(
@@ -1406,17 +1544,19 @@ async def _list_internal_conversations(
     )
 
     if page_ids is not None:
-        base_stmt = base_stmt.where(Conversation.id.in_(page_ids))
+        base_stmt = base_stmt.where(_id_scope(Conversation.id, page_ids))
     total_cost: Any = type_cast(Any, cast(literal(None), Float).label("total_cost"))
     cost_subquery: Any | None = None
     if include_cost_in_query:
-        cost_subquery_local = _build_cost_subquery()
+        cost_subquery_local = _build_cost_subquery(page_ids)
         cost_subquery = cost_subquery_local
         total_cost = type_cast(
             Any, cast(cost_subquery_local.c.total_cost, Float).label("total_cost")
         )
 
-    base_stmt = _apply_list_filters(base_stmt, effective_updated_at)
+    if page_ids is None:
+        base_stmt = _join_turn_count(base_stmt)
+        base_stmt = _apply_list_filters(base_stmt, effective_updated_at)
 
     if export_all:
         total = 0
@@ -1445,13 +1585,13 @@ async def _list_internal_conversations(
     }
     sort_column: Any = sort_map.get(page_params.sort_by, effective_updated_at)
 
-    if page_ids is None:
+    if page_ids is None or export_all:
         stmt = stmt.order_by(sort_column.desc() if page_params.descending else sort_column.asc())
         if not export_all:
             stmt = stmt.offset(page_params.offset).limit(page_params.limit)
 
     rows = (await session.execute(stmt)).all()
-    if page_ids is not None:
+    if page_ids is not None and not export_all:
         rows_by_id = {row[0].id: row for row in rows}
         rows = [
             rows_by_id[conversation_id]
@@ -1521,7 +1661,7 @@ async def _list_internal_conversations(
     ]
 
     if export_all:
-        total = len(items)
+        total = export_match_count if export_match_count is not None else len(items)
     response = ConversationListPage(items=items, total=total)
     # Release the reserved connection before FastAPI validates and serializes the response.
     await session.commit()
@@ -1572,7 +1712,7 @@ def _build_chat_export_text_file(
     *,
     transcript: str,
     chat_url: str,
-    timestamp_formatter: BrowserDateTimeFormatter,
+    timestamp_formatter: ExportDateTimeFormatter,
     include_cost: bool,
 ) -> str:
     lines = [
@@ -1650,11 +1790,13 @@ async def _build_chats_export_package(
     *,
     output_dir: Path,
     chat_url_base: str,
-    browser_time_zone: str,
-    browser_locale: str,
+    time_zone: str,
+    locale: str,
     include_cost: bool,
+    truncated: bool,
 ) -> tuple[Path, str]:
-    export_date = datetime.now(UTC).date().isoformat()
+    timestamp_formatter = ExportDateTimeFormatter.resolve(time_zone=time_zone, locale=locale)
+    export_date = timestamp_formatter.format_date(datetime.now(UTC))
     package_name = f"chats-{export_date}.zip"
     workbook_name = f"chats-{export_date}.xlsx"
     workbook_path = output_dir / workbook_name
@@ -1669,10 +1811,9 @@ async def _build_chats_export_package(
     workbook = ExcelExportWorkbook(
         sheet_title="Chats", headers=headers, column_widths=column_widths
     )
-    timestamp_formatter = BrowserDateTimeFormatter.resolve(
-        time_zone=browser_time_zone, locale=browser_locale
+    workbook.add_information_sheet(
+        _chat_export_information_rows(included_count=len(items), truncated=truncated)
     )
-
     row_index = 0
     for item_batch in batched(items, _CHAT_EXPORT_BATCH_SIZE, strict=False):
         batch_items = list(item_batch)
@@ -1739,8 +1880,13 @@ async def export_internal_conversations(
     user_email: Annotated[str | None, Query()] = None,
     user_group: Annotated[OwnerGroup | None, Query()] = None,
     phrase_search: Annotated[bool, Query()] = False,
-    start: Annotated[datetime | None, Query()] = None,
-    end: Annotated[datetime | None, Query()] = None,
+    start: Annotated[AwareTimestamp | None, Query()] = None,
+    end: Annotated[AwareTimestamp | None, Query()] = None,
+    analytics_start: Annotated[AwareTimestamp | None, Query()] = None,
+    analytics_end: Annotated[AwareTimestamp | None, Query()] = None,
+    analytics_end_before: Annotated[AwareTimestamp | None, Query()] = None,
+    min_turns: Annotated[int | None, Query(ge=0)] = None,
+    max_turns: Annotated[int | None, Query(ge=0)] = None,
     sort_by: Annotated[str, Query()] = "updated_at",
     descending: Annotated[bool, Query()] = True,
     chat_url_base: Annotated[str, Query()] = "",
@@ -1758,9 +1904,15 @@ async def export_internal_conversations(
         phrase_search=phrase_search,
         start=start,
         end=end,
+        analytics_start=analytics_start,
+        analytics_end=analytics_end,
+        analytics_end_before=analytics_end_before,
+        min_turns=min_turns,
+        max_turns=max_turns,
         kind="chat",
         export_all=True,
     )
+    truncated = page.total > len(page.items)
     permission_map = await get_effective_permission_map(session, current_user)
     include_cost = permission_map.get(PermissionKey.CHATS_VIEW_COST_COLUMN, False)
     await session.commit()
@@ -1772,9 +1924,10 @@ async def export_internal_conversations(
             page.items,
             output_dir=temporary_directory,
             chat_url_base=chat_url_base,
-            browser_time_zone=browser_time_zone,
-            browser_locale=browser_locale,
+            time_zone=browser_time_zone,
+            locale=browser_locale,
             include_cost=include_cost,
+            truncated=truncated,
         )
     except Exception:
         shutil.rmtree(temporary_directory, ignore_errors=True)
@@ -1784,6 +1937,10 @@ async def export_internal_conversations(
         package_path,
         filename=package_name,
         media_type="application/zip",
+        headers={
+            "X-Chat-Export-Truncated": str(truncated).lower(),
+            "X-Chat-Export-Included-Count": str(len(page.items)),
+        },
         background=BackgroundTask(shutil.rmtree, temporary_directory, ignore_errors=True),
     )
 
@@ -2161,7 +2318,8 @@ async def regenerate_internal_conversation_title(
 async def delete_internal_conversation(
     conversation_id: UUID, session: SessionDep, current_user: CurrentUser
 ) -> None:
-    conversation = await _get_conversation_or_404(session, conversation_id)
+    # Compliance persistence locks conversations before their messages; deletion must match.
+    conversation = await _get_conversation_or_404(session, conversation_id, lock=True)
     await _ensure_internal_conversation_access(session, conversation, current_user)
 
     if conversation.is_public and not _is_admin_user(current_user):
@@ -2229,6 +2387,8 @@ async def create_message_feedback(
     message = await _get_message_or_404(session, message_id)
     conversation = await _get_conversation_or_404(session, message.conversation_id)
     await _ensure_conversation_access_for_source(session, conversation, current_user, source)
+    if message.role != "assistant":
+        raise HTTPException(status_code=400, detail="Feedback requires an assistant message")
 
     existing = await session.scalar(
         select(MessageFeedback)

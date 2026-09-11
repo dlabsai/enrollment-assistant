@@ -27,7 +27,7 @@ const isTeamsParentWindowMissingError = (error: unknown): boolean =>
     error instanceof Error &&
     error.message.includes(TEAMS_PARENT_WINDOW_MISSING_MESSAGE);
 
-const isTeamsUnavailableError = (error: unknown): boolean =>
+export const isTeamsUnavailableError = (error: unknown): boolean =>
     error instanceof Error &&
     error.message ===
         "Microsoft Teams SSO is not available in this environment";

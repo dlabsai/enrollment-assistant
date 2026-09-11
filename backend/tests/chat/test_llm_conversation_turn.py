@@ -20,9 +20,7 @@ from app.core.config import settings
 from app.core.db import async_session_factory
 from app.models import AssistantMessageMetadata, Conversation, Message, User
 
-# Mark all tests in this module as slow, e2e, and llm tests
-# Mark all tests in this module as slow and llm tests
-pytestmark = [pytest.mark.slow, pytest.mark.llm]
+pytestmark = [pytest.mark.slow, pytest.mark.llm, pytest.mark.usefixtures("rag_db_engine")]
 
 
 @pytest.fixture

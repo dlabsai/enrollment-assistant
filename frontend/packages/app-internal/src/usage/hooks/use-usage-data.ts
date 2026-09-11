@@ -3,12 +3,13 @@ import { useCallback } from "react";
 import { useAuthenticatedApi } from "../../auth/hooks/use-authenticated-api";
 import { useAsyncData } from "../../lib/hooks/use-async-data";
 import type { CustomTimeRange, TimeRangeValue } from "../../lib/time-range";
+import type { TimeGranularity } from "../../lib/time-series";
 import { fetchUsageOverview, type UsagePlatformFilter } from "../lib/api";
 import type {
     ModelUsage,
-    UsageDaily,
     UsageOverviewApi,
     UsageSummary,
+    UsageTimeSeriesPoint,
     UsageTraceBasic,
 } from "../types";
 
@@ -24,7 +25,8 @@ interface UsageDataParams {
 
 interface UsageDataState {
     summary: UsageSummary;
-    dailyData: UsageDaily[];
+    timeGranularity: TimeGranularity;
+    seriesData: UsageTimeSeriesPoint[];
     modelData: ModelUsage[];
     latestTraces: UsageTraceBasic[];
 }
@@ -50,7 +52,8 @@ const emptySummary: UsageSummary = {
 
 const emptyState: UsageDataState = {
     summary: emptySummary,
-    dailyData: [],
+    timeGranularity: "day",
+    seriesData: [],
     modelData: [],
     latestTraces: [],
 };
@@ -68,8 +71,10 @@ const mapOverviewResponse = (data: UsageOverviewApi): UsageDataState => ({
         totalErrors: data.summary.total_errors,
         avgDuration: data.summary.avg_duration ?? 0,
     },
-    dailyData: data.daily.map((entry) => ({
-        date: entry.date,
+    timeGranularity: data.time_granularity,
+    seriesData: data.series.map((entry) => ({
+        bucket_start: entry.bucket_start,
+        bucket_end: entry.bucket_end,
         requests: entry.requests,
         tokens: entry.tokens,
         cost: entry.cost,

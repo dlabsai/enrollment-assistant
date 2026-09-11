@@ -6,7 +6,7 @@ import {
     CardTitle,
 } from "@va/shared/components/ui/card";
 import { type JSX, useMemo } from "react";
-import { Area, AreaChart, CartesianGrid, XAxis, YAxis } from "recharts";
+import { CartesianGrid, Line, LineChart, XAxis, YAxis } from "recharts";
 
 import {
     type ChartConfig,
@@ -17,19 +17,22 @@ import {
     ChartTooltipContent,
 } from "@/components/ui/chart";
 
+import { useVisibleChartSeries } from "../../lib/chart-series";
 import { makeLocaleNumberFormatter } from "../../lib/number-format";
-import type { TimeRangeValue } from "../../lib/time-range";
 import {
     formatTimeSeriesTick,
     formatTimeSeriesTooltipLabel,
-    isHourlyTimeRange,
+    type TimeGranularity,
+    timeGranularityLabel,
 } from "../../lib/time-series";
-import type { UsageDaily } from "../types";
+import type { UsageTimeSeriesPoint } from "../types";
 
 interface EmbeddingUsageChartProps {
-    data: UsageDaily[];
-    timeRange: TimeRangeValue;
+    data: UsageTimeSeriesPoint[];
+    granularity: TimeGranularity;
 }
+
+const dataKeys = ["embeddingRequests", "embeddingTokens"] as const;
 
 const chartConfig = {
     embeddingRequests: {
@@ -44,28 +47,25 @@ const chartConfig = {
 
 export const EmbeddingUsageChart = ({
     data,
-    timeRange,
+    granularity,
 }: EmbeddingUsageChartProps): JSX.Element => {
     const compactFormatter = useMemo(
         () => makeLocaleNumberFormatter({ notation: "compact" }),
         [],
     );
-    const isHourly = isHourlyTimeRange(timeRange);
-
+    const { hiddenSeries, toggleSeries, visibleSeries } =
+        useVisibleChartSeries(dataKeys);
     return (
         <Card className="@container/card">
             <CardHeader>
                 <CardTitle>Embedding usage over time</CardTitle>
                 <CardDescription>
                     <span className="hidden @[540px]/card:block">
-                        {isHourly
-                            ? "Hourly embedding requests and token usage"
-                            : "Daily embedding requests and token usage"}
+                        {timeGranularityLabel[granularity]} embedding requests
+                        and token usage
                     </span>
                     <span className="@[540px]/card:hidden">
-                        {isHourly
-                            ? "Hourly embedding usage"
-                            : "Daily embedding usage"}
+                        {timeGranularityLabel[granularity]} embedding usage
                     </span>
                 </CardDescription>
             </CardHeader>
@@ -74,111 +74,91 @@ export const EmbeddingUsageChart = ({
                     className="aspect-auto h-[250px] w-full"
                     config={chartConfig}
                 >
-                    <AreaChart data={data}>
-                        <defs>
-                            <linearGradient
-                                id="fillEmbeddingRequests"
-                                x1="0"
-                                x2="0"
-                                y1="0"
-                                y2="1"
-                            >
-                                <stop
-                                    offset="5%"
-                                    stopColor="var(--color-embeddingRequests)"
-                                    stopOpacity={0.8}
-                                />
-                                <stop
-                                    offset="95%"
-                                    stopColor="var(--color-embeddingRequests)"
-                                    stopOpacity={0.1}
-                                />
-                            </linearGradient>
-                            <linearGradient
-                                id="fillEmbeddingTokens"
-                                x1="0"
-                                x2="0"
-                                y1="0"
-                                y2="1"
-                            >
-                                <stop
-                                    offset="5%"
-                                    stopColor="var(--color-embeddingTokens)"
-                                    stopOpacity={0.4}
-                                />
-                                <stop
-                                    offset="95%"
-                                    stopColor="var(--color-embeddingTokens)"
-                                    stopOpacity={0.1}
-                                />
-                            </linearGradient>
-                        </defs>
+                    <LineChart
+                        accessibilityLayer
+                        data={data}
+                    >
                         <CartesianGrid vertical={false} />
                         <XAxis
                             axisLine={false}
-                            dataKey="date"
+                            dataKey="bucket_start"
                             minTickGap={32}
                             tickFormatter={(value: string) =>
-                                formatTimeSeriesTick(value, timeRange)
+                                formatTimeSeriesTick(value, granularity)
                             }
                             tickLine={false}
                             tickMargin={8}
                         />
                         <YAxis
+                            allowDecimals={false}
                             axisLine={false}
+                            hide={!visibleSeries.has("embeddingRequests")}
                             tickFormatter={(value: number) =>
                                 compactFormatter.format(value)
                             }
                             tickLine={false}
+                            tickMargin={8}
                             width={48}
                             yAxisId="requests"
                         />
                         <YAxis
+                            allowDecimals={false}
                             axisLine={false}
+                            hide={!visibleSeries.has("embeddingTokens")}
                             orientation="right"
                             tickFormatter={(value: number) =>
                                 compactFormatter.format(value)
                             }
                             tickLine={false}
+                            tickMargin={8}
                             width={56}
                             yAxisId="tokens"
                         />
                         <ChartTooltip
                             content={
                                 <ChartTooltipContent
-                                    indicator="dot"
+                                    indicator="line"
                                     labelFormatter={(value) =>
                                         formatTimeSeriesTooltipLabel(
-                                            typeof value === "string" ||
-                                                typeof value === "number"
-                                                ? String(value)
-                                                : "",
-                                            timeRange,
+                                            value,
+                                            granularity,
                                         )
                                     }
                                 />
                             }
-                            cursor={false}
                         />
-                        <Area
+                        <Line
+                            connectNulls={false}
                             dataKey="embeddingRequests"
-                            fill="url(#fillEmbeddingRequests)"
+                            dot={false}
+                            hide={!visibleSeries.has("embeddingRequests")}
+                            isAnimationActive={false}
                             stroke="var(--color-embeddingRequests)"
-                            type="natural"
+                            strokeWidth={2}
+                            type="linear"
                             yAxisId="requests"
                         />
-                        <Area
+                        <Line
+                            connectNulls={false}
                             dataKey="embeddingTokens"
-                            fill="url(#fillEmbeddingTokens)"
+                            dot={false}
+                            hide={!visibleSeries.has("embeddingTokens")}
+                            isAnimationActive={false}
                             stroke="var(--color-embeddingTokens)"
-                            type="natural"
+                            strokeWidth={2}
+                            type="linear"
                             yAxisId="tokens"
                         />
                         <ChartLegend
-                            content={<ChartLegendContent />}
+                            content={
+                                <ChartLegendContent
+                                    hiddenKeys={hiddenSeries}
+                                    onItemToggle={toggleSeries}
+                                />
+                            }
                             verticalAlign="bottom"
                         />
-                    </AreaChart>
+                    </LineChart>
                 </ChartContainer>
             </CardContent>
         </Card>

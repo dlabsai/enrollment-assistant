@@ -1,3 +1,4 @@
+import { useNavigate } from "@tanstack/react-router";
 import { Button } from "@va/shared/components/ui/button";
 import {
     ToggleGroup,
@@ -6,6 +7,8 @@ import {
 import { Filter, RefreshCw } from "lucide-react";
 import { type JSX, useEffect, useMemo, useState } from "react";
 
+import { canAccessView } from "../../app/view-access";
+import { useAuth } from "../../auth/contexts/auth-context";
 import { useDashboardUserFilter } from "../../chats/hooks/use-dashboard-user-filter";
 import { parseStoredUserFilter } from "../../chats/lib/user-filter-options";
 import type { ChatUserOption } from "../../chats/types";
@@ -20,11 +23,15 @@ import {
     type TimeRangeValue,
 } from "../../lib/time-range";
 import { useChatAnalyticsData } from "../hooks/use-chat-analytics-data";
+import {
+    getChatLengthDrilldownSearch,
+    getChatVolumeDrilldownSearch,
+    getTurnsVolumeDrilldownSearch,
+} from "../lib/drilldown";
 import { ChatLengthChart } from "./chat-length-chart";
 import { ChatSummaryCards } from "./chat-summary-cards";
-import { ChatVolumeChart, MessagesVolumeChart } from "./chat-volume-chart";
-import { MessagesByHourChart } from "./messages-by-hour-chart";
-import { ResponseTimeChart } from "./response-time-chart";
+import { ChatVolumeChart, TurnsVolumeChart } from "./chat-volume-chart";
+import { TurnsByHourChart } from "./turns-by-hour-chart";
 
 const platformOptions = [
     { label: "All platforms", value: "both" },
@@ -120,6 +127,8 @@ const getStoredAnalyticsFilters = (): StoredAnalyticsFilters | undefined => {
 };
 
 export const AnalyticsPage = (): JSX.Element => {
+    const navigate = useNavigate();
+    const { user } = useAuth();
     const storedFilters = useMemo(() => getStoredAnalyticsFilters(), []);
     const [platform, setPlatform] = useState<PlatformFilter>(() => {
         const storedPlatform = storedFilters?.platform;
@@ -142,7 +151,7 @@ export const AnalyticsPage = (): JSX.Element => {
     const [customRange, setCustomRange] = useState<CustomTimeRange>(() =>
         parseStoredCustomRange(storedFilters?.customRange),
     );
-    const { summary, loading, hasLoaded, error, refresh } =
+    const { appliedRange, summary, loading, hasLoaded, error, refresh } =
         useChatAnalyticsData(
             platform,
             timeRange,
@@ -150,6 +159,16 @@ export const AnalyticsPage = (): JSX.Element => {
             userFilter.userFilterParams.userEmail,
             userFilter.userFilterParams.userGroup,
         );
+    const canInspectSelectedPlatform =
+        platform === "internal" ||
+        user?.group.slug === "admin" ||
+        user?.group.slug === "dev";
+    const canInspectChats =
+        !loading && canAccessView("chats", user) && canInspectSelectedPlatform;
+    const canInspectMessages =
+        !loading &&
+        canAccessView("messages", user) &&
+        canInspectSelectedPlatform;
 
     useEffect(() => {
         if (typeof window === "undefined") {
@@ -174,7 +193,11 @@ export const AnalyticsPage = (): JSX.Element => {
         return <LoadingState />;
     }
 
-    if (error !== undefined || summary === undefined) {
+    if (
+        error !== undefined ||
+        summary === undefined ||
+        appliedRange === undefined
+    ) {
         return (
             <PageError
                 message={error ?? "Failed to load chat analytics."}
@@ -254,22 +277,53 @@ export const AnalyticsPage = (): JSX.Element => {
 
             <PageSection className="grid grid-cols-1 gap-4 @3xl/main:grid-cols-2">
                 <ChatVolumeChart
-                    data={summary.daily}
-                    timeRange={timeRange}
+                    canInspect={canInspectChats}
+                    data={summary.series}
+                    granularity={summary.time_granularity}
+                    onInspect={(point) => {
+                        void navigate({
+                            to: "/chats",
+                            search: getChatVolumeDrilldownSearch(
+                                point,
+                                platform,
+                                userFilter.userFilterParams,
+                            ),
+                        });
+                    }}
                 />
-                <MessagesVolumeChart
-                    data={summary.daily}
-                    timeRange={timeRange}
+                <TurnsVolumeChart
+                    canInspect={canInspectMessages}
+                    data={summary.series}
+                    granularity={summary.time_granularity}
+                    onInspect={(point) => {
+                        void navigate({
+                            to: "/messages",
+                            search: getTurnsVolumeDrilldownSearch(
+                                point,
+                                appliedRange,
+                                platform,
+                                userFilter.userFilterParams,
+                            ),
+                        });
+                    }}
                 />
                 <ChatLengthChart
+                    canInspect={canInspectChats}
                     data={summary.length_buckets}
+                    onInspect={(bucket) => {
+                        void navigate({
+                            to: "/chats",
+                            search: getChatLengthDrilldownSearch(
+                                bucket,
+                                appliedRange,
+                                platform,
+                                userFilter.userFilterParams,
+                            ),
+                        });
+                    }}
                     stats={summary.length_stats}
                 />
-                <ResponseTimeChart
-                    data={summary.response_time_buckets}
-                    stats={summary.response_time_stats}
-                />
-                <MessagesByHourChart data={summary.hourly_activity} />
+                <TurnsByHourChart data={summary.hourly_activity} />
             </PageSection>
         </PageShell>
     );

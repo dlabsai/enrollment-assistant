@@ -107,8 +107,8 @@ const CompareChartTooltip = ({
     const metricValue =
         typeof rawValue === "number"
             ? metric === "passRate"
-              ? formatPercentValue(rawValue)
-              : formatDurationValue(rawValue)
+                ? formatPercentValue(rawValue)
+                : formatDurationValue(rawValue)
             : "-";
     return (
         <div className="border-border/50 bg-background grid min-w-[12rem] gap-1.5 rounded-lg border px-2.5 py-1.5 text-xs shadow-xl">
@@ -219,8 +219,7 @@ export const EvalsReportTrendsView = ({
     );
 
     const compareChartsHaveData = compareChartData.some(
-        (entry) =>
-            entry.passRate !== undefined || entry.duration !== undefined,
+        (entry) => entry.passRate !== undefined || entry.duration !== undefined,
     );
 
     return (
@@ -292,7 +291,9 @@ export const EvalsReportTrendsView = ({
                                     <PopoverTrigger
                                         render={
                                             <Button
-                                                aria-expanded={compareReportsOpen}
+                                                aria-expanded={
+                                                    compareReportsOpen
+                                                }
                                                 className="h-9 justify-between"
                                                 role="combobox"
                                                 type="button"
@@ -459,7 +460,9 @@ export const EvalsReportTrendsView = ({
                                             config={passRateChartConfig}
                                         >
                                             <BarChart data={compareChartData}>
-                                                <CartesianGrid vertical={false} />
+                                                <CartesianGrid
+                                                    vertical={false}
+                                                />
                                                 <XAxis
                                                     angle={-20}
                                                     axisLine={false}
@@ -488,6 +491,7 @@ export const EvalsReportTrendsView = ({
                                                 <Bar
                                                     dataKey="passRate"
                                                     fill="var(--color-passRate)"
+                                                    isAnimationActive={false}
                                                     radius={4}
                                                 />
                                             </BarChart>
@@ -502,7 +506,9 @@ export const EvalsReportTrendsView = ({
                                             config={durationChartConfig}
                                         >
                                             <BarChart data={compareChartData}>
-                                                <CartesianGrid vertical={false} />
+                                                <CartesianGrid
+                                                    vertical={false}
+                                                />
                                                 <XAxis
                                                     angle={-20}
                                                     axisLine={false}
@@ -517,7 +523,11 @@ export const EvalsReportTrendsView = ({
                                                     axisLine={false}
                                                     tickFormatter={(
                                                         value: number,
-                                                    ) => formatDurationValue(value)}
+                                                    ) =>
+                                                        formatDurationValue(
+                                                            value,
+                                                        )
+                                                    }
                                                     tickLine={false}
                                                     width={56}
                                                 />
@@ -530,6 +540,7 @@ export const EvalsReportTrendsView = ({
                                                 <Bar
                                                     dataKey="duration"
                                                     fill="var(--color-duration)"
+                                                    isAnimationActive={false}
                                                     radius={4}
                                                 />
                                             </BarChart>

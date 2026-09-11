@@ -1,5 +1,17 @@
 import { Avatar, AvatarFallback } from "@va/shared/components/ui/avatar";
 import {
+    DropdownMenu,
+    DropdownMenuContent,
+    DropdownMenuGroup,
+    DropdownMenuLabel,
+    DropdownMenuRadioGroup,
+    DropdownMenuRadioItem,
+    DropdownMenuSub,
+    DropdownMenuSubContent,
+    DropdownMenuSubTrigger,
+    DropdownMenuTrigger,
+} from "@va/shared/components/ui/dropdown-menu";
+import {
     Sidebar,
     SidebarContent,
     SidebarFooter,
@@ -24,11 +36,13 @@ import {
     CircleHelp,
     ClipboardCheck,
     ClipboardList,
+    Clock3,
     Database,
     Feather,
     FileText,
     GraduationCap,
     History,
+    KeyRound,
     ListTree,
     LogOut,
     type LucideIcon,
@@ -37,6 +51,7 @@ import {
     PanelLeftIcon,
     SearchCheck,
     Settings,
+    ShieldAlert,
     Sun,
     ThumbsUp,
     UserRoundCheck,
@@ -46,6 +61,11 @@ import { type JSX, type MouseEvent, type PointerEvent, useState } from "react";
 import { hasPermission } from "../../auth/lib/permissions";
 import type { UserProfile } from "../../auth/types";
 import { useTheme } from "../../lib/theme-context";
+import {
+    getAppFormatMode,
+    isAppFormatMode,
+    setAppFormatMode,
+} from "../../lib/time-zone";
 import type { AppView } from "../feature-flags";
 
 interface AppSidebarProps {
@@ -70,6 +90,7 @@ export const AppSidebar = ({
 }: AppSidebarProps): JSX.Element => {
     const [suppressOpenSidebarTooltip, setSuppressOpenSidebarTooltip] =
         useState(false);
+    const formatMode = getAppFormatMode();
     const { resolvedTheme, setTheme } = useTheme();
     const { isMobile, state, toggleSidebar } = useSidebar();
     const isDarkMode = resolvedTheme === "dark";
@@ -146,6 +167,12 @@ export const AppSidebar = ({
             allowed: hasPermission(user, "access_chats"),
         },
         {
+            id: "compliance",
+            icon: ClipboardCheck,
+            label: "Screenings",
+            allowed: hasPermission(user, "access_compliance"),
+        },
+        {
             id: "messages",
             icon: MessageSquareText,
             label: "Messages",
@@ -179,6 +206,12 @@ export const AppSidebar = ({
             id: "analytics",
             icon: BarChart3,
             label: "Chat Analytics",
+            allowed: hasPermission(user, "access_analytics"),
+        },
+        {
+            id: "quality",
+            icon: ShieldAlert,
+            label: "Quality",
             allowed: hasPermission(user, "access_analytics"),
         },
         {
@@ -249,7 +282,7 @@ export const AppSidebar = ({
         },
         {
             id: "rbac",
-            icon: Settings,
+            icon: KeyRound,
             label: "Access Controls",
             allowed: hasPermission(user, "access_rbac"),
         },
@@ -417,6 +450,66 @@ export const AppSidebar = ({
                     </SidebarMenuItem>
                 </SidebarMenu>
                 <SidebarMenu>
+                    {user.group.slug === "dev" && (
+                        <SidebarMenuItem>
+                            <DropdownMenu>
+                                <DropdownMenuTrigger
+                                    render={
+                                        <SidebarMenuButton
+                                            tooltip="Settings"
+                                            type="button"
+                                        >
+                                            <Settings />
+                                            <span>Settings</span>
+                                        </SidebarMenuButton>
+                                    }
+                                />
+                                <DropdownMenuContent
+                                    align="end"
+                                    className="min-w-56 rounded-lg"
+                                    side={isMobile ? "bottom" : "right"}
+                                    sideOffset={4}
+                                >
+                                    <DropdownMenuGroup>
+                                        <DropdownMenuLabel>
+                                            Developer settings
+                                        </DropdownMenuLabel>
+                                        <DropdownMenuSub>
+                                            <DropdownMenuSubTrigger>
+                                                <Clock3 />
+                                                <span>
+                                                    Time zone &amp; format
+                                                </span>
+                                            </DropdownMenuSubTrigger>
+                                            <DropdownMenuSubContent>
+                                                <DropdownMenuRadioGroup
+                                                    onValueChange={(value) => {
+                                                        if (
+                                                            !isAppFormatMode(
+                                                                value,
+                                                            )
+                                                        ) {
+                                                            return;
+                                                        }
+                                                        setAppFormatMode(value);
+                                                        window.location.reload();
+                                                    }}
+                                                    value={formatMode}
+                                                >
+                                                    <DropdownMenuRadioItem value="browser">
+                                                        Browser
+                                                    </DropdownMenuRadioItem>
+                                                    <DropdownMenuRadioItem value="eastern">
+                                                        Eastern Time
+                                                    </DropdownMenuRadioItem>
+                                                </DropdownMenuRadioGroup>
+                                            </DropdownMenuSubContent>
+                                        </DropdownMenuSub>
+                                    </DropdownMenuGroup>
+                                </DropdownMenuContent>
+                            </DropdownMenu>
+                        </SidebarMenuItem>
+                    )}
                     {HELP_URL && (
                         <SidebarMenuItem>
                             <SidebarMenuButton

@@ -10,18 +10,18 @@ import {
 import type { JSX } from "react";
 
 import { formatLocaleNumber } from "../../lib/number-format";
-import type { PublicUsageSummary } from "../../usage/types";
+import type { PublicAnalyticsSummary } from "../types";
 
-interface PublicUsageSummaryProps {
-    summary: PublicUsageSummary;
+interface PublicAnalyticsSummaryCardsProps {
+    summary: PublicAnalyticsSummary;
 }
 
 const cardGridClassName =
     "*:data-[slot=card]:from-primary/5 *:data-[slot=card]:to-card dark:*:data-[slot=card]:bg-card grid grid-cols-1 gap-4 *:data-[slot=card]:bg-gradient-to-t *:data-[slot=card]:shadow-xs";
 
-export const PublicUsageSummaryCards = ({
+export const PublicAnalyticsSummaryCards = ({
     summary,
-}: PublicUsageSummaryProps): JSX.Element => (
+}: PublicAnalyticsSummaryCardsProps): JSX.Element => (
     <div className={cardGridClassName}>
         <Card className="@container/card">
             <CardHeader>
