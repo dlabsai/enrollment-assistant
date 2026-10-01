@@ -49,6 +49,7 @@ from app.chat.engine_utils import (
     prompt_context_trace_attributes,
     run_agent,
 )
+from app.chat.personalization import serialize_personal_instructions
 from app.chat.template_utils import get_runtime_jinja_environment
 from app.chat.tools import Deps, get_deps_with_jinja_env
 from app.chat.tree_utils import get_conversation_path
@@ -394,6 +395,7 @@ async def _run_guardrails(
     *,
     current_user_message: str = "",
     template: Template,
+    personal_instructions: str = "",
     allowed_url_registry: frozenset[str] | None = None,
     trace_metadata: dict[str, Any] | None = None,
     event_emitter: EventEmitter | None = None,
@@ -411,6 +413,7 @@ async def _run_guardrails(
         response_to_check=response,
         current_user_message=current_user_message,
         previous_rejected_attempts=guardrails_log,
+        personal_instructions=personal_instructions,
     )
     system_prompt = render_guardrails_system_prompt(template, deps)
 
@@ -527,6 +530,7 @@ async def _run_chatbot_guardrails_iteration(
     current_user_message: str,
     chatbot_message_history: list[ModelMessage] | None,
     guardrails_log: list[dict[str, str]],
+    personal_instructions: str = "",
     enable_guardrails: bool = True,
     trace_metadata: dict[str, Any] | None = None,
     event_emitter: EventEmitter | None = None,
@@ -544,7 +548,10 @@ async def _run_chatbot_guardrails_iteration(
 ]:
     guardrail_time: float | None = None
 
-    main_system_prompt = chatbot_template.render(current_date=get_current_date_gmt_minus_4())
+    main_system_prompt = chatbot_template.render(
+        current_date=get_current_date_gmt_minus_4(),
+        personal_instructions_json=serialize_personal_instructions(personal_instructions),
+    )
     main_system_prompt = normalize_whitespace(main_system_prompt)
 
     # Create and run the chatbot agent using PydanticAI
@@ -602,6 +609,7 @@ async def _run_chatbot_guardrails_iteration(
             response,
             current_user_message=current_user_message,
             template=guardrails_template,
+            personal_instructions=personal_instructions,
             allowed_url_registry=allowed_url_registry,
             trace_metadata=trace_metadata,
             event_emitter=event_emitter,
@@ -862,6 +870,7 @@ async def handle_conversation_turn(
     prompt_set_version_id: UUID | None = None,
     prompt_template_overrides: dict[str, str] | None = None,
     prompt_context: dict[str, Any] | None = None,
+    personal_instructions: str = "",
     event_emitter: EventEmitter | None = None,
 ) -> tuple[UUID, MessageOut]:
     """Handle a conversation turn for a given project and template using tree structure.
@@ -954,6 +963,16 @@ async def handle_conversation_turn(
                     conversation_turn = assistant_message_metadata.conversation_turn + 1
                 except IndexError:
                     pass
+
+    # The caller passes an account snapshot, never a mutable User record. Keep public
+    # and instruction-test executions unpersonalized even if called with a value.
+    if (
+        not is_internal
+        or conversation.prompt_source == "draft"
+        or prompt_template_overrides is not None
+        or prompt_set_version_id is not None
+    ):
+        personal_instructions = ""
 
     if not is_regeneration:
         branch_messages.append({"role": "user", "content": user_prompt})
@@ -1050,6 +1069,7 @@ async def handle_conversation_turn(
             current_user_message=user_prompt,
             chatbot_message_history=chatbot_message_history,
             guardrails_log=guardrails_log,
+            personal_instructions=personal_instructions,
             enable_guardrails=enable_guardrails,
             trace_metadata=trace_metadata,
             event_emitter=event_emitter,

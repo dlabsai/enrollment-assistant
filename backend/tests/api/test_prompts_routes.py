@@ -2,7 +2,6 @@ from uuid import uuid4
 
 import pytest
 from httpx import ASGITransport, AsyncClient
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.chat.config import TEMPLATES_DIR
@@ -167,7 +166,7 @@ async def test_prompts_routes_list_and_detail_scope_specific_versions(
 
 
 @pytest.mark.asyncio
-async def test_prompts_routes_create_deploy_undeploy_and_runtime_templates(
+async def test_prompts_routes_create_deploy_undeploy_and_isolate_scopes(
     transactional_session: AsyncSession,
 ) -> None:
     clear_deployed_templates_cache()
@@ -191,15 +190,15 @@ async def test_prompts_routes_create_deploy_undeploy_and_runtime_templates(
             },
         ],
     }
-    summary_payload = {
-        "name": "Summary draft",
-        "description": "Internal summary version",
+    screening_payload = {
+        "name": "Screening draft",
+        "description": "Internal screening version",
         "is_internal": True,
-        "scope": PromptSetScope.SUMMARY.value,
+        "scope": PromptSetScope.COMPLIANCE.value,
         "prompts": [
             {
-                "filename": "summary_agent_internal.j2",
-                "content": "CUSTOM INTERNAL SUMMARY {{ transcript }}",
+                "filename": "compliance_screening_agent_internal.j2",
+                "content": "CUSTOM SCREENING SYSTEM INSTRUCTIONS",
             }
         ],
     }
@@ -211,37 +210,48 @@ async def test_prompts_routes_create_deploy_undeploy_and_runtime_templates(
         create_assistant_response = await client.post(
             "/api/prompts/versions", json=assistant_payload
         )
-        create_summary_response = await client.post("/api/prompts/versions", json=summary_payload)
+        create_screening_response = await client.post(
+            "/api/prompts/versions", json=screening_payload
+        )
 
         assert create_assistant_response.status_code == 201
-        assert create_summary_response.status_code == 201
+        assert create_screening_response.status_code == 201
 
         assistant_version_id = create_assistant_response.json()["id"]
-        summary_version_id = create_summary_response.json()["id"]
+        screening_version_id = create_screening_response.json()["id"]
 
         deploy_assistant_response = await client.post(
             f"/api/prompts/versions/{assistant_version_id}/deploy", json={}
         )
-        deploy_summary_response = await client.post(
-            f"/api/prompts/versions/{summary_version_id}/deploy", json={}
+        deploy_screening_response = await client.post(
+            f"/api/prompts/versions/{screening_version_id}/deploy", json={}
         )
 
         assert deploy_assistant_response.status_code == 200
-        assert deploy_summary_response.status_code == 200
+        assert deploy_screening_response.status_code == 200
 
         deployed_assistant_response = await client.get(
             "/api/prompts/versions/deployed",
             params={"is_internal": "true", "scope": PromptSetScope.ASSISTANT.value},
         )
-        deployed_summary_response = await client.get(
+        deployed_screening_response = await client.get(
             "/api/prompts/versions/deployed",
-            params={"is_internal": "true", "scope": PromptSetScope.SUMMARY.value},
+            params={"is_internal": "true", "scope": PromptSetScope.COMPLIANCE.value},
         )
 
         assert deployed_assistant_response.status_code == 200
-        assert deployed_summary_response.status_code == 200
+        assert deployed_screening_response.status_code == 200
         assert deployed_assistant_response.json()["id"] == assistant_version_id
-        assert deployed_summary_response.json()["id"] == summary_version_id
+        assert deployed_screening_response.json()["id"] == screening_version_id
+
+        screening_detail_response = await client.get(
+            f"/api/prompts/versions/{screening_version_id}"
+        )
+        assert screening_detail_response.status_code == 200
+        assert {
+            prompt["filename"]: prompt["content"]
+            for prompt in screening_detail_response.json()["prompts"]
+        } == {"compliance_screening_agent_internal.j2": ("CUSTOM SCREENING SYSTEM INSTRUCTIONS")}
 
         undeploy_assistant_response = await client.post(
             "/api/prompts/versions/undeploy",
@@ -254,9 +264,9 @@ async def test_prompts_routes_create_deploy_undeploy_and_runtime_templates(
             "/api/prompts/versions/deployed",
             params={"is_internal": "true", "scope": PromptSetScope.ASSISTANT.value},
         )
-        deployed_summary_after_undeploy = await client.get(
+        deployed_screening_after_undeploy = await client.get(
             "/api/prompts/versions/deployed",
-            params={"is_internal": "true", "scope": PromptSetScope.SUMMARY.value},
+            params={"is_internal": "true", "scope": PromptSetScope.COMPLIANCE.value},
         )
 
         assert deployed_assistant_after_undeploy.json() == {
@@ -264,30 +274,15 @@ async def test_prompts_routes_create_deploy_undeploy_and_runtime_templates(
             "version_number": None,
             "name": None,
         }
-        assert deployed_summary_after_undeploy.json()["id"] == summary_version_id
+        assert deployed_screening_after_undeploy.json()["id"] == screening_version_id
 
         delete_assistant_response = await client.delete(
             f"/api/prompts/versions/{assistant_version_id}"
         )
         assert delete_assistant_response.status_code == 204
-
-    summary_templates = (
-        (
-            await transactional_session.execute(
-                select(PromptSetTemplate).where(
-                    PromptSetTemplate.prompt_set_version_id == summary_version_id
-                )
-            )
-        )
-        .scalars()
-        .all()
-    )
-    assert {template.filename: template.content for template in summary_templates} == {
-        "summary_agent_internal.j2": "CUSTOM INTERNAL SUMMARY {{ transcript }}"
-    }
-
-    assistant_version = await transactional_session.get(PromptSetVersion, assistant_version_id)
-    assert assistant_version is None
+        assert (
+            await client.get(f"/api/prompts/versions/{assistant_version_id}")
+        ).status_code == 404
 
     clear_deployed_templates_cache()
 

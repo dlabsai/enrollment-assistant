@@ -12,6 +12,8 @@ if TYPE_CHECKING:
     from pathlib import Path
     from uuid import UUID
 
+    from sqlalchemy.ext.asyncio import AsyncSession
+
 
 class InternalTemplateLoader(BaseLoader):
     """Prefer `_internal.j2` templates when internal mode is enabled."""
@@ -101,6 +103,26 @@ def get_jinja_environment(template_dir: Path, *, is_internal: bool = False) -> E
     return _jinja_environments[key]
 
 
+async def load_deployed_templates(
+    session: AsyncSession, *, is_internal: bool, scope: PromptSetScope
+) -> tuple[UUID | None, dict[str, str]]:
+    version = await session.scalar(
+        select(PromptSetVersion)
+        .where(PromptSetVersion.is_deployed == True)  # noqa: E712
+        .where(PromptSetVersion.is_internal == is_internal)
+        .where(PromptSetVersion.scope == scope)
+        .limit(1)
+    )
+    if version is None:
+        return None, {}
+    prompts = (
+        await session.scalars(
+            select(PromptSetTemplate).where(PromptSetTemplate.prompt_set_version_id == version.id)
+        )
+    ).all()
+    return version.id, {prompt.filename: prompt.content for prompt in prompts}
+
+
 async def get_deployed_templates(*, is_internal: bool, scope: PromptSetScope) -> dict[str, str]:
     cache_key = (is_internal, scope)
     cached = _deployed_templates_cache.get(cache_key)
@@ -116,29 +138,16 @@ async def get_deployed_templates(*, is_internal: bool, scope: PromptSetScope) ->
 
             generation = _template_cache_generation
             async with get_session() as session:
-                version_stmt = (
-                    select(PromptSetVersion)
-                    .where(PromptSetVersion.is_deployed == True)  # noqa: E712
-                    .where(PromptSetVersion.is_internal == is_internal)
-                    .where(PromptSetVersion.scope == scope)
-                    .limit(1)
+                version_id, templates = await load_deployed_templates(
+                    session, is_internal=is_internal, scope=scope
                 )
-                version = (await session.execute(version_stmt)).scalar_one_or_none()
-                if version is None:
-                    templates: dict[str, str] = {}
-                else:
-                    templates_stmt = select(PromptSetTemplate).where(
-                        PromptSetTemplate.prompt_set_version_id == version.id
-                    )
-                    prompts = (await session.execute(templates_stmt)).scalars().all()
-                    templates = {prompt.filename: prompt.content for prompt in prompts}
 
             if generation != _template_cache_generation:
                 continue
 
             _deployed_templates_cache[cache_key] = dict(templates)
-            if version is not None:
-                _version_templates_cache[version.id] = dict(templates)
+            if version_id is not None:
+                _version_templates_cache[version_id] = dict(templates)
             return dict(templates)
 
 

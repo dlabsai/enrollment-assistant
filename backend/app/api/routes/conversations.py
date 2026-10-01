@@ -79,6 +79,7 @@ from app.chat.tree_utils import (
     get_current_branch_path_from_messages,
     update_active_branch_to_message,
 )
+from app.compliance.scheduled import SCHEDULER_USER_EMAIL
 from app.core.config import settings
 from app.core.rbac import (
     PermissionKey,
@@ -721,12 +722,15 @@ def _get_platform_scope(current_user: CurrentUser, platform: str | None) -> tupl
 
 
 def _internal_visibility_condition(
-    current_user: CurrentUser, *, permission_map: dict[PermissionKey, bool]
+    current_user: CurrentUser,
+    *,
+    permission_map: dict[PermissionKey, bool],
+    owner_id_column: Any = Conversation.user_id,
 ) -> Any:
     conditions: list[Any] = []
 
     if permission_map.get(PermissionKey.CHATS_VIEW_OWN, False):
-        conditions.append(Conversation.user_id == current_user.id)
+        conditions.append(owner_id_column == current_user.id)
 
     allowed_group_slugs = get_allowed_chat_owner_group_slugs(permission_map)
     if allowed_group_slugs:
@@ -1032,6 +1036,7 @@ async def list_conversation_users(
     search: Annotated[str | None, Query()] = None,
     platform: Annotated[str | None, Query()] = None,
     kind: Annotated[Literal["chat", "investigation"], Query()] = "chat",
+    include_accounts_without_chats: Annotated[bool, Query()] = False,
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
 ) -> Any:
     permission_map = await get_effective_permission_map(session, current_user)
@@ -1050,28 +1055,35 @@ async def list_conversation_users(
 
     if kind == "investigation" and platform == "public":
         raise HTTPException(status_code=400, detail="Investigations are internal only")
+    if include_accounts_without_chats:
+        if not permission_map.get(PermissionKey.ACCESS_ADOPTION, False):
+            raise HTTPException(status_code=403, detail="Access denied")
+        if kind != "chat" or platform != "internal":
+            raise HTTPException(status_code=400, detail="Account options are internal only")
 
     include_internal, include_public = _get_platform_scope(current_user, platform)
     internal_visibility_condition = _internal_visibility_condition(
-        current_user, permission_map=permission_map
+        current_user,
+        permission_map=permission_map,
+        owner_id_column=(User.id if include_accounts_without_chats else Conversation.user_id),
     )
     pattern = f"%{search.strip()}%" if search is not None and search.strip() != "" else None
 
     statements: list[Any] = []
 
     if include_internal:
-        internal_stmt = (
-            select(
-                User.name.label("name"),
-                User.email.label("email"),
-                literal("internal").label("platform"),
+        internal_stmt = select(
+            User.name.label("name"),
+            User.email.label("email"),
+            literal("internal").label("platform"),
+        ).join(RbacGroup, User.group_id == RbacGroup.id)
+        if include_accounts_without_chats:
+            internal_stmt = internal_stmt.where(User.email != SCHEDULER_USER_EMAIL)
+        else:
+            internal_stmt = internal_stmt.join(Conversation, Conversation.user_id == User.id).where(
+                Conversation.is_public.is_(False), Conversation.kind == kind
             )
-            .join(Conversation, Conversation.user_id == User.id)
-            .join(RbacGroup, User.group_id == RbacGroup.id)
-            .where(Conversation.is_public.is_(False))
-            .where(Conversation.kind == kind)
-            .where(internal_visibility_condition)
-        )
+        internal_stmt = internal_stmt.where(internal_visibility_condition)
         if pattern is not None:
             internal_stmt = internal_stmt.where(
                 or_(User.name.ilike(pattern), User.email.ilike(pattern))

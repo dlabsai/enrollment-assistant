@@ -61,9 +61,16 @@ export interface ScreeningsPage {
 }
 export type DecisionState = "confirmed" | "dismissed";
 export type ReviewState = "needs_review" | DecisionState;
+export type FindingCategory =
+    | "inappropriate"
+    | "misinformation"
+    | "regulatory_compliance"
+    | "reputation_risk"
+    | "confidentiality";
 export interface FlagSummary {
     id: string;
     title: string;
+    categories: FindingCategory[] | null;
     chat: string;
     message_at: string;
     state: ReviewState;
@@ -74,6 +81,7 @@ export interface FlagsPage {
 }
 export interface Decision {
     state: DecisionState;
+    comment: string | null;
     reviewer: string;
     created_at: string;
     revision: number;
@@ -81,6 +89,7 @@ export interface Decision {
 export interface Finding {
     id: string;
     title: string;
+    categories: FindingCategory[] | null;
     explanation: string;
     evidence: string;
     state: ReviewState;

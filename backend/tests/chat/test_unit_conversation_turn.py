@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import UUID, uuid4
 
 import pytest
+from jinja2 import Template
 from pydantic_ai.messages import ModelRequest, SystemPromptPart
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -16,6 +17,7 @@ from app.chat.engine import (
     handle_conversation_turn,
     handle_investigation_turn,
 )
+from app.chat.personalization import serialize_personal_instructions
 from app.core.config import settings
 from app.core.db import async_session_factory
 from app.models import AssistantMessageMetadata, Conversation, Message, User
@@ -57,7 +59,10 @@ def setup_mock_agents(
     # Runtime jinja env + deps
     if chatbot_template is None:
         chatbot_template = MagicMock()
-        chatbot_template.render.return_value = "Mock chatbot system prompt"
+        chatbot_template.render.side_effect = Template(
+            "Mock chatbot system prompt{% if personal_instructions_json %}"
+            "\n{{ personal_instructions_json }}{% endif %}"
+        ).render
     guardrails_template = MagicMock()
     guardrails_template.render.return_value = "Mock guardrails prompt"
 
@@ -128,7 +133,11 @@ class TestHandleConversationTurnNewConversation:
                 is_internal=True,
             )
 
-        assert set(chatbot_template.render.call_args.kwargs) == {"current_date"}
+        assert set(chatbot_template.render.call_args.kwargs) == {
+            "current_date",
+            "personal_instructions_json",
+        }
+        assert chatbot_template.render.call_args.kwargs["personal_instructions_json"] == ""
 
     def test_build_guardrails_feedback_message_uses_system_message(self):
         """Guardrails retry feedback is appended as a separate system message."""
@@ -210,8 +219,14 @@ class TestHandleConversationTurnNewConversation:
                 tool_session_factory=async_session_factory,
                 enable_guardrails=True,
                 max_guardrails_retries=max_retries,
+                is_internal=True,
+                personal_instructions="Frozen Public Health context",
             )
 
+        assert all(
+            call.kwargs["personal_instructions"] == "Frozen Public Health context"
+            for call in run_iteration.await_args_list
+        )
         metadata = await session.scalar(
             select(AssistantMessageMetadata).where(
                 AssistantMessageMetadata.message_id == assistant_message.id
@@ -224,14 +239,30 @@ class TestHandleConversationTurnNewConversation:
         assert assistant_message.metadata.guardrail_retries == expected_retry_count
 
     @pytest.mark.asyncio
-    async def test_demo_turn_uses_retrieval_capable_chatbot_prompt(
+    @pytest.mark.parametrize(
+        ("is_internal", "personal_instructions", "use_draft", "use_saved_version"),
+        [
+            (True, "", False, False),
+            (True, "I work in Public Health.\nPrioritize my department.", False, False),
+            (False, "I work in Public Health.", False, False),
+            (True, "I work in Public Health.", True, False),
+            (True, "I work in Public Health.", False, True),
+        ],
+    )
+    async def test_generic_turn_uses_retrieval_capable_chatbot_prompt(
         self,
         session: AsyncSession,
         test_user: User,
         model_settings: ModelSettings,
         mock_chatbot_result: MagicMock,
+        *,
+        is_internal: bool,
+        personal_instructions: str,
+        use_draft: bool,
+        use_saved_version: bool,
     ):
-        """Demo mode uses the retrieval-capable chatbot prompt."""
+        """Only ordinary internal turns personalize and persist the actual prompt."""
+        test_user.personal_instructions = "Saved account context must not leak into evals."
         with (
             patch("app.chat.engine.create_chatbot_agent") as mock_create_chatbot,
             patch(
@@ -251,6 +282,11 @@ class TestHandleConversationTurnNewConversation:
                 conversation_id=None,
                 parent_message_id=None,
                 user_prompt="Tell me about business programs",
+                personal_instructions=personal_instructions,
+                prompt_template_overrides={"chatbot_agent_internal.j2": "Draft"}
+                if use_draft
+                else None,
+                prompt_set_version_id=uuid4() if use_saved_version else None,
                 is_regeneration=False,
                 chatbot_model_settings=model_settings,
                 guardrail_model_settings=model_settings,
@@ -258,17 +294,21 @@ class TestHandleConversationTurnNewConversation:
                 session=session,
                 tool_session_factory=async_session_factory,
                 enable_guardrails=False,
-                is_internal=True,
+                is_internal=is_internal,
             )
 
-        assert mock_create_chatbot.call_args.args[2] == "Mock chatbot system prompt"
+        expected_prompt = "Mock chatbot system prompt"
+        if is_internal and not use_draft and not use_saved_version and personal_instructions:
+            expected_prompt += f"\n{serialize_personal_instructions(personal_instructions)}"
+        assert mock_create_chatbot.call_args.args[2] == expected_prompt
         assert assistant_message.metadata is not None
 
         metadata = await session.scalar(
             select(AssistantMessageMetadata).filter_by(message_id=assistant_message.id)
         )
         assert metadata is not None
-        assert metadata.system_prompt_rendered == "Mock chatbot system prompt"
+        assert metadata.system_prompt_rendered == expected_prompt
+        assert "Saved account context" not in metadata.system_prompt_rendered
         assert metadata.chatbot_model_settings == model_settings.to_dict()
         assert metadata.chatbot_time is not None
         assert metadata.chatbot_time >= 0
@@ -518,6 +558,8 @@ class TestHandleConversationTurnRegeneration:
                 conversation_id=None,
                 parent_message_id=None,
                 user_prompt="Help me",
+                is_internal=True,
+                personal_instructions="Original Public Health context",
                 is_regeneration=False,
                 chatbot_model_settings=model_settings,
                 guardrail_model_settings=model_settings,
@@ -556,6 +598,8 @@ class TestHandleConversationTurnRegeneration:
                 conversation_id=conversation_id,
                 parent_message_id=user_message_id,
                 user_prompt="Help me",  # Same prompt
+                is_internal=True,
+                personal_instructions="Current account context",
                 is_regeneration=True,
                 chatbot_model_settings=model_settings,
                 guardrail_model_settings=model_settings,
@@ -563,6 +607,22 @@ class TestHandleConversationTurnRegeneration:
                 session=session,
                 tool_session_factory=async_session_factory,
                 enable_guardrails=False,
+            )
+
+            original_metadata = await session.scalar(
+                select(AssistantMessageMetadata).where(
+                    AssistantMessageMetadata.message_id == first_assistant_message.id
+                )
+            )
+            assert original_metadata is not None
+            assert original_metadata.system_prompt_rendered == (
+                "Mock chatbot system prompt\n"
+                + serialize_personal_instructions("Original Public Health context")
+            )
+            assert regenerated_message.metadata is not None
+            assert regenerated_message.metadata.system_prompt_rendered == (
+                "Mock chatbot system prompt\n"
+                + serialize_personal_instructions("Current account context")
             )
 
             # Verify regenerated response is different

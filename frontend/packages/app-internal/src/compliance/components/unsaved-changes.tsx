@@ -1,28 +1,78 @@
 import { useBlocker } from "@tanstack/react-router";
-import { ConfirmDialog } from "@va/shared/components/dialog";
-import type { JSX } from "react";
+import {
+    AlertDialog,
+    AlertDialogAction,
+    AlertDialogCancel,
+    AlertDialogContent,
+    AlertDialogDescription,
+    AlertDialogFooter,
+    AlertDialogHeader,
+    AlertDialogTitle,
+} from "@va/shared/components/ui/alert-dialog";
+import { buttonVariants } from "@va/shared/components/ui/button";
+import { type JSX, useCallback, useEffect } from "react";
 
-export const UnsavedChanges = ({ dirty }: { dirty: boolean }): JSX.Element => {
+export const UnsavedChanges = ({
+    dirty,
+    pending = false,
+    onDiscard,
+}: {
+    dirty: boolean;
+    pending?: boolean;
+    onDiscard: () => void;
+}): JSX.Element => {
+    const shouldBlockNavigation = dirty || pending;
+    const shouldBlock = useCallback(
+        () => shouldBlockNavigation,
+        [shouldBlockNavigation],
+    );
     const blocker = useBlocker({
-        shouldBlockFn: () => dirty,
-        enableBeforeUnload: dirty,
+        shouldBlockFn: shouldBlock,
+        enableBeforeUnload: shouldBlockNavigation,
         withResolver: true,
     });
+    useEffect(() => {
+        if (!shouldBlockNavigation && blocker.status === "blocked") {
+            blocker.reset();
+        }
+    }, [blocker, shouldBlockNavigation]);
     return (
-        <ConfirmDialog
-            cancelLabel="Keep editing"
-            confirmLabel="Discard"
-            description="Your unsaved text will be lost. Stay on this page to save it first."
-            onConfirm={() => {
-                blocker.proceed?.();
-            }}
+        <AlertDialog
             onOpenChange={(open) => {
-                if (!open) {
-                    blocker.reset?.();
+                if (!open && blocker.status === "blocked") {
+                    blocker.reset();
                 }
             }}
             open={blocker.status === "blocked"}
-            title="Leave without saving?"
-        />
+        >
+            <AlertDialogContent>
+                <AlertDialogHeader>
+                    <AlertDialogTitle>
+                        {pending ? "Save in progress" : "Leave without saving?"}
+                    </AlertDialogTitle>
+                    <AlertDialogDescription>
+                        {pending
+                            ? "Wait for the save to finish before leaving this page."
+                            : "Your unsaved text will be lost. Stay on this page to save it first."}
+                    </AlertDialogDescription>
+                </AlertDialogHeader>
+                <AlertDialogFooter>
+                    <AlertDialogCancel>Keep editing</AlertDialogCancel>
+                    <AlertDialogAction
+                        className={buttonVariants({ variant: "destructive" })}
+                        disabled={pending}
+                        onClick={() => {
+                            if (pending || blocker.status !== "blocked") {
+                                return;
+                            }
+                            onDiscard();
+                            blocker.proceed();
+                        }}
+                    >
+                        Discard
+                    </AlertDialogAction>
+                </AlertDialogFooter>
+            </AlertDialogContent>
+        </AlertDialog>
     );
 };

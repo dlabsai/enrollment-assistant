@@ -17,6 +17,14 @@ class DecisionState(StrEnum):
     DISMISSED = "dismissed"
 
 
+class FindingCategory(StrEnum):
+    INAPPROPRIATE = "inappropriate"
+    MISINFORMATION = "misinformation"
+    REGULATORY_COMPLIANCE = "regulatory_compliance"
+    REPUTATION_RISK = "reputation_risk"
+    CONFIDENTIALITY = "confidentiality"
+
+
 class InstructionsSummary(BaseModel):
     id: UUID
     number: int
@@ -125,6 +133,7 @@ class ScreeningDetail(ScreeningSummary):
 class FlagSummary(BaseModel):
     id: UUID
     title: str
+    categories: list[FindingCategory] | None = Field(min_length=1, max_length=5)
     chat: str
     message_at: datetime
     state: ReviewState
@@ -137,6 +146,7 @@ class FlagsPage(BaseModel):
 
 class DecisionOut(BaseModel):
     state: DecisionState
+    comment: str | None
     reviewer: str
     created_at: datetime
     revision: int
@@ -146,12 +156,21 @@ class DecisionInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     state: DecisionState
+    comment: str | None = Field(default=None, max_length=4000)
     expected_revision: int = Field(ge=0)
+
+    @field_validator("comment", mode="before")
+    @classmethod
+    def normalize_comment(cls, value: object) -> object:
+        if isinstance(value, str):
+            return value.strip() or None
+        return value
 
 
 class FindingOut(BaseModel):
     id: UUID
     title: str
+    categories: list[FindingCategory] | None = Field(min_length=1, max_length=5)
     explanation: str
     evidence: str
     state: ReviewState

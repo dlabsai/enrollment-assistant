@@ -177,7 +177,14 @@ export const InstructionsPanel = (): JSX.Element => {
     }
     return (
         <div className="flex flex-col gap-4">
-            <UnsavedChanges dirty={dirty} />
+            <UnsavedChanges
+                dirty={dirty}
+                onDiscard={() => {
+                    setConflict(false);
+                    setDraft(undefined);
+                }}
+                pending={pending}
+            />
             {data.error !== undefined && (
                 <InlineError
                     message={data.error}

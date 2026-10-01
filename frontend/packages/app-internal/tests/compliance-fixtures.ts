@@ -35,6 +35,7 @@ export const screening: ScreeningDetail = {
 export const finding: Finding = {
     id: "44444444-4444-4444-8444-444444444444",
     title: "Possible promise",
+    categories: ["misinformation", "regulatory_compliance"],
     explanation:
         "The message appears to promise admission, which conflicts with the requirement not to promise admission. Confirm whether the stated exception applies.",
     evidence: "Admission is guaranteed.",
@@ -45,6 +46,7 @@ export const finding: Finding = {
 export const flagSummary: FlagSummary = {
     id: finding.id,
     title: finding.title,
+    categories: finding.categories,
     chat: "Admission question",
     message_at: screening.start,
     state: "needs_review",

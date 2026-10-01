@@ -3,6 +3,7 @@ import {
     CollapsibleContent,
     CollapsibleTrigger,
 } from "@va/shared/components/ui/collapsible";
+import { ScrollArea } from "@va/shared/components/ui/scroll-area";
 import { cn } from "@va/shared/lib/utils";
 import { ChevronRight } from "lucide-react";
 import type { JSX } from "react";
@@ -119,7 +120,13 @@ export const InstructionsSidebar = (): JSX.Element => {
 
     return (
         <aside className="bg-sidebar text-sidebar-foreground flex h-full min-h-0 w-full shrink-0 flex-col overflow-hidden border-r md:w-64">
-            <div className="min-h-0 flex-1 overflow-x-hidden overflow-y-auto px-2 py-2">
+            <ScrollArea
+                className="min-h-0 flex-1"
+                overflowFadeClassName="from-sidebar"
+                scrollbarAlwaysVisible
+                viewportClassName="min-h-0 scroll-py-4 py-2 pl-2 pr-3"
+                viewportProps={{ style: { overflowX: "hidden" } }}
+            >
                 <div className="space-y-3">
                     {sections.map((section) => {
                         const isActive = activeSectionId === section.id;
@@ -153,7 +160,7 @@ export const InstructionsSidebar = (): JSX.Element => {
                         );
                     })}
                 </div>
-            </div>
+            </ScrollArea>
         </aside>
     );
 };

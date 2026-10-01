@@ -13,6 +13,7 @@ _SCOPE_TEMPLATE_BASES: dict[PromptSetScope, tuple[str, ...]] = {
     PromptSetScope.TITLE: ("title_agent",),
     PromptSetScope.TITLE_TRANSCRIPT: ("title_agent_transcript",),
     PromptSetScope.GROUNDING: ("grounding_agent",),
+    PromptSetScope.COMPLIANCE: ("compliance_screening_agent",),
 }
 
 

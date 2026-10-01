@@ -29,6 +29,7 @@ from app.compliance.schemas import (
     DecisionInput,
     DecisionOut,
     DecisionState,
+    FindingCategory,
     FindingOut,
     FlagDetail,
     FlagsPage,
@@ -427,6 +428,11 @@ async def get_flag(
     result.flag = FindingOut(
         id=finding.id,
         title=finding.title,
+        categories=(
+            [FindingCategory(category) for category in finding.categories]
+            if finding.categories is not None
+            else None
+        ),
         explanation=finding.explanation,
         evidence=target.content[finding.evidence_start : finding.evidence_end],
         state=ReviewState(finding.review_state),
@@ -434,6 +440,7 @@ async def get_flag(
         decisions=[
             DecisionOut(
                 state=DecisionState(decision.state),
+                comment=decision.comment,
                 reviewer=author or "Former user",
                 created_at=decision.created_at,
                 revision=decision.revision,
@@ -500,11 +507,13 @@ async def decide(
         reviewer_id=access.user.id,
         revision=finding.decision_revision,
         state=body.state.value,
+        comment=body.comment,
     )
     session.add(decision)
     await session.flush()
     result = DecisionOut(
         state=body.state,
+        comment=decision.comment,
         reviewer=access.user.name,
         created_at=decision.created_at,
         revision=decision.revision,

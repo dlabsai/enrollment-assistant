@@ -32,11 +32,15 @@ class PermissionKey(StrEnum):
     ACCESS_RBAC = "access_rbac"
     ACCESS_USAGE = "access_usage"
     ACCESS_ANALYTICS = "access_analytics"
+    ACCESS_CHAT_INSIGHTS = "access_chat_insights"
+    RUN_CHAT_INSIGHTS = "run_chat_insights"
+    MANAGE_CHAT_INSIGHT_CATEGORIES = "manage_chat_insight_categories"
     ACCESS_ADOPTION = "access_adoption"
     ACCESS_PUBLIC_ANALYTICS = "access_public_analytics"
     ACCESS_EVALS = "access_evals"
     ACCESS_SETTINGS = "access_settings"
     ACCESS_RAG_VIEWER = "access_rag_viewer"
+    ACCESS_RESOURCES = "access_resources"
     ACCESS_RAG_EXCLUSIONS = "access_rag_exclusions"
     CHAT_REGENERATE = "chat_regenerate"
     CHAT_VIEW_ACTIVITY = "chat_view_activity"
@@ -134,9 +138,27 @@ PERMISSION_DEFINITIONS: tuple[PermissionDefinition, ...] = (
         category="pages",
     ),
     PermissionDefinition(
+        key=PermissionKey.ACCESS_CHAT_INSIGHTS,
+        label="Topics & Sources page",
+        description="Access aggregate chat-topic and grounded-source insights.",
+        category="pages",
+    ),
+    PermissionDefinition(
+        key=PermissionKey.RUN_CHAT_INSIGHTS,
+        label="Topics & Sources: run analysis",
+        description="Start an incremental chat-topic and document analysis run.",
+        category="chat_insights",
+    ),
+    PermissionDefinition(
+        key=PermissionKey.MANAGE_CHAT_INSIGHT_CATEGORIES,
+        label="Topics & Sources: manage categories",
+        description="Add, edit, or archive tracked chat categories and queue a backfill.",
+        category="chat_insights",
+    ),
+    PermissionDefinition(
         key=PermissionKey.ACCESS_ADOPTION,
-        label="Adoption page",
-        description="Access the internal user adoption page.",
+        label="User Analytics page",
+        description="Access internal account-growth and adoption analytics.",
         category="pages",
     ),
     PermissionDefinition(
@@ -164,10 +186,16 @@ PERMISSION_DEFINITIONS: tuple[PermissionDefinition, ...] = (
         category="pages",
     ),
     PermissionDefinition(
-        key=PermissionKey.ACCESS_RAG_EXCLUSIONS,
-        label="KB Controls page",
-        description="Access KB Controls and manage assistant content visibility.",
+        key=PermissionKey.ACCESS_RESOURCES,
+        label="Resources page",
+        description="Browse assistant resources and preview included documents.",
         category="pages",
+    ),
+    PermissionDefinition(
+        key=PermissionKey.ACCESS_RAG_EXCLUSIONS,
+        label="Resources: manage visibility",
+        description="View visibility history and include or exclude assistant resources.",
+        category="resources",
     ),
     PermissionDefinition(
         key=PermissionKey.CHAT_REGENERATE,
@@ -276,6 +304,7 @@ SYSTEM_GROUP_SPECS: tuple[tuple[SystemGroupSlug, str], ...] = (
 DEFAULT_GROUP_PERMISSIONS: dict[SystemGroupSlug, frozenset[PermissionKey]] = {
     SystemGroupSlug.USER: frozenset(
         {
+            PermissionKey.ACCESS_RESOURCES,
             PermissionKey.CHAT_REGENERATE,
             PermissionKey.CHAT_VIEW_ACTIVITY,
             PermissionKey.CHAT_VIEW_TRACE,
@@ -293,10 +322,14 @@ DEFAULT_GROUP_PERMISSIONS: dict[SystemGroupSlug, frozenset[PermissionKey]] = {
             PermissionKey.ACCESS_RAG,
             PermissionKey.ACCESS_USAGE,
             PermissionKey.ACCESS_ANALYTICS,
+            PermissionKey.ACCESS_CHAT_INSIGHTS,
+            PermissionKey.RUN_CHAT_INSIGHTS,
+            PermissionKey.MANAGE_CHAT_INSIGHT_CATEGORIES,
             PermissionKey.ACCESS_PUBLIC_ANALYTICS,
             PermissionKey.ACCESS_EVALS,
             PermissionKey.ACCESS_SETTINGS,
             PermissionKey.ACCESS_RAG_VIEWER,
+            PermissionKey.ACCESS_RESOURCES,
             PermissionKey.ACCESS_RAG_EXCLUSIONS,
             PermissionKey.CHAT_REGENERATE,
             PermissionKey.CHAT_VIEW_ACTIVITY,
@@ -325,11 +358,15 @@ DEFAULT_GROUP_PERMISSIONS: dict[SystemGroupSlug, frozenset[PermissionKey]] = {
             PermissionKey.ACCESS_RBAC,
             PermissionKey.ACCESS_USAGE,
             PermissionKey.ACCESS_ANALYTICS,
+            PermissionKey.ACCESS_CHAT_INSIGHTS,
+            PermissionKey.RUN_CHAT_INSIGHTS,
+            PermissionKey.MANAGE_CHAT_INSIGHT_CATEGORIES,
             PermissionKey.ACCESS_ADOPTION,
             PermissionKey.ACCESS_PUBLIC_ANALYTICS,
             PermissionKey.ACCESS_EVALS,
             PermissionKey.ACCESS_SETTINGS,
             PermissionKey.ACCESS_RAG_VIEWER,
+            PermissionKey.ACCESS_RESOURCES,
             PermissionKey.ACCESS_RAG_EXCLUSIONS,
             PermissionKey.CHAT_REGENERATE,
             PermissionKey.CHAT_VIEW_ACTIVITY,

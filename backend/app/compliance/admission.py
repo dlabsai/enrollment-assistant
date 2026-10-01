@@ -2,8 +2,16 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from app.chat.config import TEMPLATES_DIR
+from app.chat.template_utils import create_jinja_environment_with_db, load_deployed_templates
 from app.core.config import settings
-from app.models import ComplianceInstructionsVersion, ComplianceItem, ComplianceScreening, Message
+from app.models import (
+    ComplianceInstructionsVersion,
+    ComplianceItem,
+    ComplianceScreening,
+    Message,
+    PromptSetScope,
+)
 
 from .screener import OUTPUT_TOKENS, SCREENING_VERSION
 from .sources import source_selection
@@ -25,6 +33,14 @@ class NoEligibleMessagesError(Exception):
 
 class ScreeningTooLargeError(Exception):
     pass
+
+
+async def _load_agent_prompt(session: AsyncSession) -> str:
+    _, templates = await load_deployed_templates(
+        session, is_internal=True, scope=PromptSetScope.COMPLIANCE
+    )
+    environment = create_jinja_environment_with_db(TEMPLATES_DIR, templates, is_internal=True)
+    return environment.get_template("compliance_screening_agent.j2").render()
 
 
 async def admit_screening(
@@ -50,6 +66,7 @@ async def admit_screening(
     if len(selected) > settings.COMPLIANCE_MAX_MESSAGES:
         raise ScreeningTooLargeError
 
+    agent_prompt = await _load_agent_prompt(session)
     screening = ComplianceScreening(
         id=screening_id,
         created_at=requested_at,
@@ -62,6 +79,7 @@ async def admit_screening(
         model_settings={
             "max_tokens": OUTPUT_TOKENS,
             "max_input_characters": settings.COMPLIANCE_MAX_INPUT_CHARACTERS,
+            "agent_prompt": agent_prompt,
         },
     )
     session.add(screening)

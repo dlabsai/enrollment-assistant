@@ -5,9 +5,12 @@ from typing import TYPE_CHECKING
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from sqlalchemy import text
 
+from app.chat.generation_attempts import fail_stale_generation_attempts
+from app.chat_insights.scheduled import admit_nightly_run
 from app.compliance.scheduled import SCHEDULER_TIMEZONE, admit_daily_screening
-from app.core.db import engine
+from app.core.db import engine, get_session
 from app.rag.pipeline import RagPipelineAlreadyRunningError, run_rag_sync_pipeline
+from app.utils import current_time_utc
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
@@ -18,9 +21,31 @@ scheduler = AsyncIOScheduler()
 
 _SYNC_DATA_LOCK_ID = 20_260_407_03
 _SCHEDULED_SCREENING_LOCK_ID = 20_260_407_04
+_CHAT_INSIGHTS_LOCK_ID = 20_260_919_02
 
 
 def configure_scheduler_jobs() -> None:
+    scheduler.add_job(  # type: ignore[call-arg]
+        fail_stale_generation_attempts_job,
+        trigger="interval",
+        minutes=5,
+        next_run_time=current_time_utc(),
+        max_instances=1,
+        coalesce=True,
+        id="fail_stale_generation_attempts",
+        replace_existing=True,
+    )
+    scheduler.add_job(  # type: ignore[call-arg]
+        scheduled_chat_insights_job,
+        trigger="cron",
+        hour=1,
+        minute=0,
+        timezone=SCHEDULER_TIMEZONE,
+        max_instances=1,
+        coalesce=True,
+        id="scheduled_chat_insights",
+        replace_existing=True,
+    )
     scheduler.add_job(  # type: ignore[call-arg]
         scheduled_screening_job,
         trigger="cron",
@@ -61,6 +86,29 @@ async def _job_lock(lock_id: int, *, job_name: str) -> AsyncGenerator[bool]:
             yield True
         finally:
             await conn.execute(text("SELECT pg_advisory_unlock(:lock_id)"), {"lock_id": lock_id})
+
+
+async def fail_stale_generation_attempts_job() -> None:
+    try:
+        async with get_session() as session:
+            failed_count = await fail_stale_generation_attempts(session)
+        if failed_count:
+            logger.warning("Marked %d stale chat generation attempts as failed", failed_count)
+    except Exception:
+        logger.exception("Stale chat generation attempt sweep failed")
+
+
+async def scheduled_chat_insights_job() -> None:
+    async with _job_lock(
+        _CHAT_INSIGHTS_LOCK_ID, job_name="scheduled_chat_insights_job"
+    ) as acquired:
+        if not acquired:
+            return
+
+        try:
+            await admit_nightly_run()
+        except Exception:
+            logger.exception("Scheduled chat-insight admission failed")
 
 
 async def scheduled_screening_job() -> None:

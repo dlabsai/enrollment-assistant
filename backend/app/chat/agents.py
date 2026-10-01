@@ -10,6 +10,7 @@ from pydantic_ai.providers.azure import AzureProvider
 from pydantic_ai.providers.openai import OpenAIProvider
 
 from app.chat.buffered_model import BufferedResponseModel
+from app.chat.personalization import serialize_personal_instructions
 from app.chat.provider_http import get_provider_http_client
 from app.chat.tools import Deps
 from app.core.config import settings
@@ -114,6 +115,7 @@ class GuardrailsDeps:
     previous_rejected_attempts: list[dict[str, str]] = field(
         default_factory=_empty_rejected_attempts
     )
+    personal_instructions: str = ""
 
 
 class GuardrailsResult(BaseModel):
@@ -191,6 +193,7 @@ def render_guardrails_system_prompt(template: Template, deps: GuardrailsDeps) ->
         chatbot_agent_response=deps.response_to_check,
         current_user_message=deps.current_user_message,
         previous_rejected_attempts=deps.previous_rejected_attempts,
+        personal_instructions_json=serialize_personal_instructions(deps.personal_instructions),
     )
 
 

@@ -14,21 +14,21 @@ import type {
     RagDocumentSortBy,
 } from "../../rag-viewer/types";
 
-export type RagExclusionsView = "list" | "folders" | "history";
-export type RagExclusionsSortBy =
+export type ResourcesView = "list" | "folders" | "history";
+export type ResourcesSortBy =
     | Extract<
           RagDocumentSortBy,
           "title" | "source_type" | "source_id" | "excluded"
       >
     | RagDocumentExclusionEventSortBy;
 
-export interface RagExclusionsSearch {
+export interface ResourcesSearch {
     document: string | undefined;
-    view: RagExclusionsView;
+    view: ResourcesView;
     query: string;
     exclusion: RagViewerExclusionFilter;
     source: RagViewerSourceFilter;
-    sortBy: RagExclusionsSortBy;
+    sortBy: ResourcesSortBy;
     desc: boolean;
     page: number;
     pageSize: DataTablePageSize;
@@ -36,7 +36,7 @@ export interface RagExclusionsSearch {
 
 const DEFAULT_EXCLUSION: RagViewerExclusionFilter = "all";
 const DEFAULT_PAGE = 1;
-const DEFAULT_PAGE_SIZE: RagExclusionsSearch["pageSize"] =
+const DEFAULT_PAGE_SIZE: ResourcesSearch["pageSize"] =
     DATA_TABLE_DEFAULT_PAGE_SIZE;
 const DEFAULT_QUERY = "";
 const DEFAULT_SOURCE: RagViewerSourceFilter = "all";
@@ -70,7 +70,7 @@ const parseBoolean = (value: unknown): boolean | undefined => {
     return undefined;
 };
 
-const parseView = (value: unknown): RagExclusionsView => {
+const parseView = (value: unknown): ResourcesView => {
     if (value === "folders" || value === "browse") {
         return "folders";
     }
@@ -84,12 +84,12 @@ const parseView = (value: unknown): RagExclusionsView => {
 
 const parsePageSize = (
     value: unknown,
-): RagExclusionsSearch["pageSize"] | undefined => {
+): ResourcesSearch["pageSize"] | undefined => {
     const parsed = parsePositiveInt(value);
     return isDataTablePageSize(parsed) ? parsed : undefined;
 };
 
-export const isRagExclusionsListSortBy = (
+export const isResourcesListSortBy = (
     value: unknown,
 ): value is Extract<
     RagDocumentSortBy,
@@ -100,7 +100,7 @@ export const isRagExclusionsListSortBy = (
     value === "source_id" ||
     value === "excluded";
 
-export const isRagExclusionsHistorySortBy = (
+export const isResourcesHistorySortBy = (
     value: unknown,
 ): value is RagDocumentExclusionEventSortBy =>
     value === "created_at" ||
@@ -109,27 +109,26 @@ export const isRagExclusionsHistorySortBy = (
     value === "source_type" ||
     value === "actor";
 
-export const defaultRagExclusionsSortBy = (
-    view: RagExclusionsView,
-): RagExclusionsSortBy => (view === "history" ? "created_at" : "title");
+export const defaultResourcesSortBy = (
+    view: ResourcesView,
+): ResourcesSortBy => (view === "history" ? "created_at" : "title");
 
-export const defaultRagExclusionsDescending = (
-    view: RagExclusionsView,
-): boolean => view === "history";
+export const defaultResourcesDescending = (view: ResourcesView): boolean =>
+    view === "history";
 
 const parseSortBy = (
     value: unknown,
-    view: RagExclusionsView,
-): RagExclusionsSortBy => {
+    view: ResourcesView,
+): ResourcesSortBy => {
     if (view === "history") {
-        return isRagExclusionsHistorySortBy(value) ? value : "created_at";
+        return isResourcesHistorySortBy(value) ? value : "created_at";
     }
-    return isRagExclusionsListSortBy(value) ? value : "title";
+    return isResourcesListSortBy(value) ? value : "title";
 };
 
-export const validateRagExclusionsSearch = (
+export const validateResourcesSearch = (
     search: Record<string, unknown>,
-): RagExclusionsSearch => {
+): ResourcesSearch => {
     const view = parseView(search.view);
 
     return {
@@ -137,7 +136,7 @@ export const validateRagExclusionsSearch = (
             typeof search.document === "string" && search.document !== ""
                 ? search.document
                 : undefined,
-        desc: parseBoolean(search.desc) ?? defaultRagExclusionsDescending(view),
+        desc: parseBoolean(search.desc) ?? defaultResourcesDescending(view),
         exclusion:
             typeof search.exclusion === "string" &&
             isRagViewerExclusionFilter(search.exclusion)

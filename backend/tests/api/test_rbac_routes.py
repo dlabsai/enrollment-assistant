@@ -1,3 +1,4 @@
+from datetime import datetime
 from uuid import uuid4
 
 import pytest
@@ -53,6 +54,23 @@ def test_dev_group_defaults_include_message_footer_diagnostics() -> None:
         PermissionKey.CHAT_VIEW_GUARDRAILS_FAILURES
         not in DEFAULT_GROUP_PERMISSIONS[SystemGroupSlug.ADMIN]
     )
+
+
+@pytest.mark.asyncio
+async def test_rbac_bootstrap_includes_user_created_at(transactional_session: AsyncSession) -> None:
+    dev = await _create_user(
+        transactional_session, group_slug=SystemGroupSlug.DEV, email_prefix="rbac-dev"
+    )
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://testserver"
+    ) as client:
+        authenticate_client(client, dev.id)
+        response = await client.get("/api/rbac/bootstrap")
+
+    assert response.status_code == 200
+    dev_payload = next(user for user in response.json()["users"] if user["id"] == str(dev.id))
+    assert datetime.fromisoformat(dev_payload["created_at"]) == dev.created_at
 
 
 @pytest.mark.asyncio

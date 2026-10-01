@@ -76,7 +76,7 @@ const refresh = async (): Promise<void> => {
     });
     await act(settle);
 };
-const typeInstructions = async (text: string): Promise<HTMLTextAreaElement> => {
+const typeTextarea = async (text: string): Promise<HTMLTextAreaElement> => {
     const textarea = document.querySelector("textarea");
     assert.ok(textarea);
     await act(async () => {
@@ -295,7 +295,7 @@ test("an instruction conflict preserves and explicitly rebases the draft", async
     const page = await mount("/compliance/instructions");
     try {
         await click("Edit");
-        await typeInstructions(third.content);
+        await typeTextarea(third.content);
         await click("Save");
 
         assert.equal(
@@ -338,6 +338,92 @@ test("a deep-linked flag remains reviewable outside the current queue page", asy
         assert.equal(button("Back to screening").disabled, false);
         assert.ok(document.body.textContent?.includes("Review flag"));
         assert.ok(document.body.textContent?.includes(finding.explanation));
+    } finally {
+        await page.cleanup();
+    }
+});
+
+test("flag navigation waits for saves and respects unsaved comments", async () => {
+    const secondSummary = {
+        ...flagSummary,
+        id: "88888888-8888-4888-8888-888888888888",
+        title: "Different flag",
+    };
+    const secondUrl = `${base}/flags/${secondSummary.id}`;
+    const secondDetail = {
+        ...flagDetail,
+        flag: {
+            ...finding,
+            id: secondSummary.id,
+            title: secondSummary.title,
+        },
+    };
+    api.get.mockImplementation(async (endpoint) => {
+        if (endpoint === base) return screening;
+        if (endpoint === detailUrl) return flagDetail;
+        if (endpoint === secondUrl) return secondDetail;
+        return { items: [flagSummary, secondSummary], total: 2 };
+    });
+    let finishDecision: ((value: unknown) => void) | undefined;
+    api.post.mockReturnValue(
+        new Promise((resolve) => {
+            finishDecision = resolve;
+        }),
+    );
+    const page = await mount(detailUrl);
+    try {
+        await click("Confirm");
+        await click("Next");
+        assert.equal(page.history.location.pathname, detailUrl);
+        assert.match(
+            document.body.textContent,
+            /Wait for the save to finish before leaving this page\./u,
+        );
+        assert.equal(button("Discard").disabled, true);
+
+        await act(async () => {
+            finishDecision?.({
+                state: "confirmed",
+                comment: null,
+                reviewer: "Current lawyer",
+                created_at: screening.created_at,
+                revision: 1,
+            });
+            await settle();
+        });
+        await act(settle);
+        assert.equal(page.history.location.pathname, detailUrl);
+        assert.equal(
+            document
+                .querySelector('[data-slot="alert-dialog-content"]')
+                ?.hasAttribute("data-open") ?? false,
+            false,
+        );
+
+        await click("Change decision");
+        await typeTextarea("Keep this decision context.");
+        await click("Next");
+
+        assert.equal(page.history.location.pathname, detailUrl);
+        assert.match(document.body.textContent, /Leave without saving\?/u);
+        await click("Keep editing");
+        assert.equal(
+            document
+                .querySelector('[data-slot="alert-dialog-content"]')
+                ?.hasAttribute("data-open") ?? false,
+            false,
+        );
+        assert.equal(page.history.location.pathname, detailUrl);
+        assert.equal(
+            page.host.querySelector("textarea")?.value,
+            "Keep this decision context.",
+        );
+
+        await click("Next");
+        assert.match(document.body.textContent, /Leave without saving\?/u);
+        await click("Discard");
+        assert.equal(page.history.location.pathname, secondUrl);
+        assert.equal(page.host.querySelector("textarea")?.value, "");
     } finally {
         await page.cleanup();
     }
@@ -386,6 +472,7 @@ test("flag navigation retains an inert review until the next flag replaces it", 
     });
     api.post.mockResolvedValue({
         state: "confirmed",
+        comment: null,
         reviewer: "Current lawyer",
         created_at: screening.created_at,
         revision: 1,
@@ -393,9 +480,20 @@ test("flag navigation retains an inert review until the next flag replaces it", 
     const page = await mount(detailUrl);
     try {
         assert.ok(page.host.querySelector('section[aria-label="Flag review"]'));
+        assert.equal(
+            page.host.querySelector('[role="separator"]')?.getAttribute(
+                "aria-orientation",
+            ),
+            "horizontal",
+        );
         assert.equal(page.host.querySelector("mark")?.textContent, finding.evidence);
         await click("Confirm");
-        assert.match(page.host.textContent, /Confirmed by Current lawyer/u);
+        const decisionHistory = page.host.querySelector(
+            'section[aria-label="Decision history"]',
+        );
+        assert.ok(decisionHistory);
+        assert.match(decisionHistory.textContent, /Confirmed/u);
+        assert.match(decisionHistory.textContent, /by Current lawyer/u);
         await click("Next flag");
 
         assert.equal(page.history.location.pathname, secondUrl);
@@ -419,7 +517,10 @@ test("flag navigation retains an inert review until the next flag replaces it", 
             page.host.textContent,
             new RegExp(finding.explanation, "u"),
         );
-        assert.doesNotMatch(page.host.textContent, /Confirmed by Current lawyer/u);
+        assert.equal(
+            page.host.querySelector('section[aria-label="Decision history"]'),
+            null,
+        );
         assert.equal(page.host.querySelector("mark")?.textContent, secondEvidence);
         assert.equal(button("Confirm").disabled, false);
     } finally {
@@ -428,12 +529,19 @@ test("flag navigation retains an inert review until the next flag replaces it", 
 });
 
 test("failed Chats show actionable reasons and retry only when useful", async () => {
+    const jailbreakFailure = {
+        chat_id: "99999999-9999-4999-8999-999999999999",
+        chat: "Jailbreak-classified Chat",
+        assistant_messages: 1,
+        reason: "Screening stopped because the service thought text in this Chat might be an attempt to change the screening instructions. Trying the same Chat again is unlikely to help.",
+        retryable: false,
+    };
     const failed = {
         ...screening,
         screened: 7,
         screened_conversations: 3,
-        errors: 3,
-        error_conversations: 2,
+        errors: 4,
+        error_conversations: 3,
         failures: [
             {
                 chat_id: "77777777-7777-4777-8777-777777777777",
@@ -449,24 +557,71 @@ test("failed Chats show actionable reasons and retry only when useful", async ()
                 reason: "This Chat is too long to screen without leaving out context. Review it manually.",
                 retryable: false,
             },
+            jailbreakFailure,
         ],
     };
+    let displayed = failed;
     api.get.mockImplementation(async (endpoint) => {
-        if (endpoint === base) return failed;
+        if (endpoint === base) return displayed;
         return { items: [], total: 0 };
     });
-    api.post.mockResolvedValue({ queued: 1, conversations: 1 });
+    api.post.mockImplementation(async () => {
+        displayed = {
+            ...failed,
+            errors: 1,
+            error_conversations: 1,
+            failures: [jailbreakFailure],
+        };
+        return { queued: 1, conversations: 1 };
+    });
     const page = await mount(`/compliance/screenings/${screening.id}`);
     try {
-        assert.match(page.host.textContent, /2 Chats could not be screened/u);
+        assert.match(
+            page.host.textContent,
+            /Automated screening did not finish for 3 Chats\./u,
+        );
+        assert.doesNotMatch(page.host.textContent, /Provider failure/u);
+        assert.doesNotMatch(page.host.textContent, /Long Chat/u);
+        assert.equal(button("Show details").disabled, false);
+
+        await click("Show details");
         assert.match(page.host.textContent, /Provider failure/u);
         assert.match(page.host.textContent, /Long Chat/u);
         assert.match(page.host.textContent, /Review it manually/u);
-        await click("Retry");
+        assert.match(page.host.textContent, /attempt to change the screening instructions/u);
+        const anotherTryBadge = [...page.host.querySelectorAll("span")].find(
+            (candidate) => candidate.textContent?.trim() === "Another try may help",
+        );
+        assert.ok(anotherTryBadge);
+        assert.match(anotherTryBadge.className, /bg-amber-500\/10/u);
+        assert.doesNotMatch(
+            anotherTryBadge.className,
+            /bg-destructive|text-destructive/u,
+        );
+        const jailbreakRow = [...page.host.querySelectorAll("li")].find(
+            (candidate) =>
+                candidate.textContent?.includes("Jailbreak-classified Chat") ?? false,
+        );
+        assert.ok(jailbreakRow);
+        assert.equal(
+            [...jailbreakRow.querySelectorAll("span")].some(
+                (candidate) => candidate.textContent?.trim() === "Another try may help",
+            ),
+            false,
+        );
+        assert.equal(button("Hide details").disabled, false);
+        await click("Try again");
         assert.deepEqual(api.post.mock.calls[0], [
             `/compliance/screenings/${screening.id}/retry`,
             {},
         ]);
+        assert.match(page.host.textContent, /change the screening instructions/u);
+        assert.equal(
+            [...page.host.querySelectorAll("button")].some(
+                (candidate) => candidate.textContent?.trim() === "Try again",
+            ),
+            false,
+        );
     } finally {
         await page.cleanup();
     }
@@ -496,7 +651,7 @@ test("a scheduled admission failure stays visible without a futile retry", async
         assert.match(page.host.textContent, /Incomplete/u);
         assert.equal(
             [...page.host.querySelectorAll("button")].some(
-                (candidate) => candidate.textContent?.trim() === "Retry",
+                (candidate) => candidate.textContent?.trim() === "Try again",
             ),
             false,
         );
@@ -543,8 +698,10 @@ test("screenings present one flag queue with a primary next action", async () =>
             [...document.querySelectorAll("th")].map(
                 (header) => header.textContent,
             ),
-            ["Flag", "Chat", "Message", "Decision"],
+            ["Flag", "Categories", "Chat", "Message", "Decision"],
         );
+        assert.match(page.host.textContent, /Misinformation/u);
+        assert.match(page.host.textContent, /Regulatory Compliance/u);
         const rowActionLabel = `Review flag: ${finding.title}`;
         assert.equal(button(rowActionLabel).tagName, "BUTTON");
         await click(rowActionLabel);
@@ -708,7 +865,7 @@ test("the new-screening modal waits for a current preview", async () => {
         assert.ok(!document.body.textContent?.includes("Start screening"));
         await click("Instructions");
         await click("Edit");
-        await typeInstructions(updated.content);
+        await typeTextarea(updated.content);
         await click("Save");
         await click("Back to screenings");
         assert.ok(!document.body.textContent?.includes("Start screening"));

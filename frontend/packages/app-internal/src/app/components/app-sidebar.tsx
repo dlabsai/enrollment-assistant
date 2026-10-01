@@ -43,6 +43,7 @@ import {
     GraduationCap,
     History,
     KeyRound,
+    LibraryBig,
     ListTree,
     LogOut,
     type LucideIcon,
@@ -53,6 +54,7 @@ import {
     Settings,
     ShieldAlert,
     Sun,
+    Tags,
     ThumbsUp,
     UserRoundCheck,
 } from "lucide-react";
@@ -66,6 +68,7 @@ import {
     isAppFormatMode,
     setAppFormatMode,
 } from "../../lib/time-zone";
+import { UserSettingsDialog } from "../../user-settings/components/user-settings-dialog";
 import type { AppView } from "../feature-flags";
 
 interface AppSidebarProps {
@@ -90,6 +93,7 @@ export const AppSidebar = ({
 }: AppSidebarProps): JSX.Element => {
     const [suppressOpenSidebarTooltip, setSuppressOpenSidebarTooltip] =
         useState(false);
+    const [userSettingsOpen, setUserSettingsOpen] = useState(false);
     const formatMode = getAppFormatMode();
     const { resolvedTheme, setTheme } = useTheme();
     const { isMobile, state, toggleSidebar } = useSidebar();
@@ -167,12 +171,6 @@ export const AppSidebar = ({
             allowed: hasPermission(user, "access_chats"),
         },
         {
-            id: "compliance",
-            icon: ClipboardCheck,
-            label: "Screenings",
-            allowed: hasPermission(user, "access_compliance"),
-        },
-        {
             id: "messages",
             icon: MessageSquareText,
             label: "Messages",
@@ -209,6 +207,12 @@ export const AppSidebar = ({
             allowed: hasPermission(user, "access_analytics"),
         },
         {
+            id: "chat-insights",
+            icon: Tags,
+            label: "Topics & Sources",
+            allowed: hasPermission(user, "access_chat_insights"),
+        },
+        {
             id: "quality",
             icon: ShieldAlert,
             label: "Quality",
@@ -217,7 +221,7 @@ export const AppSidebar = ({
         {
             id: "adoption",
             icon: UserRoundCheck,
-            label: "Adoption",
+            label: "User Analytics",
             allowed: hasPermission(user, "access_adoption"),
         },
         {
@@ -233,10 +237,10 @@ export const AppSidebar = ({
             allowed: hasPermission(user, "access_rag_viewer"),
         },
         {
-            id: "rag-exclusions",
-            icon: SearchCheck,
-            label: "KB Controls",
-            allowed: hasPermission(user, "access_rag_exclusions"),
+            id: "resources",
+            icon: LibraryBig,
+            label: "Resources",
+            allowed: hasPermission(user, "access_resources"),
         },
         {
             id: "rag",
@@ -273,6 +277,12 @@ export const AppSidebar = ({
             icon: ListTree,
             label: "Eval Traces",
             allowed: hasPermission(user, "access_evals"),
+        },
+        {
+            id: "compliance",
+            icon: ClipboardCheck,
+            label: "Screenings",
+            allowed: hasPermission(user, "access_compliance"),
         },
         {
             id: "instructions",
@@ -450,17 +460,29 @@ export const AppSidebar = ({
                     </SidebarMenuItem>
                 </SidebarMenu>
                 <SidebarMenu>
+                    <SidebarMenuItem>
+                        <SidebarMenuButton
+                            onClick={() => {
+                                setUserSettingsOpen(true);
+                            }}
+                            tooltip="Settings"
+                            type="button"
+                        >
+                            <Settings />
+                            <span>Settings</span>
+                        </SidebarMenuButton>
+                    </SidebarMenuItem>
                     {user.group.slug === "dev" && (
                         <SidebarMenuItem>
                             <DropdownMenu>
                                 <DropdownMenuTrigger
                                     render={
                                         <SidebarMenuButton
-                                            tooltip="Settings"
+                                            tooltip="Developer settings"
                                             type="button"
                                         >
                                             <Settings />
-                                            <span>Settings</span>
+                                            <span>Developer settings</span>
                                         </SidebarMenuButton>
                                     }
                                 />
@@ -554,6 +576,14 @@ export const AppSidebar = ({
                 </SidebarMenu>
             </SidebarFooter>
             <SidebarRail />
+            {userSettingsOpen && (
+                <UserSettingsDialog
+                    key={user.id}
+                    onClose={() => {
+                        setUserSettingsOpen(false);
+                    }}
+                />
+            )}
         </Sidebar>
     );
 };

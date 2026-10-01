@@ -4,7 +4,12 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.rbac import SystemGroupSlug, get_group_for_slug
+from app.core.rbac import (
+    PermissionKey,
+    SystemGroupSlug,
+    get_group_for_slug,
+    replace_user_permission_overrides,
+)
 from app.core.security import get_password_hash
 from app.evals.rag_copy import (
     EvalRagCopyLogCallback,
@@ -88,21 +93,133 @@ async def _create_document(
 
 
 @pytest.mark.asyncio
-async def test_rag_documents_require_access_rag_viewer_permission(
+async def test_rag_documents_require_resources_or_viewer_permission(
     transactional_session: AsyncSession,
 ) -> None:
     user = await _create_user(
         transactional_session, group_slug=SystemGroupSlug.USER, email_prefix="rag-user"
     )
+    excluded_document = await _create_document(
+        transactional_session,
+        document_type=DocumentType.WEBSITE_PAGE,
+        source_id=8999,
+        title="Viewer-only excluded document",
+    )
+    transactional_session.add(
+        RagDocumentExclusion(
+            source_key=excluded_document.source_key,
+            reason="Test exclusion",
+            created_by_user_id=user.id,
+        )
+    )
+    await replace_user_permission_overrides(
+        transactional_session,
+        user,
+        {PermissionKey.ACCESS_RESOURCES: False, PermissionKey.ACCESS_RAG_EXCLUSIONS: True},
+    )
+    await transactional_session.commit()
 
     async with AsyncClient(
         transport=ASGITransport(app=app), base_url="http://testserver"
     ) as client:
         authenticate_client(client, user.id)
-        response = await client.get("/api/rag/documents")
+        denied_response = await client.get("/api/rag/documents")
 
-    assert response.status_code == 403
-    assert response.json() == {"detail": "Access denied"}
+        await replace_user_permission_overrides(
+            transactional_session,
+            user,
+            {PermissionKey.ACCESS_RESOURCES: False, PermissionKey.ACCESS_RAG_VIEWER: True},
+        )
+        await transactional_session.commit()
+        viewer_response = await client.get(
+            "/api/rag/documents",
+            params={"exclusion": "excluded", "search": excluded_document.title},
+        )
+
+    assert denied_response.status_code == 403
+    assert denied_response.json() == {"detail": "Access denied"}
+    assert viewer_response.status_code == 200
+    assert [item["id"] for item in viewer_response.json()["items"]] == [str(excluded_document.id)]
+
+
+@pytest.mark.asyncio
+async def test_resources_only_users_can_read_only_included_documents(
+    transactional_session: AsyncSession,
+) -> None:
+    user = await _create_user(
+        transactional_session, group_slug=SystemGroupSlug.USER, email_prefix="resources-user"
+    )
+    included_document = await _create_document(
+        transactional_session,
+        document_type=DocumentType.WEBSITE_PAGE,
+        source_id=9001,
+        title="Resources Visibility Included",
+    )
+    excluded_document = await _create_document(
+        transactional_session,
+        document_type=DocumentType.WEBSITE_PAGE,
+        source_id=9002,
+        title="Resources Visibility Excluded",
+    )
+    transactional_session.add(
+        RagDocumentExclusion(
+            source_key=excluded_document.source_key,
+            reason="Test exclusion",
+            created_by_user_id=user.id,
+        )
+    )
+    await transactional_session.commit()
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://testserver"
+    ) as client:
+        authenticate_client(client, user.id)
+        list_response = await client.get(
+            "/api/rag/documents",
+            params={"exclusion": "all", "search": "Resources Visibility", "types": "website_page"},
+        )
+        excluded_filter_response = await client.get(
+            "/api/rag/documents",
+            params={
+                "exclusion": "excluded",
+                "search": "Resources Visibility",
+                "types": "website_page",
+            },
+        )
+        tree_response = await client.get("/api/rag/documents/tree", params={"exclusion": "all"})
+        included_detail_response = await client.get(f"/api/rag/documents/{included_document.id}")
+        excluded_detail_response = await client.get(f"/api/rag/documents/{excluded_document.id}")
+        history_response = await client.get("/api/rag/documents/exclusion-events")
+        exclude_response = await client.put(
+            "/api/rag/documents/exclusion",
+            json={"source_key": included_document.source_key, "reason": "Not allowed"},
+        )
+        include_response = await client.delete(
+            "/api/rag/documents/exclusion", params={"source_key": excluded_document.source_key}
+        )
+
+    assert list_response.status_code == 200
+    assert [item["id"] for item in list_response.json()["items"]] == [str(included_document.id)]
+    assert excluded_filter_response.status_code == 200
+    assert [item["id"] for item in excluded_filter_response.json()["items"]] == [
+        str(included_document.id)
+    ]
+    assert tree_response.status_code == 200
+    tree_document_ids = {
+        document["document_id"]
+        for root in tree_response.json()
+        for document_type in root["children"]
+        for document in document_type["children"]
+        if document["document_id"] is not None
+    }
+    assert str(included_document.id) in tree_document_ids
+    assert str(excluded_document.id) not in tree_document_ids
+    assert included_detail_response.status_code == 200
+    assert included_detail_response.json()["id"] == str(included_document.id)
+    assert excluded_detail_response.status_code == 404
+    for response in (history_response, exclude_response, include_response):
+        assert response.status_code == 403
+        assert response.json() == {"detail": "Access denied"}
 
 
 @pytest.mark.asyncio

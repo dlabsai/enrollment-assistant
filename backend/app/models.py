@@ -20,7 +20,7 @@ from sqlalchemy import (
     text,
 )
 from sqlalchemy import Enum as SAEnum
-from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import ARRAY, JSONB
 from sqlalchemy.ext.asyncio import AsyncAttrs
 from sqlalchemy.orm import DeclarativeBase, Mapped, declared_attr, mapped_column, relationship
 
@@ -251,6 +251,9 @@ class User(Base):
 
     email: Mapped[str] = mapped_column(unique=True, nullable=False, index=True)
     name: Mapped[str] = mapped_column(nullable=False)
+    personal_instructions: Mapped[str] = mapped_column(
+        Text, nullable=False, default="", server_default=""
+    )
     password_hash: Mapped[str] = mapped_column(nullable=False)
     entra_tenant_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     entra_object_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
@@ -496,6 +499,7 @@ class ComplianceFinding(Base):
         ForeignKey("message.id", ondelete="CASCADE"), index=True
     )
     title: Mapped[str] = mapped_column(String(240))
+    categories: Mapped[list[str] | None] = mapped_column(ARRAY(String(40)))
     explanation: Mapped[str] = mapped_column(Text)
     evidence_start: Mapped[int] = mapped_column(Integer)
     evidence_end: Mapped[int] = mapped_column(Integer)
@@ -512,6 +516,7 @@ class ComplianceDecision(Base):
     reviewer_id: Mapped[UUID | None] = mapped_column(ForeignKey("user.id", ondelete="SET NULL"))
     revision: Mapped[int] = mapped_column(Integer)
     state: Mapped[str] = mapped_column(String(24))
+    comment: Mapped[str | None] = mapped_column(Text)
 
     __table_args__ = (
         Index("ix_compliance_decision_revision", "finding_id", "revision", unique=True),
@@ -798,6 +803,153 @@ class RagBuildJobDocumentChange(Base):
     __table_args__ = (Index("ix_rag_build_job_document_change_job_type", "job_id", "change_type"),)
 
 
+class ChatInsightTaxonomyRevision(Base):
+    number: Mapped[int] = mapped_column(Integer, nullable=False, unique=True, index=True)
+    status: Mapped[str] = mapped_column(String(24), nullable=False, index=True)
+    definitions: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, nullable=False)
+    created_by_user_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("user.id", ondelete="SET NULL"), nullable=True
+    )
+    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class ChatInsightCategory(Base):
+    key: Mapped[str] = mapped_column(String(96), nullable=False, unique=True, index=True)
+    name: Mapped[str] = mapped_column(String(160), nullable=False)
+    description: Mapped[str] = mapped_column(Text, nullable=False)
+    include_examples: Mapped[list[str]] = mapped_column(JSONB, nullable=False, default=list)
+    exclude_examples: Mapped[list[str]] = mapped_column(JSONB, nullable=False, default=list)
+    origin: Mapped[str] = mapped_column(String(24), nullable=False)
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    created_by_user_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("user.id", ondelete="SET NULL"), nullable=True
+    )
+
+
+class ChatInsightRun(Base):
+    trigger: Mapped[str] = mapped_column(String(24), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    requested_by_user_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("user.id", ondelete="SET NULL"), nullable=True
+    )
+    taxonomy_revision_id: Mapped[UUID] = mapped_column(
+        ForeignKey("chat_insight_taxonomy_revision.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    cutoff_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    full_backfill: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    model_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    classifier_version: Mapped[str] = mapped_column(String(32), nullable=False)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    leased_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    lease_token: Mapped[UUID | None] = mapped_column(nullable=True)
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    eligible_chats: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    classified_chats: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    selected_grounding_answers: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    document_grounded_answers: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    referenced_documents: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    classified_documents: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    error_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    error_code: Mapped[str | None] = mapped_column(String(48), nullable=True)
+    stability_metrics: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+
+    __table_args__ = (
+        Index(
+            "uq_chat_insight_run_active",
+            text("(1)"),
+            unique=True,
+            postgresql_where=text("status IN ('queued', 'running')"),
+        ),
+    )
+
+
+class ConversationTopicClassification(Base):
+    conversation_id: Mapped[UUID] = mapped_column(
+        ForeignKey("conversation.id", ondelete="CASCADE"), nullable=False
+    )
+    taxonomy_revision_id: Mapped[UUID] = mapped_column(
+        ForeignKey("chat_insight_taxonomy_revision.id", ondelete="RESTRICT"), nullable=False
+    )
+    run_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("chat_insight_run.id", ondelete="SET NULL"), nullable=True
+    )
+    branch_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    classifier_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    primary_topic_key: Mapped[str] = mapped_column(String(96), nullable=False)
+    secondary_topic_keys: Mapped[list[str]] = mapped_column(
+        ARRAY(String(96)), nullable=False, default=list
+    )
+    request_type: Mapped[str] = mapped_column(String(48), nullable=False)
+    confidence: Mapped[str] = mapped_column(String(16), nullable=False)
+    source_created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    classified_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    __table_args__ = (
+        Index(
+            "uq_conversation_topic_revision", "conversation_id", "taxonomy_revision_id", unique=True
+        ),
+        Index(
+            "ix_conversation_topic_revision_created", "taxonomy_revision_id", "source_created_at"
+        ),
+    )
+
+
+class GroundingDocumentReference(Base):
+    assistant_message_id: Mapped[UUID] = mapped_column(
+        ForeignKey("message.id", ondelete="CASCADE"), nullable=False
+    )
+    conversation_id: Mapped[UUID] = mapped_column(
+        ForeignKey("conversation.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    run_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("chat_insight_run.id", ondelete="SET NULL"), nullable=True
+    )
+    document_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("document.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    source_key: Mapped[str] = mapped_column(String, nullable=False)
+    source_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    source_group: Mapped[str] = mapped_column(String(32), nullable=False)
+    title: Mapped[str] = mapped_column(Text, nullable=False)
+    url: Mapped[str] = mapped_column(Text, nullable=False)
+    usage: Mapped[str] = mapped_column(String(32), nullable=False)
+    branch_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    selected_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, index=True
+    )
+    is_protected: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+
+    __table_args__ = (
+        Index(
+            "uq_grounding_document_reference_message_source",
+            "assistant_message_id",
+            "source_key",
+            unique=True,
+        ),
+        Index("ix_grounding_document_reference_group_selected", "source_group", "selected_at"),
+    )
+
+
+class GroundingDocumentClassification(Base):
+    source_key: Mapped[str] = mapped_column(String, nullable=False, unique=True, index=True)
+    run_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("chat_insight_run.id", ondelete="SET NULL"), nullable=True
+    )
+    content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    classifier_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    primary_subject_key: Mapped[str] = mapped_column(String(128), nullable=False)
+    secondary_subject_keys: Mapped[list[str]] = mapped_column(
+        ARRAY(String(128)), nullable=False, default=list
+    )
+    document_function_key: Mapped[str] = mapped_column(String(128), nullable=False)
+    confidence: Mapped[str] = mapped_column(String(16), nullable=False)
+    evidence_basis: Mapped[str] = mapped_column(String(48), nullable=False)
+    classified_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
 class PromptSetScope(StrEnum):
     ASSISTANT = "assistant"
     INVESTIGATION = "investigation"
@@ -805,6 +957,7 @@ class PromptSetScope(StrEnum):
     TITLE = "title"
     TITLE_TRANSCRIPT = "title_transcript"
     GROUNDING = "grounding"
+    COMPLIANCE = "compliance"
 
 
 PromptSetScopeEnum = SAEnum(

@@ -38,6 +38,7 @@ import {
     TabsTrigger,
 } from "@va/shared/components/ui/tabs";
 import { handleFetchError } from "@va/shared/lib/api-client";
+import { cn } from "@va/shared/lib/utils";
 import {
     CheckCircle2,
     CircleMinus,
@@ -59,7 +60,9 @@ import {
 } from "react";
 import { toast } from "sonner";
 
+import { useAuth } from "../../auth/contexts/auth-context";
 import { useAuthenticatedApi } from "../../auth/hooks/use-authenticated-api";
+import { hasPermission } from "../../auth/lib/permissions";
 import { DataTable } from "../../components/data-table";
 import { isDataTablePageSize } from "../../components/data-table-constants";
 import { PageHeader } from "../../components/page-header";
@@ -86,16 +89,16 @@ import type {
     RagSourceType,
 } from "../../rag-viewer/types";
 import {
-    defaultRagExclusionsDescending,
-    defaultRagExclusionsSortBy,
-    isRagExclusionsHistorySortBy,
-    isRagExclusionsListSortBy,
-    type RagExclusionsSearch,
+    defaultResourcesDescending,
+    defaultResourcesSortBy,
+    isResourcesHistorySortBy,
+    isResourcesListSortBy,
+    type ResourcesSearch,
 } from "../lib/search-state";
 
 const CONTENT_STATUS_FILTER_OPTIONS: {
     label: string;
-    value: RagExclusionsSearch["exclusion"];
+    value: ResourcesSearch["exclusion"];
 }[] = [
     { label: "All statuses", value: "all" },
     { label: "Included", value: "included" },
@@ -104,14 +107,14 @@ const CONTENT_STATUS_FILTER_OPTIONS: {
 
 const HISTORY_STATUS_FILTER_OPTIONS: {
     label: string;
-    value: RagExclusionsSearch["exclusion"];
+    value: ResourcesSearch["exclusion"];
 }[] = [
     { label: "All changes", value: "all" },
     { label: "Include", value: "included" },
     { label: "Exclude", value: "excluded" },
 ];
 
-const KNOWLEDGE_CONTROL_SOURCE_TYPES: RagSourceType[] = [
+const RESOURCE_SOURCE_TYPES: RagSourceType[] = [
     "website_page",
     "website_program",
     "catalog_page",
@@ -122,7 +125,7 @@ const KNOWLEDGE_CONTROL_SOURCE_TYPES: RagSourceType[] = [
 
 const CONTENT_SOURCE_FILTER_OPTIONS: {
     label: string;
-    value: RagExclusionsSearch["source"];
+    value: ResourcesSearch["source"];
 }[] = [
     { label: "All document types", value: "all" },
     { label: "Website", value: "website" },
@@ -143,8 +146,8 @@ const HISTORY_DATE_TIME_FORMATTER = new Intl.DateTimeFormat(undefined, {
 });
 
 const getStatusFilterLabel = (
-    value: RagExclusionsSearch["exclusion"],
-    view: RagExclusionsSearch["view"],
+    value: ResourcesSearch["exclusion"],
+    view: ResourcesSearch["view"],
 ): string => {
     const options =
         view === "history"
@@ -153,7 +156,7 @@ const getStatusFilterLabel = (
     return options.find((option) => option.value === value)?.label ?? value;
 };
 
-const getSourceFilterLabel = (value: RagExclusionsSearch["source"]): string =>
+const getSourceFilterLabel = (value: ResourcesSearch["source"]): string =>
     CONTENT_SOURCE_FILTER_OPTIONS.find((option) => option.value === value)
         ?.label ?? value;
 
@@ -209,21 +212,19 @@ const getFriendlyTreeLabel = (node: RagDocumentTreeNode): string => {
     }
 };
 
-const getKnowledgeControlSourceTypesForFilter = (
-    sourceFilter: RagExclusionsSearch["source"],
+const getResourceSourceTypesForFilter = (
+    sourceFilter: ResourcesSearch["source"],
 ): RagSourceType[] =>
     sourceFilter === "all"
-        ? KNOWLEDGE_CONTROL_SOURCE_TYPES
-        : (getSourceTypesForFilter(sourceFilter) ??
-          KNOWLEDGE_CONTROL_SOURCE_TYPES);
+        ? RESOURCE_SOURCE_TYPES
+        : (getSourceTypesForFilter(sourceFilter) ?? RESOURCE_SOURCE_TYPES);
 
 const filterDocumentTree = (
     nodes: RagDocumentTreeNode[],
-    sourceFilter: RagExclusionsSearch["source"],
+    sourceFilter: ResourcesSearch["source"],
     query: string,
 ): RagDocumentTreeNode[] => {
-    const allowedSourceTypes =
-        getKnowledgeControlSourceTypesForFilter(sourceFilter);
+    const allowedSourceTypes = getResourceSourceTypesForFilter(sourceFilter);
     const normalizedQuery = query.trim().toLocaleLowerCase();
 
     const filterNode = (
@@ -378,6 +379,10 @@ const contentColumns: ColumnDef<RagDocumentSummary>[] = [
     },
 ];
 
+const readOnlyContentColumns = contentColumns.filter(
+    (column) => column.id !== "excluded",
+);
+
 const historyColumns: ColumnDef<RagDocumentExclusionEvent>[] = [
     {
         id: "document_title",
@@ -454,6 +459,8 @@ interface ContentFolderTreeProps {
     onNodeOpenChange: (nodeId: string, open: boolean) => void;
     onSelectDocument: (documentId: string) => void;
     openNodeIds: Set<string>;
+    selectedDocumentId: string | undefined;
+    showVisibilityStatus: boolean;
 }
 
 const ContentFolderTree = memo(
@@ -463,6 +470,8 @@ const ContentFolderTree = memo(
         onNodeOpenChange,
         onSelectDocument,
         openNodeIds,
+        selectedDocumentId,
+        showVisibilityStatus,
     }: ContentFolderTreeProps): JSX.Element => {
         const renderNodes = (
             treeNodes: RagDocumentTreeNode[],
@@ -471,12 +480,17 @@ const ContentFolderTree = memo(
             treeNodes.map((node) => {
                 const isFolder = node.children.length > 0;
                 const isOpen = openNodeIds.has(node.id);
+                const isSelected = node.document_id === selectedDocumentId;
                 const label = getFriendlyTreeLabel(node);
 
                 if (!isFolder) {
                     return (
                         <button
-                            className="hover:bg-muted/70 focus:bg-muted focus:ring-primary/20 flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm focus:ring-1 focus:outline-none"
+                            aria-current={isSelected ? "true" : undefined}
+                            className={cn(
+                                "hover:bg-muted/70 focus:bg-muted focus:ring-primary/20 flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm focus:ring-1 focus:outline-none",
+                                isSelected && "bg-muted ring-primary/20 ring-1",
+                            )}
                             key={node.id}
                             onClick={() => {
                                 if (node.document_id !== null) {
@@ -490,7 +504,7 @@ const ContentFolderTree = memo(
                             <span className="min-w-0 flex-1 truncate">
                                 {label}
                             </span>
-                            {node.excluded ? (
+                            {showVisibilityStatus && node.excluded ? (
                                 <span className="text-muted-foreground shrink-0 text-xs">
                                     Excluded
                                 </span>
@@ -550,6 +564,7 @@ const copySourceUrl = async (url: string): Promise<void> => {
 };
 
 interface ContentDetailPanelProps {
+    canManageVisibility: boolean;
     detailError: string | undefined;
     isDetailLoading: boolean;
     onInclude: (document: RagDocumentSummary) => void;
@@ -564,6 +579,7 @@ interface ContentDetailPanelProps {
 }
 
 const ContentDetailPanel = ({
+    canManageVisibility,
     detailError,
     isDetailLoading,
     onInclude,
@@ -599,7 +615,8 @@ const ContentDetailPanel = ({
                                     <h2 className="min-w-0 flex-1 text-base font-medium break-words">
                                         {displayDocument.title}
                                     </h2>
-                                    {actionDocument === undefined ? null : (
+                                    {!canManageVisibility ||
+                                    actionDocument === undefined ? null : (
                                         <span className="text-muted-foreground text-sm">
                                             {statusText(
                                                 actionDocument.excluded,
@@ -693,7 +710,7 @@ const ContentDetailPanel = ({
                             </div>
                         )}
                     </div>
-                    {actionDocument !== undefined && (
+                    {canManageVisibility && actionDocument !== undefined && (
                         <div className="mt-3 flex flex-wrap items-center justify-between gap-3 border-t pt-3">
                             <div className="text-muted-foreground text-xs">
                                 Excluding a document stops the assistant from
@@ -734,21 +751,35 @@ const ContentDetailPanel = ({
     );
 };
 
-export const RagExclusionsPage = (): JSX.Element => {
+export const ResourcesPage = (): JSX.Element => {
+    const { user } = useAuth();
     const api = useAuthenticatedApi();
-    const searchState = useSearch({ from: "/rag-exclusions" });
-    const navigate = useNavigate({ from: "/rag-exclusions" });
+    const searchState = useSearch({ from: "/resources" });
+    const navigate = useNavigate({ from: "/resources" });
+    const canManageVisibility = hasPermission(user, "access_rag_exclusions");
     const {
         document: selectedDocumentId,
         desc: descending,
-        exclusion: exclusionFilter,
+        exclusion: requestedExclusionFilter,
         page: currentPage,
         pageSize,
         query,
         sortBy,
         source: sourceFilter,
-        view,
+        view: requestedView,
     } = searchState;
+    const exclusionFilter = canManageVisibility
+        ? requestedExclusionFilter
+        : "included";
+    const view =
+        !canManageVisibility && requestedView === "history"
+            ? "list"
+            : requestedView;
+    const listSortBy =
+        isResourcesListSortBy(sortBy) &&
+        (canManageVisibility || sortBy !== "excluded")
+            ? sortBy
+            : "title";
 
     const [documents, setDocuments] = useState<RagDocumentSummary[]>([]);
     const [historyEvents, setHistoryEvents] = useState<
@@ -836,12 +867,15 @@ export const RagExclusionsPage = (): JSX.Element => {
         currentSelectedDetail.character_count >
             LARGE_MARKDOWN_RENDER_CHARACTER_THRESHOLD &&
         !largeDocumentsApprovedForRender.has(currentSelectedDetail.id);
+    const visibleContentColumns = canManageVisibility
+        ? contentColumns
+        : readOnlyContentColumns;
 
     const navigateWithSearch = useCallback(
         (
             updater: (
-                previous: RagExclusionsSearch,
-            ) => Partial<RagExclusionsSearch>,
+                previous: ResourcesSearch,
+            ) => Partial<ResourcesSearch>,
             options?: { replace?: boolean },
         ): void => {
             void navigate({
@@ -850,7 +884,7 @@ export const RagExclusionsPage = (): JSX.Element => {
                     ...previous,
                     ...updater(previous),
                 }),
-                to: "/rag-exclusions",
+                to: "/resources",
             });
         },
         [navigate],
@@ -886,12 +920,8 @@ export const RagExclusionsPage = (): JSX.Element => {
                     offset,
                     search: query,
                     searchMode: "exact",
-                    sortBy: isRagExclusionsListSortBy(sortBy)
-                        ? sortBy
-                        : "title",
-                    types: getKnowledgeControlSourceTypesForFilter(
-                        sourceFilter,
-                    ),
+                    sortBy: listSortBy,
+                    types: getResourceSourceTypesForFilter(sourceFilter),
                 });
 
                 if (!isActive) {
@@ -928,7 +958,7 @@ export const RagExclusionsPage = (): JSX.Element => {
         pageSize,
         query,
         refreshCount,
-        sortBy,
+        listSortBy,
         sourceFilter,
         view,
     ]);
@@ -953,7 +983,7 @@ export const RagExclusionsPage = (): JSX.Element => {
                     limit: pageSize,
                     offset,
                     search: query,
-                    sortBy: isRagExclusionsHistorySortBy(sortBy)
+                    sortBy: isResourcesHistorySortBy(sortBy)
                         ? sortBy
                         : "created_at",
                     types: getSourceTypesForFilter(sourceFilter),
@@ -1174,7 +1204,7 @@ export const RagExclusionsPage = (): JSX.Element => {
                         ...previous,
                         document: documentId,
                     }),
-                    to: "/rag-exclusions",
+                    to: "/resources",
                 }),
             ).finally(() => {
                 setPendingSelectedDocumentId((current) =>
@@ -1211,12 +1241,10 @@ export const RagExclusionsPage = (): JSX.Element => {
     );
     const effectiveSortBy =
         view === "history"
-            ? isRagExclusionsHistorySortBy(sortBy)
+            ? isResourcesHistorySortBy(sortBy)
                 ? sortBy
                 : "created_at"
-            : isRagExclusionsListSortBy(sortBy)
-              ? sortBy
-              : "title";
+            : listSortBy;
     const sorting = useMemo<SortingState>(
         () => [{ desc: descending, id: effectiveSortBy }],
         [descending, effectiveSortBy],
@@ -1235,18 +1263,19 @@ export const RagExclusionsPage = (): JSX.Element => {
     const onSortingChange: OnChangeFn<SortingState> = (updater) => {
         const next = typeof updater === "function" ? updater(sorting) : updater;
         const [nextSort] = next;
-        const defaultSortBy = defaultRagExclusionsSortBy(view);
+        const defaultSortBy = defaultResourcesSortBy(view);
         const sortId = nextSort?.id;
         const nextSortBy =
             view === "history"
-                ? isRagExclusionsHistorySortBy(sortId)
+                ? isResourcesHistorySortBy(sortId)
                     ? sortId
                     : defaultSortBy
-                : isRagExclusionsListSortBy(sortId)
+                : isResourcesListSortBy(sortId) &&
+                    (canManageVisibility || sortId !== "excluded")
                   ? sortId
                   : defaultSortBy;
         navigateWithSearch(() => ({
-            desc: nextSort?.desc ?? defaultRagExclusionsDescending(view),
+            desc: nextSort?.desc ?? defaultResourcesDescending(view),
             page: 1,
             sortBy: nextSortBy,
         }));
@@ -1257,7 +1286,7 @@ export const RagExclusionsPage = (): JSX.Element => {
             className="min-h-0 overflow-hidden"
             variant="dashboard"
         >
-            <PageHeader title="KB Controls">
+            <PageHeader title="Resources">
                 <Button
                     onClick={() => {
                         setRefreshCount((current) => current + 1);
@@ -1272,14 +1301,14 @@ export const RagExclusionsPage = (): JSX.Element => {
             <PageSection className="flex min-h-0 flex-1">
                 <ResizablePanelGroup
                     className="h-full min-h-0 min-w-0"
-                    id="rag-exclusions-layout"
+                    id="resources-layout"
                     orientation="horizontal"
                     style={{ overflow: "visible" }}
                 >
                     <ResizablePanel
                         className="min-h-0 min-w-0"
                         defaultSize="50%"
-                        id="rag-exclusions-list-panel"
+                        id="resources-list-panel"
                         minSize="22%"
                         style={{ overflow: "visible" }}
                     >
@@ -1293,11 +1322,11 @@ export const RagExclusionsPage = (): JSX.Element => {
                                         value === "history"
                                     ) {
                                         navigateWithSearch(() => ({
-                                            desc: defaultRagExclusionsDescending(
+                                            desc: defaultResourcesDescending(
                                                 value,
                                             ),
                                             page: 1,
-                                            sortBy: defaultRagExclusionsSortBy(
+                                            sortBy: defaultResourcesSortBy(
                                                 value,
                                             ),
                                             view: value,
@@ -1311,9 +1340,11 @@ export const RagExclusionsPage = (): JSX.Element => {
                                     <TabsTrigger value="folders">
                                         Folders
                                     </TabsTrigger>
-                                    <TabsTrigger value="history">
-                                        History
-                                    </TabsTrigger>
+                                    {canManageVisibility ? (
+                                        <TabsTrigger value="history">
+                                            History
+                                        </TabsTrigger>
+                                    ) : null}
                                 </TabsList>
                                 <div className="flex flex-wrap items-center gap-3">
                                     <Input
@@ -1358,46 +1389,53 @@ export const RagExclusionsPage = (): JSX.Element => {
                                         placeholder="Search..."
                                         value={queryInput}
                                     />
-                                    <Select
-                                        onValueChange={(value) => {
-                                            const option =
-                                                statusFilterOptions.find(
-                                                    (item) =>
-                                                        item.value === value,
-                                                );
-                                            if (option !== undefined) {
-                                                navigateWithSearch(() => ({
-                                                    document: undefined,
-                                                    exclusion: option.value,
-                                                    page: 1,
-                                                }));
-                                            }
-                                        }}
-                                        value={exclusionFilter}
-                                    >
-                                        <SelectTrigger
-                                            aria-label="Status filter"
-                                            className="w-[140px]"
+                                    {canManageVisibility ? (
+                                        <Select
+                                            onValueChange={(value) => {
+                                                const option =
+                                                    statusFilterOptions.find(
+                                                        (item) =>
+                                                            item.value ===
+                                                            value,
+                                                    );
+                                                if (option !== undefined) {
+                                                    navigateWithSearch(() => ({
+                                                        document: undefined,
+                                                        exclusion: option.value,
+                                                        page: 1,
+                                                    }));
+                                                }
+                                            }}
+                                            value={exclusionFilter}
                                         >
-                                            <SelectValue>
-                                                {selectedStatusFilterLabel}
-                                            </SelectValue>
-                                        </SelectTrigger>
-                                        <SelectContent>
-                                            <SelectGroup>
-                                                {statusFilterOptions.map(
-                                                    (option) => (
-                                                        <SelectItem
-                                                            key={option.value}
-                                                            value={option.value}
-                                                        >
-                                                            {option.label}
-                                                        </SelectItem>
-                                                    ),
-                                                )}
-                                            </SelectGroup>
-                                        </SelectContent>
-                                    </Select>
+                                            <SelectTrigger
+                                                aria-label="Status filter"
+                                                className="w-[140px]"
+                                            >
+                                                <SelectValue>
+                                                    {selectedStatusFilterLabel}
+                                                </SelectValue>
+                                            </SelectTrigger>
+                                            <SelectContent>
+                                                <SelectGroup>
+                                                    {statusFilterOptions.map(
+                                                        (option) => (
+                                                            <SelectItem
+                                                                key={
+                                                                    option.value
+                                                                }
+                                                                value={
+                                                                    option.value
+                                                                }
+                                                            >
+                                                                {option.label}
+                                                            </SelectItem>
+                                                        ),
+                                                    )}
+                                                </SelectGroup>
+                                            </SelectContent>
+                                        </Select>
+                                    ) : null}
                                     <Select
                                         onValueChange={(value) => {
                                             const option =
@@ -1455,7 +1493,7 @@ export const RagExclusionsPage = (): JSX.Element => {
                                     )}
 
                                     <DataTable
-                                        columns={contentColumns}
+                                        columns={visibleContentColumns}
                                         data={documents}
                                         emptyMessage="No documents matched the current filters."
                                         isLoading={loading}
@@ -1520,57 +1558,71 @@ export const RagExclusionsPage = (): JSX.Element => {
                                                     openNodeIds={
                                                         openTreeNodeIds
                                                     }
+                                                    selectedDocumentId={
+                                                        effectiveSelectedDocumentId
+                                                    }
+                                                    showVisibilityStatus={
+                                                        canManageVisibility
+                                                    }
                                                 />
                                             )}
                                         </div>
                                     </div>
                                 </TabsContent>
-                                <TabsContent
-                                    className="flex min-h-0 flex-1 flex-col gap-4"
-                                    value="history"
-                                >
-                                    {historyError !== undefined && (
-                                        <InlineError
-                                            message={historyError}
-                                            onRetry={() => {
-                                                setRefreshCount(
-                                                    (current) => current + 1,
-                                                );
-                                            }}
-                                        />
-                                    )}
+                                {canManageVisibility ? (
+                                    <TabsContent
+                                        className="flex min-h-0 flex-1 flex-col gap-4"
+                                        value="history"
+                                    >
+                                        {historyError !== undefined && (
+                                            <InlineError
+                                                message={historyError}
+                                                onRetry={() => {
+                                                    setRefreshCount(
+                                                        (current) =>
+                                                            current + 1,
+                                                    );
+                                                }}
+                                            />
+                                        )}
 
-                                    <DataTable
-                                        canRowClick={(event) =>
-                                            event.document_id !== null
-                                        }
-                                        columns={historyColumns}
-                                        data={historyEvents}
-                                        emptyMessage="No history matched the current filters."
-                                        isLoading={historyLoading}
-                                        isRowSelected={(event) =>
-                                            selectedHistoryEventId === event.id
-                                        }
-                                        manualPagination
-                                        manualSorting
-                                        onPaginationChange={onPaginationChange}
-                                        onRowClick={(event) => {
-                                            if (event.document_id !== null) {
-                                                handleSelectDocument(
-                                                    event.document_id,
-                                                    event.id,
-                                                );
+                                        <DataTable
+                                            canRowClick={(event) =>
+                                                event.document_id !== null
                                             }
-                                        }}
-                                        onSortingChange={onSortingChange}
-                                        pageCount={pageCount}
-                                        pagination={pagination}
-                                        rowCount={historyTotal}
-                                        sorting={sorting}
-                                        tableClassName="min-w-[820px]"
-                                        wrapCellText
-                                    />
-                                </TabsContent>
+                                            columns={historyColumns}
+                                            data={historyEvents}
+                                            emptyMessage="No history matched the current filters."
+                                            isLoading={historyLoading}
+                                            isRowSelected={(event) =>
+                                                selectedHistoryEventId ===
+                                                event.id
+                                            }
+                                            manualPagination
+                                            manualSorting
+                                            onPaginationChange={
+                                                onPaginationChange
+                                            }
+                                            onRowClick={(event) => {
+                                                if (
+                                                    event.document_id !== null
+                                                ) {
+                                                    handleSelectDocument(
+                                                        event.document_id,
+                                                        event.id,
+                                                    );
+                                                }
+                                            }}
+                                            onSortingChange={onSortingChange}
+                                            pageCount={pageCount}
+                                            pagination={pagination}
+                                            rowCount={historyTotal}
+                                            sorting={sorting}
+                                            tableClassName="min-w-[820px]"
+                                            wrapCellText
+                                        />
+                                    </TabsContent>
+                                ) : null}
                             </Tabs>
                         </section>
                     </ResizablePanel>
@@ -1583,11 +1635,12 @@ export const RagExclusionsPage = (): JSX.Element => {
                     <ResizablePanel
                         className="min-h-0 min-w-0"
                         defaultSize="50%"
-                        id="rag-exclusions-detail-panel"
+                        id="resources-detail-panel"
                         minSize="22%"
                         style={{ overflow: "visible" }}
                     >
                         <ContentDetailPanel
+                            canManageVisibility={canManageVisibility}
                             detailError={detailError}
                             isDetailLoading={
                                 detailLoading || isSelectedDetailPending

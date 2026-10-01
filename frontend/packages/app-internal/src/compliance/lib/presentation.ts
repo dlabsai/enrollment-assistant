@@ -3,7 +3,11 @@ import {
     isDataTablePageSize,
 } from "../../components/data-table-constants";
 import { getAppFormatSettings } from "../../lib/time-zone";
-import type { ReviewState, ScreeningSummary } from "../types";
+import type {
+    FindingCategory,
+    ReviewState,
+    ScreeningSummary,
+} from "../types";
 
 type Period = Pick<ScreeningSummary, "start" | "end">;
 
@@ -34,6 +38,15 @@ export const decisionLabel = (state: ReviewState): string =>
         dismissed: "Dismissed",
     })[state];
 
+export const findingCategoryLabel = (category: FindingCategory): string =>
+    ({
+        inappropriate: "Inappropriate",
+        misinformation: "Misinformation",
+        regulatory_compliance: "Regulatory Compliance",
+        reputation_risk: "Reputation Risk",
+        confidentiality: "Confidentiality",
+    })[category];
+
 export const screeningLabel = (screening: ScreeningSummary): string => {
     if (screening.admission_error !== null) {
         return "Incomplete";
@@ -50,22 +63,17 @@ export const screeningLabel = (screening: ScreeningSummary): string => {
     return "Complete";
 };
 
-export type ComplianceStatusVariant =
-    | "default"
-    | "destructive"
-    | "outline"
-    | "secondary";
+export type ComplianceStatusVariant = "outline" | "secondary";
 
 export const screeningStatusVariant = (
     screening: ScreeningSummary,
 ): ComplianceStatusVariant => {
     if (
         screening.admission_error !== null ||
-        screening.messages === 0 ||
         screening.errors > 0 ||
         screening.deleted > 0
     ) {
-        return "destructive";
+        return "secondary";
     }
     return screening.pending > 0 ? "secondary" : "outline";
 };

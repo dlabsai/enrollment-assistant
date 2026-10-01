@@ -172,6 +172,14 @@ class Settings(BaseSettings):
     COMPLIANCE_MAX_MESSAGES: int = Field(default=10000, ge=1, le=100000)
     COMPLIANCE_MAX_INPUT_CHARACTERS: int = Field(default=200000, ge=1000, le=1000000)
 
+    # Nightly and manual semantic chat/source analytics.
+    CHAT_INSIGHTS_WORKER_ENABLED: bool = True
+    CHAT_INSIGHTS_MODEL: str = "azure/gpt-5.4"
+    CHAT_INSIGHTS_CHAT_BATCH_SIZE: int = Field(default=40, ge=1, le=100)
+    CHAT_INSIGHTS_DOCUMENT_BATCH_SIZE: int = Field(default=30, ge=1, le=100)
+    CHAT_INSIGHTS_MAX_CONCURRENCY: int = Field(default=2, ge=1, le=8)
+    CHAT_INSIGHTS_MAX_INPUT_CHARACTERS: int = Field(default=12000, ge=1000, le=50000)
+
     # Model for evaluation/judge
     EVALUATION_MODEL: str = "azure/gpt-5.4"
     EVALUATION_MODEL_TEMPERATURE: float = 0.0

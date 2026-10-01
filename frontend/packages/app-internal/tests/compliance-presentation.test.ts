@@ -7,6 +7,7 @@ import {
     formatScreeningDateRange,
     formatScreeningPeriod,
     screeningLabel,
+    screeningStatusVariant,
     serializeComplianceSearch,
     validateComplianceSearch,
 } from "../src/compliance/lib/presentation";
@@ -50,26 +51,25 @@ test("compliance URLs serialize optional one-based pagination", () => {
 
 test("screening status remains separate from flag decisions", () => {
     assert.equal(screeningLabel(screening), "Complete");
+    assert.equal(screeningStatusVariant(screening), "outline");
     assert.equal(
         screeningLabel({ ...screening, needs_review: 2 }),
         "Complete",
     );
     assert.equal(screeningLabel({ ...screening, pending: 1 }), "Processing");
-    assert.equal(
-        screeningLabel({ ...screening, screened: 9, errors: 1 }),
-        "Incomplete",
-    );
-    assert.equal(
-        screeningLabel({
-            ...screening,
-            messages: 0,
-            conversations: 0,
-            screened: 0,
-            findings: 0,
-            needs_review: 0,
-        }),
-        "No messages",
-    );
+    const incomplete = { ...screening, screened: 9, errors: 1 };
+    assert.equal(screeningLabel(incomplete), "Incomplete");
+    assert.equal(screeningStatusVariant(incomplete), "secondary");
+    const noMessages = {
+        ...screening,
+        messages: 0,
+        conversations: 0,
+        screened: 0,
+        findings: 0,
+        needs_review: 0,
+    };
+    assert.equal(screeningLabel(noMessages), "No messages");
+    assert.equal(screeningStatusVariant(noMessages), "outline");
     assert.equal(
         screeningLabel({
             ...screening,

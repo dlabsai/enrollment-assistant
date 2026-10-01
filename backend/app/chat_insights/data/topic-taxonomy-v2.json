@@ -1,0 +1,52 @@
+{
+  "topics": [
+    {
+      "label": "Academic programs and courses",
+      "description": "Degrees, certificates, courses, curriculum, learning formats, program comparisons, and choosing an area of study."
+    },
+    {
+      "label": "Admissions and applications",
+      "description": "How to apply, general admission requirements, application materials, deadlines, decisions, and enrollment steps."
+    },
+    {
+      "label": "Tuition and financial aid",
+      "description": "Tuition, fees, payment options, scholarships, grants, loans, financial-aid applications, and general funding questions."
+    },
+    {
+      "label": "Transfer credit and student records",
+      "description": "Transfer-credit evaluation, transcripts, registration records, enrollment verification, diplomas, and student record updates."
+    },
+    {
+      "label": "Academic schedules and policies",
+      "description": "Academic calendars, term dates, course loads, add or drop rules, withdrawals, grades, academic standing, and degree progress."
+    },
+    {
+      "label": "Licensure and accreditation",
+      "description": "Institutional or program accreditation, professional licensure disclosures, certification considerations, and state authorization."
+    },
+    {
+      "label": "Student support and accessibility",
+      "description": "Academic support, accessibility accommodations, wellbeing resources, student services, and campus or online student life."
+    },
+    {
+      "label": "Career development",
+      "description": "Career exploration, internships, experiential learning, employment preparation, and career-service resources."
+    },
+    {
+      "label": "Technology help",
+      "description": "Student portals, learning platforms, account access, passwords, devices, uploads, and general technical support."
+    },
+    {
+      "label": "Military and veteran support",
+      "description": "Public information about education benefits, admissions support, transfer credit, and services for military-affiliated students."
+    },
+    {
+      "label": "Institutional information",
+      "description": "General information about the institution, locations, offices, contact channels, leadership, partnerships, and public services."
+    },
+    {
+      "label": "Other or unclear",
+      "description": "Empty, unclear, or out-of-scope chats that cannot be assigned to another topic."
+    }
+  ]
+}

@@ -16,6 +16,7 @@ import {
 import type { ChatUserOption } from "../types";
 
 interface DashboardUserFilterOptions {
+    includeAccountsWithoutChats?: boolean;
     initialSelectedUser?: ChatUserOption;
     platform: "both" | "internal" | "public";
 }
@@ -38,6 +39,7 @@ interface DashboardUserFilterResult {
 }
 
 export const useDashboardUserFilter = ({
+    includeAccountsWithoutChats = false,
     initialSelectedUser,
     platform,
 }: DashboardUserFilterOptions): DashboardUserFilterResult => {
@@ -76,6 +78,7 @@ export const useDashboardUserFilter = ({
                     platform: platform === "both" ? undefined : platform,
                     search: searchQuery,
                     limit: 50,
+                    includeAccountsWithoutChats,
                 });
                 if (mounted) {
                     setOptions(response);
@@ -94,7 +97,7 @@ export const useDashboardUserFilter = ({
         return (): void => {
             mounted = false;
         };
-    }, [api, open, platform, searchQuery]);
+    }, [api, includeAccountsWithoutChats, open, platform, searchQuery]);
 
     const handleOpenChange = (nextOpen: boolean): void => {
         setOpen(nextOpen);

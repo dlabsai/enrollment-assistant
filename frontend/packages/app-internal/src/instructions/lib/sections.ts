@@ -11,91 +11,100 @@ export interface AdminSection {
     templates: string[];
 }
 
-const ASSISTANT_TEMPLATES = ["chatbot_agent", "guardrails_agent"] as const;
+interface SectionDefinition {
+    key: string;
+    label: string;
+    scope: PromptSetScope;
+    templates: readonly { base: string; label?: string }[];
+}
 
-const ASSISTANT_TEMPLATE_SET = new Set<string>(ASSISTANT_TEMPLATES);
-
-const HELPERS = [
+const SECTION_DEFINITIONS: readonly SectionDefinition[] = [
+    {
+        key: "assistant",
+        label: "Assistant",
+        scope: "assistant",
+        templates: [
+            { base: "chatbot_agent", label: "Chatbot" },
+            { base: "guardrails_agent", label: "Guardrails" },
+        ],
+    },
     {
         key: "investigation",
         label: "Investigation",
-        template: "investigation_agent",
+        scope: "investigation",
+        templates: [{ base: "investigation_agent" }],
     },
-    { key: "summary", label: "Summary", template: "summary_agent" },
-    { key: "title", label: "Title", template: "title_agent" },
+    {
+        key: "summary",
+        label: "Summary",
+        scope: "summary",
+        templates: [{ base: "summary_agent" }],
+    },
+    {
+        key: "title",
+        label: "Title",
+        scope: "title",
+        templates: [{ base: "title_agent" }],
+    },
     {
         key: "title-transcript",
         label: "Title Transcript",
-        template: "title_agent_transcript",
+        scope: "title_transcript",
+        templates: [{ base: "title_agent_transcript" }],
     },
-    { key: "grounding", label: "Grounding", template: "grounding_agent" },
-] as const;
-
-const SECTION_SCOPE_MAP: Record<string, PromptSetScope> = {
-    assistant: "assistant",
-    investigation: "investigation",
-    summary: "summary",
-    title: "title",
-    "title-transcript": "title_transcript",
-    grounding: "grounding",
-};
-
-const SCOPE_SECTION_KEY_MAP: Record<PromptSetScope, string> = {
-    assistant: "assistant",
-    investigation: "investigation",
-    summary: "summary",
-    title: "title",
-    title_transcript: "title-transcript",
-    grounding: "grounding",
-};
-
-const HELPER_TEMPLATE_BY_SCOPE: Record<PromptSetScope, string | undefined> = {
-    assistant: undefined,
-    investigation: "investigation_agent",
-    summary: "summary_agent",
-    title: "title_agent",
-    title_transcript: "title_agent_transcript",
-    grounding: "grounding_agent",
-};
-
-const TEMPLATE_LABELS: Record<string, string> = {
-    chatbot_agent: "Chatbot",
-    guardrails_agent: "Guardrails",
-    investigation_agent: "Investigation",
-    summary_agent: "Summary",
-    grounding_agent: "Grounding",
-    title_agent: "Title",
-    title_agent_transcript: "Title Transcript",
-};
-
-const DEFAULT_TEMPLATE_PRIORITY = [
-    "chatbot_agent_internal.j2",
-    "guardrails_agent_internal.j2",
-    "investigation_agent_internal.j2",
-    "summary_agent_internal.j2",
-    "title_agent_internal.j2",
-    "title_agent_transcript_internal.j2",
-    "grounding_agent_internal.j2",
+    {
+        key: "grounding",
+        label: "Grounding",
+        scope: "grounding",
+        templates: [{ base: "grounding_agent" }],
+    },
+    {
+        key: "screening",
+        label: "Screening",
+        scope: "compliance",
+        templates: [{ base: "compliance_screening_agent" }],
+    },
 ];
+
+const TEMPLATE_DEFINITIONS = SECTION_DEFINITIONS.flatMap((section) =>
+    section.templates.map((template) => ({
+        base: template.base,
+        label: template.label ?? section.label,
+    })),
+);
 
 const getFilenameForBase = (base: string, platform: PromptPlatform): string =>
     platform === "internal" ? `${base}_internal.j2` : `${base}.j2`;
 
-export const getPlatformForFilename = (filename: string): PromptPlatform =>
-    filename.includes("_internal") ? "internal" : "public";
-
-export const getTemplateLabel = (filename: string): string => {
-    const baseName = filename
-        .replace(/_internal\.j2$/u, "")
-        .replace(/\.j2$/u, "");
-    return TEMPLATE_LABELS[baseName] ?? baseName;
-};
+const getBaseName = (filename: string): string =>
+    filename.replace(/_internal\.j2$/u, "").replace(/\.j2$/u, "");
 
 const formatScopeLabel = (platform: PromptPlatform): string =>
     platform === "internal" ? "Internal" : "Public";
 
 const createSectionId = (key: string, platform: PromptPlatform): string =>
     `${key}-${platform}`;
+
+const getDefinitionForScope = (scope: PromptSetScope): SectionDefinition => {
+    const definition = SECTION_DEFINITIONS.find(
+        (section) => section.scope === scope,
+    );
+    if (definition === undefined) {
+        throw new Error(`Unknown prompt-set scope: ${scope}`);
+    }
+    return definition;
+};
+
+export const getPlatformForFilename = (filename: string): PromptPlatform =>
+    filename.includes("_internal") ? "internal" : "public";
+
+export const getTemplateLabel = (filename: string): string => {
+    const baseName = getBaseName(filename);
+    return (
+        TEMPLATE_DEFINITIONS.find((template) => template.base === baseName)
+            ?.label ?? baseName
+    );
+};
 
 export const getScopeForSectionId = (
     sectionId?: string,
@@ -104,13 +113,13 @@ export const getScopeForSectionId = (
         return undefined;
     }
     const key = sectionId.replace(/-internal$/u, "").replace(/-public$/u, "");
-    return SECTION_SCOPE_MAP[key];
+    return SECTION_DEFINITIONS.find((section) => section.key === key)?.scope;
 };
 
 export const getSectionIdForScope = (
     scope: PromptSetScope,
     platform: PromptPlatform,
-): string => createSectionId(SCOPE_SECTION_KEY_MAP[scope], platform);
+): string => createSectionId(getDefinitionForScope(scope).key, platform);
 
 export const getPlatformForSectionId = (
     sectionId?: string,
@@ -130,19 +139,10 @@ export const getPlatformForSectionId = (
 export const getTemplateFilenamesForScope = (
     scope: PromptSetScope,
     platform: PromptPlatform,
-): string[] => {
-    if (scope === "assistant") {
-        return ASSISTANT_TEMPLATES.map((base) =>
-            getFilenameForBase(base, platform),
-        );
-    }
-
-    const helperTemplate = HELPER_TEMPLATE_BY_SCOPE[scope];
-    if (helperTemplate === undefined) {
-        return [];
-    }
-    return [getFilenameForBase(helperTemplate, platform)];
-};
+): string[] =>
+    getDefinitionForScope(scope).templates.map((template) =>
+        getFilenameForBase(template.base, platform),
+    );
 
 export const buildSections = (diskTemplates: PromptFile[]): AdminSection[] => {
     const templateSet = new Set(
@@ -150,39 +150,24 @@ export const buildSections = (diskTemplates: PromptFile[]): AdminSection[] => {
     );
     const sections: AdminSection[] = [];
 
-    const addAssistantSection = (platform: PromptPlatform): void => {
-        const templates = ASSISTANT_TEMPLATES.map((base) =>
-            getFilenameForBase(base, platform),
-        ).filter((filename) => templateSet.has(filename));
-
-        if (templates.length === 0) {
-            return;
+    for (const definition of SECTION_DEFINITIONS) {
+        const templates = definition.templates
+            .map((template) =>
+                getFilenameForBase(template.base, INTERNAL_PROMPT_PLATFORM),
+            )
+            .filter((filename) => templateSet.has(filename));
+        if (templates.length > 0) {
+            sections.push({
+                id: createSectionId(
+                    definition.key,
+                    INTERNAL_PROMPT_PLATFORM,
+                ),
+                label: `${definition.label} (${formatScopeLabel(INTERNAL_PROMPT_PLATFORM)})`,
+                platform: INTERNAL_PROMPT_PLATFORM,
+                templates,
+            });
         }
-
-        sections.push({
-            id: createSectionId("assistant", platform),
-            label: `Assistant (${formatScopeLabel(platform)})`,
-            platform,
-            templates,
-        });
-    };
-
-    const addHelperSections = (platform: PromptPlatform): void => {
-        for (const helper of HELPERS) {
-            const filename = getFilenameForBase(helper.template, platform);
-            if (templateSet.has(filename)) {
-                sections.push({
-                    id: createSectionId(helper.key, platform),
-                    label: `${helper.label} (${formatScopeLabel(platform)})`,
-                    platform,
-                    templates: [filename],
-                });
-            }
-        }
-    };
-
-    addAssistantSection(INTERNAL_PROMPT_PLATFORM);
-    addHelperSections(INTERNAL_PROMPT_PLATFORM);
+    }
 
     return sections;
 };
@@ -193,21 +178,13 @@ export const isAssistantSectionId = (sectionId?: string): boolean =>
 export const getSectionIdForTemplate = (
     filename: string,
 ): string | undefined => {
-    const platform = getPlatformForFilename(filename);
-    const baseName = filename
-        .replace(/_internal\.j2$/u, "")
-        .replace(/\.j2$/u, "");
-
-    if (ASSISTANT_TEMPLATE_SET.has(baseName)) {
-        return createSectionId("assistant", platform);
-    }
-
-    const helper = HELPERS.find((item) => item.template === baseName);
-    if (helper) {
-        return createSectionId(helper.key, platform);
-    }
-
-    return undefined;
+    const baseName = getBaseName(filename);
+    const definition = SECTION_DEFINITIONS.find((section) =>
+        section.templates.some((template) => template.base === baseName),
+    );
+    return definition === undefined
+        ? undefined
+        : createSectionId(definition.key, getPlatformForFilename(filename));
 };
 
 export const getDefaultTemplateFilename = (
@@ -216,8 +193,7 @@ export const getDefaultTemplateFilename = (
     const templateSet = new Set(
         diskTemplates.map((template) => template.filename),
     );
-
-    return DEFAULT_TEMPLATE_PRIORITY.find((filename) =>
-        templateSet.has(filename),
-    );
+    return TEMPLATE_DEFINITIONS.map((template) =>
+        getFilenameForBase(template.base, INTERNAL_PROMPT_PLATFORM),
+    ).find((filename) => templateSet.has(filename));
 };

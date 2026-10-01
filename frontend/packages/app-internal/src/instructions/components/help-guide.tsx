@@ -107,7 +107,10 @@ export const HelpGuide = (): JSX.Element => {
                     </p>
                     <p className="mt-1">
                         Helper sections are versioned separately and used by
-                        supporting workflows such as titles and summaries.
+                        supporting workflows such as titles, summaries, and
+                        screenings. Screening instructions here control how the
+                        screening assistant works; the policy it applies is
+                        managed from Screenings.
                     </p>
                     <pre className="bg-muted/40 text-muted-foreground mt-2 rounded-md p-3 text-xs leading-relaxed whitespace-pre-wrap">
                         {`Internal chats

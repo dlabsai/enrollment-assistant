@@ -28,6 +28,7 @@ export interface RbacUser {
     id: string;
     email: string;
     name: string;
+    created_at: string;
     group_id: string;
     group_slug: string;
     overrides: RbacUserPermissionOverride[];

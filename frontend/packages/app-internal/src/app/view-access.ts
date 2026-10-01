@@ -39,8 +39,8 @@ export const canAccessView = (
         case "rag-viewer": {
             return hasPermission(user, "access_rag_viewer");
         }
-        case "rag-exclusions": {
-            return hasPermission(user, "access_rag_exclusions");
+        case "resources": {
+            return hasPermission(user, "access_resources");
         }
         case "rbac": {
             return hasPermission(user, "access_rbac");
@@ -51,6 +51,9 @@ export const canAccessView = (
         case "analytics":
         case "quality": {
             return hasPermission(user, "access_analytics");
+        }
+        case "chat-insights": {
+            return hasPermission(user, "access_chat_insights");
         }
         case "adoption": {
             return hasPermission(user, "access_adoption");

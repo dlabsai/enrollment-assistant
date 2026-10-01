@@ -15,7 +15,8 @@ export type PromptSetScope =
     | "summary"
     | "title"
     | "title_transcript"
-    | "grounding";
+    | "grounding"
+    | "compliance";
 
 export interface PromptSetVersion {
     id: string;
@@ -60,7 +61,4 @@ export interface PromptSetVersionCreate {
 }
 
 export type ConfirmDialogAction =
-    | "delete-version"
-    | "switch-version"
-    | "select-default"
-    | "reset-template";
+    "delete-version" | "switch-version" | "select-default" | "reset-template";

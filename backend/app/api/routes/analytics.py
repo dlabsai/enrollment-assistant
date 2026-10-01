@@ -8,7 +8,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy import Date as SqlDate
-from sqlalchemy import Float, Integer, case, cast, func, or_, select, true
+from sqlalchemy import Float, Integer, case, cast, false, func, or_, select, true
 from sqlalchemy.sql import ColumnElement
 
 from app.api.deps import CurrentUser, SessionDep, require_permission
@@ -21,9 +21,15 @@ from app.api.routes.analytics_time import (
 from app.api.routes.owner_group_filter import (
     OwnerGroup,
     apply_aggregate_owner_filter,
+    build_owner_group_filter,
     validate_exclusive_user_filters,
 )
-from app.core.rbac import PermissionKey, get_effective_permission_map
+from app.compliance.scheduled import SCHEDULER_USER_EMAIL
+from app.core.rbac import (
+    PermissionKey,
+    get_allowed_chat_owner_group_slugs,
+    get_effective_permission_map,
+)
 from app.models import (
     AssistantMessageMetadata,
     ChatGenerationAttempt,
@@ -32,6 +38,8 @@ from app.models import (
     MessageFeedback,
     PublicChatContact,
     Rating,
+    RbacGroup,
+    User,
 )
 from app.utils import current_time_utc
 
@@ -161,11 +169,14 @@ class QualitySummaryOut(BaseModel):
 class AdoptionTimeSeriesPointOut(BaseModel):
     bucket_start: datetime
     bucket_end: datetime
+    new_accounts: int
     active_users: int
     monthly_active_users: int
 
 
 class AdoptionSummaryOut(BaseModel):
+    new_accounts: int
+    active_new_accounts: int
     latest_daily_active_users: int
     monthly_active_users: int
     average_daily_active_users: float
@@ -910,6 +921,32 @@ def _resolve_time_zone(value: str) -> ZoneInfo:
         return ZoneInfo("UTC")
 
 
+def _apply_adoption_account_filter(
+    base_stmt: Any,
+    *,
+    current_user: User,
+    permission_map: dict[PermissionKey, bool],
+    user_email: str | None,
+    user_group: OwnerGroup | None,
+) -> Any:
+    normalized_email = user_email.strip() if user_email is not None else ""
+    statement = base_stmt.join(RbacGroup, User.group_id == RbacGroup.id)
+    if normalized_email != "":
+        visibility_conditions: list[Any] = []
+        if permission_map.get(PermissionKey.CHATS_VIEW_OWN, False):
+            visibility_conditions.append(User.id == current_user.id)
+        allowed_group_slugs = get_allowed_chat_owner_group_slugs(permission_map)
+        if allowed_group_slugs:
+            visibility_conditions.append(RbacGroup.slug.in_(sorted(allowed_group_slugs)))
+        statement = statement.where(
+            User.email == normalized_email,
+            or_(*visibility_conditions) if visibility_conditions else false(),
+        )
+    return build_owner_group_filter(
+        statement, owner_group=user_group, include_internal=True, permission_map=permission_map
+    )
+
+
 @router.get("/adoption", response_model=AdoptionSummaryOut)
 async def get_adoption_summary(
     session: SessionDep,
@@ -929,6 +966,18 @@ async def get_adoption_summary(
         if user_group is not None or (user_email is not None and user_email.strip() != "")
         else {}
     )
+
+    first_account_stmt = select(func.min(User.created_at)).where(
+        User.created_at <= end_value, User.email != SCHEDULER_USER_EMAIL
+    )
+    first_account_stmt = _apply_adoption_account_filter(
+        first_account_stmt,
+        current_user=current_user,
+        permission_map=permission_map,
+        user_email=user_email,
+        user_group=user_group,
+    )
+    first_account_at = await session.scalar(first_account_stmt)
 
     timezone = _resolve_time_zone(browser_time_zone)
     activity_day = cast(func.timezone(timezone.key, Message.created_at), SqlDate)
@@ -964,21 +1013,29 @@ async def get_adoption_summary(
         user_email=user_email,
         user_group=user_group,
         include_internal=True,
-    )
+    ).where(User.email != SCHEDULER_USER_EMAIL)
     activity_rows = (await session.execute(activity_stmt)).all()
 
     active_by_day: dict[date, set[str]] = {}
+    active_account_ids: set[str] = set()
     selected_count_by_day: dict[date, int] = {}
     for row in activity_rows:
-        active_by_day.setdefault(row.date, set()).add(str(row.user_id))
+        user_id = str(row.user_id)
+        active_by_day.setdefault(row.date, set()).add(user_id)
         if row.selected_activity:
+            active_account_ids.add(user_id)
             selected_count_by_day[row.date] = selected_count_by_day.get(row.date, 0) + 1
 
     display_end = end_value.astimezone(timezone).date()
+    first_account_day = (
+        first_account_at.astimezone(timezone).date()
+        if first_account_at is not None
+        else display_end
+    )
     display_start = (
         start.astimezone(timezone).date()
         if start is not None
-        else min(active_by_day, default=display_end)
+        else min(min(active_by_day, default=display_end), first_account_day)
     )
     selected_days = (display_end - display_start).days + 1
     latest_daily_active_users = selected_count_by_day.get(display_end, 0)
@@ -1026,8 +1083,34 @@ async def get_adoption_summary(
         user_email=user_email,
         user_group=user_group,
         include_internal=True,
-    )
+    ).where(User.email != SCHEDULER_USER_EMAIL)
     series_rows = (await session.execute(series_stmt)).all()
+
+    account_bucket = (
+        func.date_trunc("hour", User.created_at, "UTC")
+        if time_granularity == TimeGranularity.HOUR
+        else func.date_trunc(time_granularity.value, func.timezone(timezone.key, User.created_at))
+    )
+    account_series_stmt = select(account_bucket.label("date"), User.id.label("account_id")).where(
+        User.created_at >= series_start,
+        User.created_at <= end_value,
+        User.email != SCHEDULER_USER_EMAIL,
+    )
+    account_series_stmt = _apply_adoption_account_filter(
+        account_series_stmt,
+        current_user=current_user,
+        permission_map=permission_map,
+        user_email=user_email,
+        user_group=user_group,
+    )
+    account_rows = (await session.execute(account_series_stmt)).all()
+    accounts_by_bucket: dict[datetime, int] = {}
+    new_account_ids: set[str] = set()
+    for row in account_rows:
+        accounts_by_bucket[row.date] = accounts_by_bucket.get(row.date, 0) + 1
+        new_account_ids.add(str(row.account_id))
+    new_accounts = len(new_account_ids)
+
     all_users_by_bucket: dict[datetime, set[str]] = {}
     selected_users_by_bucket: dict[datetime, set[str]] = {}
     for row in series_rows:
@@ -1083,12 +1166,15 @@ async def get_adoption_summary(
             AdoptionTimeSeriesPointOut(
                 bucket_start=bucket_start,
                 bucket_end=bucket_end,
+                new_accounts=accounts_by_bucket.get(row_key, 0),
                 active_users=len(selected_users_by_bucket.get(row_key, ())),
                 monthly_active_users=len(rolling_users),
             )
         )
 
     return AdoptionSummaryOut(
+        new_accounts=new_accounts,
+        active_new_accounts=len(new_account_ids & active_account_ids),
         latest_daily_active_users=latest_daily_active_users,
         monthly_active_users=monthly_active_users,
         average_daily_active_users=(

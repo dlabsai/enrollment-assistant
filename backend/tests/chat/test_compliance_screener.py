@@ -1,4 +1,3 @@
-import json
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
@@ -7,13 +6,20 @@ from pydantic_ai.messages import (
     ModelMessage,
     ModelRequest,
     ModelResponse,
+    SystemPromptPart,
     ToolCallPart,
     UserPromptPart,
 )
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 
 from app.compliance import screener
-from app.compliance.schemas import ScreeningPeriod, TranscriptMessage
+from app.compliance.schemas import (
+    DecisionInput,
+    DecisionState,
+    FindingCategory,
+    ScreeningPeriod,
+    TranscriptMessage,
+)
 from app.compliance.screener import Concern, ScreeningResult, validate_result
 from app.compliance.sources import ScreeningUnavailableError, display_content
 from app.models import Message
@@ -23,10 +29,13 @@ MESSAGE = "🎓 Admission is guaranteed."
 MESSAGE_ID = uuid4()
 
 
-def concern(message_id: UUID = MESSAGE_ID) -> Concern:
+def concern(
+    message_id: UUID = MESSAGE_ID, categories: list[FindingCategory] | None = None
+) -> Concern:
     return Concern(
         message_id=message_id,
         title="Possible promise",
+        categories=categories or [FindingCategory.REGULATORY_COMPLIANCE],
         explanation=(
             "The admission guarantee conflicts with the instruction not to promise admission."
         ),
@@ -38,11 +47,27 @@ def concern(message_id: UUID = MESSAGE_ID) -> Concern:
 def test_screener_requires_complete_exact_target_and_instruction_evidence() -> None:
     other_id = uuid4()
     result = validate_result(
-        ScreeningResult(complete=True, findings=[concern(), concern(), concern(other_id)]),
+        ScreeningResult(
+            complete=True,
+            findings=[
+                concern(
+                    categories=[
+                        FindingCategory.REGULATORY_COMPLIANCE,
+                        FindingCategory.REGULATORY_COMPLIANCE,
+                    ]
+                ),
+                concern(categories=[FindingCategory.MISINFORMATION]),
+                concern(other_id),
+            ],
+        ),
         instructions=RULE,
         target_messages={MESSAGE_ID: MESSAGE, other_id: MESSAGE},
     )
     assert [finding.message_id for finding in result] == [MESSAGE_ID, other_id]
+    assert result[0].categories == (
+        FindingCategory.MISINFORMATION,
+        FindingCategory.REGULATORY_COMPLIANCE,
+    )
     assert MESSAGE[result[0].evidence_start : result[0].evidence_end] == "Admission is guaranteed."
     with pytest.raises(ScreeningUnavailableError, match="incomplete"):
         validate_result(
@@ -99,7 +124,7 @@ async def test_screener_sends_complete_tree_and_attributes_findings_to_selected_
             id=question_id,
             parent_id=None,
             role="user",
-            content="Can admission be promised?",
+            content="Can <admission> & other tag-like text be promised?",
             created_at=datetime.now(UTC),
         ),
         TranscriptMessage(
@@ -127,20 +152,41 @@ async def test_screener_sends_complete_tree_and_attributes_findings_to_selected_
     targets = [original_id, alternative_id]
 
     async def respond(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
-        inputs = [
+        system_prompts = [
             part.content
             for message in messages
             if isinstance(message, ModelRequest)
             for part in message.parts
-            if isinstance(part, UserPromptPart)
+            if isinstance(part, SystemPromptPart)
         ]
-        assert len(inputs) == 1
-        assert isinstance(inputs[0], str)
-        assert json.loads(inputs[0]) == {
-            "screening_instructions": RULE,
-            "target_message_ids": [str(id_) for id_ in targets],
-            "conversation_context": [message.model_dump(mode="json") for message in transcript],
-        }
+        expected_messages: list[str] = []
+        for message in transcript:
+            expected_messages.append(
+                "\n".join(
+                    [
+                        "--- message ---",
+                        f"id: {message.id}",
+                        f"parent_id: {message.parent_id or 'none'}",
+                        f"role: {message.role}",
+                        f"created_at: {message.created_at.isoformat()}",
+                        f"target: {'true' if message.id in targets else 'false'}",
+                        "text:",
+                        message.content,
+                    ]
+                )
+            )
+        expected_input = (
+            f"<lawyer_instructions>\n{RULE}\n</lawyer_instructions>\n\n"
+            f"<transcript>\n{'\n\n'.join(expected_messages)}\n</transcript>"
+        )
+        assert system_prompts == [f"Controlled screening system instructions.\n\n{expected_input}"]
+        assert [
+            part
+            for message in messages
+            if isinstance(message, ModelRequest)
+            for part in message.parts
+            if isinstance(part, UserPromptPart)
+        ] == []
         # A controlled result verifies attribution, not the model's legal interpretation.
         return ModelResponse(
             parts=[
@@ -160,6 +206,7 @@ async def test_screener_sends_complete_tree_and_attributes_findings_to_selected_
     monkeypatch.setattr(screener, "get_pydantic_ai_model_name", get_model)
     result = await screener.screen_conversation(
         instructions=RULE,
+        agent_prompt="Controlled screening system instructions.",
         transcript=transcript,
         target_message_ids=targets,
         model_name="azure/gpt-5.5",
@@ -171,12 +218,24 @@ async def test_screener_sends_complete_tree_and_attributes_findings_to_selected_
     with pytest.raises(ScreeningUnavailableError, match="too_long"):
         await screener.screen_conversation(
             instructions=RULE,
+            agent_prompt="Controlled screening system instructions.",
             transcript=transcript,
             target_message_ids=targets,
             model_name="azure/gpt-5.5",
             max_tokens=4096,
             max_input_characters=10,
         )
+
+
+def test_decision_comments_are_normalized_before_length_validation() -> None:
+    normalized = DecisionInput(
+        state=DecisionState.CONFIRMED, comment=f"  {'x' * 4000}  ", expected_revision=0
+    )
+    assert normalized.comment == "x" * 4000
+    assert (
+        DecisionInput(state=DecisionState.DISMISSED, comment=" \n ", expected_revision=0).comment
+        is None
+    )
 
 
 def test_period_requires_unambiguous_ordered_dates() -> None:

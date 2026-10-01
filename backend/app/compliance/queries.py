@@ -19,6 +19,7 @@ from app.models import (
 
 from .failures import RETRIABLE_ERROR_CODES, admission_error_message, error_message
 from .schemas import (
+    FindingCategory,
     FlagSummary,
     InstructionsDetail,
     ReviewState,
@@ -288,6 +289,11 @@ async def flag_summaries(session: AsyncSession, statement: Select[FlagRow]) -> l
         FlagSummary(
             id=finding.id,
             title=finding.title,
+            categories=(
+                [FindingCategory(category) for category in finding.categories]
+                if finding.categories is not None
+                else None
+            ),
             chat=title or "Untitled chat",
             message_at=message_at,
             state=ReviewState(finding.review_state),

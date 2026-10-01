@@ -2,6 +2,7 @@
 
 import os
 import uuid
+from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, cast
 
 _PYTEST_POSTGRES_ENV_MAP = {
@@ -182,9 +183,12 @@ async def session(db_engine: AsyncEngine) -> AsyncGenerator[AsyncSession]:
 
 
 @pytest_asyncio.fixture
-async def transactional_session(db_engine: AsyncEngine) -> AsyncGenerator[AsyncSession]:
+async def transactional_session(
+    db_engine: AsyncEngine, monkeypatch: pytest.MonkeyPatch
+) -> AsyncGenerator[AsyncSession]:
     """Create a transactional test session that rolls back all test changes."""
     from app.api.deps import get_db_session
+    from app.api.routes import messages as messages_routes
     from app.main import app
 
     if _test_session_factory is None:
@@ -207,7 +211,12 @@ async def transactional_session(db_engine: AsyncEngine) -> AsyncGenerator[AsyncS
                         await request_transaction.rollback()
                     raise
 
+            @asynccontextmanager
+            async def override_generation_session() -> AsyncGenerator[AsyncSession]:
+                yield session
+
             app.dependency_overrides[get_db_session] = override_get_db_session
+            monkeypatch.setattr(messages_routes, "generation_session", override_generation_session)
             try:
                 yield session
             finally:

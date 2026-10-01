@@ -1,0 +1,205 @@
+{
+  "version": 1,
+  "status": "exploratory",
+  "subject_categories": [
+    {
+      "label": "Programs and Courses",
+      "definition": "Academic programs, credentials, courses, curriculum, learning formats, and general program-selection information.",
+      "include": [
+        "degree or certificate descriptions",
+        "course and curriculum information"
+      ],
+      "exclude": [
+        "application requirements",
+        "tuition and funding information"
+      ]
+    },
+    {
+      "label": "Admissions and Enrollment",
+      "definition": "Public-facing application, admission, enrollment, and new-student information.",
+      "include": [
+        "application steps and deadlines",
+        "general admission requirements"
+      ],
+      "exclude": [
+        "academic progress after enrollment",
+        "program curriculum descriptions"
+      ]
+    },
+    {
+      "label": "Tuition and Financial Aid",
+      "definition": "Tuition, fees, payment options, scholarships, grants, loans, and general financial-aid information.",
+      "include": [
+        "tuition and fee summaries",
+        "financial-aid overviews"
+      ],
+      "exclude": [
+        "program curriculum",
+        "student technology support"
+      ]
+    },
+    {
+      "label": "Academic Policy, Records, and Transfer Credit",
+      "definition": "Academic policies, calendars, grades, registration records, transcripts, transfer credit, and degree-progress information.",
+      "include": [
+        "academic policy summaries",
+        "transcript and transfer-credit guidance"
+      ],
+      "exclude": [
+        "financial-aid policies",
+        "career-service information"
+      ]
+    },
+    {
+      "label": "Licensure and Accreditation",
+      "definition": "Institutional or program accreditation, professional licensure disclosures, certification considerations, and state authorization.",
+      "include": [
+        "accreditation statements",
+        "licensure and state-authorization disclosures"
+      ],
+      "exclude": [
+        "general program descriptions",
+        "ordinary admissions information"
+      ]
+    },
+    {
+      "label": "Student Support and Accessibility",
+      "definition": "Accessibility accommodations, academic support, technology help, wellbeing resources, and student services.",
+      "include": [
+        "accessibility and support-service information",
+        "student technology help"
+      ],
+      "exclude": [
+        "academic program curriculum",
+        "institutional history"
+      ]
+    },
+    {
+      "label": "Career Services",
+      "definition": "Career exploration, internships, experiential learning, employment preparation, and career-service resources.",
+      "include": [
+        "career planning resources",
+        "internship and experiential-learning information"
+      ],
+      "exclude": [
+        "course descriptions",
+        "admissions requirements"
+      ]
+    },
+    {
+      "label": "Institutional Information",
+      "definition": "General public information about the institution, locations, offices, contact channels, partnerships, and services.",
+      "include": [
+        "institutional overview pages",
+        "office and contact information"
+      ],
+      "exclude": [
+        "specific program details",
+        "specific financial-aid guidance"
+      ]
+    },
+    {
+      "label": "General, Mixed, or Other",
+      "definition": "Documents that are too broad, fragmentary, or mixed across unrelated subjects to have one clear primary subject.",
+      "include": [
+        "multi-topic overview material",
+        "short fragments without enough context"
+      ],
+      "exclude": [
+        "documents with a clear dominant subject"
+      ]
+    }
+  ],
+  "document_function_categories": [
+    {
+      "label": "Program or Course Description",
+      "definition": "Descriptive information about an academic program, credential, course, curriculum, or learning format.",
+      "include": [
+        "program overview pages",
+        "course descriptions"
+      ],
+      "exclude": [
+        "application instructions",
+        "binding policy statements"
+      ]
+    },
+    {
+      "label": "Policy or Official Reference",
+      "definition": "Official rules, requirements, disclosures, standards, or reference information that governs an institutional decision.",
+      "include": [
+        "academic policies",
+        "regulatory disclosures"
+      ],
+      "exclude": [
+        "general overview pages",
+        "step-by-step guidance"
+      ]
+    },
+    {
+      "label": "Guide or Procedure",
+      "definition": "Practical guidance explaining how a student or staff member completes a common task or finds the appropriate next step.",
+      "include": [
+        "application guides",
+        "student-service how-to material"
+      ],
+      "exclude": [
+        "program descriptions",
+        "contact-only directories"
+      ]
+    },
+    {
+      "label": "FAQ or Overview",
+      "definition": "High-level explanatory material or frequently asked questions that summarize a subject without acting as a detailed policy or procedure.",
+      "include": [
+        "department overviews",
+        "frequently asked questions"
+      ],
+      "exclude": [
+        "binding policy documents",
+        "course catalog entries"
+      ]
+    },
+    {
+      "label": "Calendar or Schedule",
+      "definition": "Information primarily organized around dates, deadlines, term structures, or scheduled events.",
+      "include": [
+        "academic calendars",
+        "deadline schedules"
+      ],
+      "exclude": [
+        "program pages that only mention duration",
+        "general contact information"
+      ]
+    },
+    {
+      "label": "Directory or Contact Information",
+      "definition": "Information primarily intended to help someone find an office, service, contact channel, or public destination.",
+      "include": [
+        "contact directories",
+        "office and service listings"
+      ],
+      "exclude": [
+        "procedures that merely include a contact",
+        "program directories with substantive descriptions"
+      ]
+    },
+    {
+      "label": "General, Mixed, or Other Function",
+      "definition": "Documents whose purpose is unclear, combines several functions without a dominant one, or falls outside the defined functions.",
+      "include": [
+        "mixed-purpose overview material",
+        "fragments without enough context"
+      ],
+      "exclude": [
+        "documents with a clear dominant function"
+      ]
+    }
+  ],
+  "design_notes": [
+    "Subject and function are independent; classify each document once on both dimensions.",
+    "Choose the dominant subject and function rather than assigning categories for passing mentions.",
+    "Source type, file path, department folder, and named people are not taxonomy categories.",
+    "Prefer the policy function when binding requirements dominate and the guide function when practical steps dominate.",
+    "Use fallback categories sparingly and only when no defined category is a reasonable fit."
+  ]
+}

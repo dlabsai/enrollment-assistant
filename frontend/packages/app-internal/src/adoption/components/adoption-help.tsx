@@ -9,7 +9,7 @@ export const AdoptionHelp = (): JSX.Element => {
         <>
             <HelpButton
                 iconOnly
-                label="About adoption metrics"
+                label="About user analytics"
                 onClick={() => {
                     setOpen(true);
                 }}
@@ -17,11 +17,26 @@ export const AdoptionHelp = (): JSX.Element => {
             <HelpDialog
                 onOpenChange={setOpen}
                 open={open}
-                title="Understanding adoption metrics"
+                title="Understanding user analytics"
             >
-                <div className="space-y-4 text-sm leading-relaxed">
+                <div className="flex flex-col gap-4 text-sm leading-relaxed">
                     <p>
-                        The Adoption page shows how many people use Chat. Each
+                        User Analytics shows new account creation and Chat usage
+                        during the selected range.
+                    </p>
+                    <div>
+                        <p className="text-foreground font-medium">
+                            New accounts
+                        </p>
+                        <p className="mt-1">
+                            Created shows how many accounts were added during
+                            the selected range. Used Chat and Did not use Chat
+                            split those new accounts based on activity during
+                            the same range.
+                        </p>
+                    </div>
+                    <p>
+                        Adoption metrics show how many people use Chat. Each
                         person is counted once on a day when they send one or
                         more messages. More messages and more chats on the same
                         day don&apos;t increase the count.
@@ -74,7 +89,7 @@ export const AdoptionHelp = (): JSX.Element => {
                         <p className="text-foreground font-medium">
                             Filters and counting rules
                         </p>
-                        <ul className="mt-1 list-inside list-disc space-y-1">
+                        <ul className="mt-1 flex list-inside list-disc flex-col gap-1">
                             <li>
                                 Dates use the app time zone. It defaults to
                                 browser time; developers can select Eastern Time

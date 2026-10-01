@@ -20,6 +20,7 @@ import {
     DialogTitle,
 } from "@va/shared/components/ui/dialog";
 import { Input } from "@va/shared/components/ui/input";
+import { ScrollArea } from "@va/shared/components/ui/scroll-area";
 import { SidebarMenu } from "@va/shared/components/ui/sidebar";
 import { Spinner } from "@va/shared/components/ui/spinner";
 import { cn } from "@va/shared/lib/utils";
@@ -462,9 +463,15 @@ export const ChatList = ({
                 </Button>
             </div>
 
-            <div
-                className="min-h-0 flex-1 overflow-x-hidden overflow-y-auto"
-                onScroll={handleScroll}
+            <ScrollArea
+                className="min-h-0 flex-1"
+                overflowFadeClassName="from-sidebar"
+                scrollbarAlwaysVisible
+                viewportClassName="min-h-0 scroll-py-4 pr-3"
+                viewportProps={{
+                    onScroll: handleScroll,
+                    style: { overflowX: "hidden" },
+                }}
             >
                 {chatsError !== undefined && chatsError !== "" && (
                     <div className="p-2">
@@ -508,7 +515,7 @@ export const ChatList = ({
                         />
                     ))}
                 </SidebarMenu>
-            </div>
+            </ScrollArea>
 
             <Dialog
                 onOpenChange={(open) => {

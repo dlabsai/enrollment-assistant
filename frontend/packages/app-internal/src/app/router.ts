@@ -9,6 +9,7 @@ import {
 import { AdoptionPage } from "../adoption/components/adoption-page";
 import { InvestigatePage } from "../chat/components/chat-page";
 import { AnalyticsPage } from "../chat-analytics/components/analytics-page";
+import { ChatInsightsPage } from "../chat-insights/components/chat-insights-page";
 import {
     ChatDetailPage,
     ChatsPage,
@@ -37,12 +38,12 @@ import { validateMessagesSearch } from "../messages/lib/search-state";
 import { PublicAnalyticsPage } from "../public-analytics/components/public-analytics-page";
 import { QualityPage } from "../quality/components/quality-page";
 import { RagPage } from "../rag/components/rag-page";
-import { RagExclusionsPage } from "../rag-exclusions/components/rag-exclusions-page";
-import { validateRagExclusionsSearch } from "../rag-exclusions/lib/search-state";
 import { RagJobsPage } from "../rag-jobs/components/rag-jobs-page";
 import { RagViewerPage } from "../rag-viewer/components/rag-viewer-page";
 import { validateRagViewerSearch } from "../rag-viewer/lib/search-state";
 import { RbacPage } from "../rbac/components/rbac-page";
+import { ResourcesPage } from "../resources/components/resources-page";
+import { validateResourcesSearch } from "../resources/lib/search-state";
 import { SettingsPage } from "../settings/components/settings-page";
 import { EvalTracesPage } from "../traces/components/eval-traces-page";
 import {
@@ -132,6 +133,11 @@ const redirectToView = (view: AppView): ReturnType<typeof redirect> => {
                 to: "/analytics",
             });
         }
+        case "chat-insights": {
+            return redirect({
+                to: "/chat-insights",
+            });
+        }
         case "quality": {
             return redirect({
                 to: "/quality",
@@ -197,9 +203,9 @@ const redirectToView = (view: AppView): ReturnType<typeof redirect> => {
                 to: "/rag-viewer",
             });
         }
-        case "rag-exclusions": {
+        case "resources": {
             return redirect({
-                to: "/rag-exclusions",
+                to: "/resources",
             });
         }
         case "rbac": {
@@ -382,6 +388,12 @@ const AnalyticsRoute = createRoute({
     component: AnalyticsPage,
 });
 
+const ChatInsightsRoute = createRoute({
+    getParentRoute: () => RootRoute,
+    path: "/chat-insights",
+    component: ChatInsightsPage,
+});
+
 const QualityRoute = createRoute({
     getParentRoute: () => RootRoute,
     path: "/quality",
@@ -480,11 +492,11 @@ const RagViewerRoute = createRoute({
     component: RagViewerPage,
 });
 
-const RagExclusionsRoute = createRoute({
+const ResourcesRoute = createRoute({
     getParentRoute: () => RootRoute,
-    path: "/rag-exclusions",
-    validateSearch: validateRagExclusionsSearch,
-    component: RagExclusionsPage,
+    path: "/resources",
+    validateSearch: validateResourcesSearch,
+    component: ResourcesPage,
 });
 
 const RbacRoute = createRoute({
@@ -508,6 +520,7 @@ const routeTree = RootRoute.addChildren([
     TracesRoute,
     TraceDetailRoute,
     AnalyticsRoute,
+    ChatInsightsRoute,
     QualityRoute,
     AdoptionRoute,
     PublicAnalyticsRoute,
@@ -520,7 +533,7 @@ const routeTree = RootRoute.addChildren([
     RagRoute,
     RagJobsRoute,
     RagViewerRoute,
-    RagExclusionsRoute,
+    ResourcesRoute,
     RbacRoute,
     SettingsRoute,
 ]);

@@ -12,6 +12,7 @@ from starlette.middleware.cors import CORSMiddleware
 from app.api.main import api_router
 from app.chat.provider_http import close_provider_http_clients
 from app.chat.tools.utils import close_embedding_client
+from app.chat_insights.worker import start_worker as start_chat_insights_worker
 from app.compliance.worker import start_worker
 from app.core.config import settings
 from app.core.db import close_database_pools
@@ -49,6 +50,7 @@ def custom_generate_unique_id(route: APIRoute) -> str:
 async def lifespan(_app: FastAPI) -> AsyncGenerator[None]:
     scheduler_started = False
     compliance_worker = start_worker()
+    chat_insights_worker = start_chat_insights_worker()
     try:
         if settings.SCHEDULER:
             logger.info("Starting scheduler")
@@ -61,6 +63,10 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None]:
 
         yield
     finally:
+        if chat_insights_worker is not None:
+            chat_insights_worker.cancel()
+            with suppress(asyncio.CancelledError):
+                await chat_insights_worker
         if compliance_worker is not None:
             compliance_worker.cancel()
             with suppress(asyncio.CancelledError):
@@ -101,11 +107,18 @@ if settings.ALL_CORS_ORIGINS:
     )
 
 
+def prevent_user_settings_caching(request: Request, response: Response) -> None:
+    # Validation/auth failures can contain personal input too, before a route returns.
+    if request.url.path.rstrip("/") == f"{settings.API_STR}/user-settings":
+        response.headers["Cache-Control"] = "no-store"
+
+
 @app.middleware("http")
-async def add_teams_frame_ancestors_header(
+async def add_response_headers(
     request: Request, call_next: Callable[[Request], Awaitable[Response]]
 ) -> Response:
     response = await call_next(request)
+    prevent_user_settings_caching(request, response)
     if settings.TEAMS_SSO_ENABLED and "Content-Security-Policy" not in response.headers:
         response.headers["Content-Security-Policy"] = f"frame-ancestors {_TEAMS_FRAME_ANCESTORS};"
     return response
@@ -124,6 +137,8 @@ async def exception_handler(request: Request, exception: Exception) -> JSONRespo
     elif request_origin in settings.ALL_CORS_ORIGINS:
         response.headers["Access-Control-Allow-Origin"] = request_origin
 
+    # Unhandled errors are rendered outside the normal response-header middleware.
+    prevent_user_settings_caching(request, response)
     return response
 
 

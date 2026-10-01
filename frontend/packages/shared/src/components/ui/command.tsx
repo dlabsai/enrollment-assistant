@@ -3,6 +3,7 @@
 import * as React from "react";
 import { Command as CommandPrimitive } from "cmdk";
 
+import { ScrollArea } from "@va/shared/components/ui/scroll-area";
 import { cn } from "@va/shared/lib/utils";
 import {
     Dialog,
@@ -25,7 +26,7 @@ function Command({
         <CommandPrimitive
             data-slot="command"
             className={cn(
-                "bg-popover text-popover-foreground flex size-full flex-col overflow-hidden rounded-xl! p-1",
+                "group/command bg-popover text-popover-foreground flex size-full flex-col overflow-hidden rounded-xl! p-1",
                 className,
             )}
             {...props}
@@ -93,17 +94,30 @@ function CommandInput({
 }
 
 function CommandList({
+    children,
     className,
+    ref,
     ...props
 }: React.ComponentProps<typeof CommandPrimitive.List>) {
     return (
-        <CommandPrimitive.List
-            data-slot="command-list"
-            className={cn(
-                "no-scrollbar max-h-72 scroll-py-1 overflow-x-hidden overflow-y-auto outline-none",
+        <ScrollArea
+            className="min-w-0"
+            overflowFadeClassName="from-popover"
+            scrollbarClassName="group-focus-within/command:pointer-events-auto group-focus-within/command:opacity-100"
+            viewportClassName={cn(
+                "max-h-72 scroll-py-4 pr-3 outline-none",
                 className,
             )}
-            {...props}
+            viewportProps={{ style: { overflowX: "hidden" } }}
+            viewportRender={
+                <CommandPrimitive.List
+                    data-slot="command-list"
+                    ref={ref}
+                    {...props}
+                >
+                    {children}
+                </CommandPrimitive.List>
+            }
         />
     );
 }

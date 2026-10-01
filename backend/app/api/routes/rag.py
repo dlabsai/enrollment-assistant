@@ -24,10 +24,10 @@ from sqlalchemy import (
     select,
 )
 
-from app.api.deps import CurrentUser, SessionDep, require_any_permission, require_permission
+from app.api.deps import CurrentUser, SessionDep, require_all_permissions, require_permission
 from app.api.schemas import PageOut
 from app.chat.tools.utils import get_azure_openai_client
-from app.core.rbac import PermissionKey
+from app.core.rbac import PermissionKey, get_effective_permission_map
 from app.evals.rag_copy import (
     EvalRagCopyProgressSnapshot,
     EvalRagCopyResult,
@@ -80,14 +80,26 @@ RagBuildAccessUser = Annotated[
 RagViewerAccessUser = Annotated[
     CurrentUser, Depends(require_permission(PermissionKey.ACCESS_RAG_VIEWER))
 ]
-RagDocumentReadAccessUser = Annotated[
+
+
+async def can_view_excluded_rag_documents(session: SessionDep, current_user: CurrentUser) -> bool:
+    permission_map = await get_effective_permission_map(session, current_user)
+    if not (
+        permission_map.get(PermissionKey.ACCESS_RAG_VIEWER, False)
+        or permission_map.get(PermissionKey.ACCESS_RESOURCES, False)
+    ):
+        raise HTTPException(status_code=403, detail="Access denied")
+    return permission_map.get(PermissionKey.ACCESS_RAG_VIEWER, False) or permission_map.get(
+        PermissionKey.ACCESS_RAG_EXCLUSIONS, False
+    )
+
+
+CanViewExcludedRagDocuments = Annotated[bool, Depends(can_view_excluded_rag_documents)]
+ResourcesVisibilityAccessUser = Annotated[
     CurrentUser,
     Depends(
-        require_any_permission(PermissionKey.ACCESS_RAG_VIEWER, PermissionKey.ACCESS_RAG_EXCLUSIONS)
+        require_all_permissions(PermissionKey.ACCESS_RESOURCES, PermissionKey.ACCESS_RAG_EXCLUSIONS)
     ),
-]
-RagExclusionsAccessUser = Annotated[
-    CurrentUser, Depends(require_permission(PermissionKey.ACCESS_RAG_EXCLUSIONS))
 ]
 
 _WEBSITE_DOCUMENT_TYPES: tuple[DocumentType, ...] = (
@@ -387,25 +399,16 @@ def _viewer_source_type_conditions(
     return conditions, True
 
 
-def _knowledge_control_document_types() -> tuple[DocumentType, ...]:
-    return (
-        DocumentType.WEBSITE_PAGE,
-        DocumentType.WEBSITE_PROGRAM,
-        *_CATALOG_DOCUMENT_TYPES,
-        *_TRAINING_MATERIAL_DOCUMENT_TYPES,
-    )
-
-
 def _exclusion_event_source_type_conditions(
     source_types: list[DocumentType] | None,
 ) -> tuple[list[Any], bool]:
-    knowledge_control_source_type_values = tuple(
-        document_type.value for document_type in _knowledge_control_document_types()
+    resource_source_type_values = tuple(
+        document_type.value for document_type in _viewer_document_types()
     )
     conditions: list[Any] = [
         or_(
             RagDocumentExclusionEvent.source_type.is_(None),
-            RagDocumentExclusionEvent.source_type.in_(knowledge_control_source_type_values),
+            RagDocumentExclusionEvent.source_type.in_(resource_source_type_values),
         )
     ]
 
@@ -413,7 +416,7 @@ def _exclusion_event_source_type_conditions(
         allowed_source_type_values = tuple(
             document_type.value
             for document_type in source_types
-            if document_type.value in knowledge_control_source_type_values
+            if document_type.value in resource_source_type_values
         )
         if len(allowed_source_type_values) == 0:
             return conditions, False
@@ -1119,7 +1122,7 @@ async def get_rag_build_job(
 @router.get("/documents", response_model=RagDocumentListOut)
 async def list_rag_documents(
     session: SessionDep,
-    _current_user: RagDocumentReadAccessUser,
+    can_view_excluded: CanViewExcludedRagDocuments,
     limit: Annotated[int, Query(ge=1, le=200)] = 25,
     offset: Annotated[int, Query(ge=0)] = 0,
     search: Annotated[str | None, Query()] = None,
@@ -1138,7 +1141,8 @@ async def list_rag_documents(
             total=0,
         )
     _append_document_file_extension_condition(conditions, file_extension)
-    apply_exclusion_filter(conditions, exclusion)
+    effective_exclusion: RagExclusionFilter = exclusion if can_view_excluded else "included"
+    apply_exclusion_filter(conditions, effective_exclusion)
 
     search_text = search.strip() if search is not None else ""
     search_vector: ColumnElement[Any] = literal_column("document.search_vector")
@@ -1401,11 +1405,12 @@ async def list_rag_document_chunks(
 @router.get("/documents/tree", response_model=list[RagDocumentTreeNodeOut])
 async def get_rag_documents_tree(
     session: SessionDep,
-    _current_user: RagDocumentReadAccessUser,
+    can_view_excluded: CanViewExcludedRagDocuments,
     exclusion: Annotated[RagExclusionFilter, Query()] = "all",
 ) -> list[RagDocumentTreeNodeOut]:
     conditions: list[Any] = [Document.type.in_(_viewer_document_types())]
-    apply_exclusion_filter(conditions, exclusion)
+    effective_exclusion: RagExclusionFilter = exclusion if can_view_excluded else "included"
+    apply_exclusion_filter(conditions, effective_exclusion)
     rows = (
         await session.execute(
             select(
@@ -1484,7 +1489,7 @@ async def get_rag_document_file_extensions(
 @router.get("/documents/exclusion-events", response_model=RagDocumentExclusionEventListOut)
 async def list_rag_document_exclusion_events(
     session: SessionDep,
-    _current_user: RagExclusionsAccessUser,
+    _current_user: ResourcesVisibilityAccessUser,
     limit: Annotated[int, Query(ge=1, le=200)] = 25,
     offset: Annotated[int, Query(ge=0)] = 0,
     search: Annotated[str | None, Query()] = None,
@@ -1547,7 +1552,9 @@ async def list_rag_document_exclusion_events(
 
 @router.put("/documents/exclusion", response_model=RagDocumentExclusionOut)
 async def upsert_rag_document_exclusion(
-    payload: RagDocumentExclusionIn, session: SessionDep, current_user: RagExclusionsAccessUser
+    payload: RagDocumentExclusionIn,
+    session: SessionDep,
+    current_user: ResourcesVisibilityAccessUser,
 ) -> RagDocumentExclusionOut:
     source_key = payload.source_key.strip()
     reason = payload.reason.strip()
@@ -1589,7 +1596,7 @@ async def upsert_rag_document_exclusion(
 async def delete_rag_document_exclusion(
     source_key: Annotated[str, Query(min_length=1, max_length=2048)],
     session: SessionDep,
-    current_user: RagExclusionsAccessUser,
+    current_user: ResourcesVisibilityAccessUser,
 ) -> dict[str, bool]:
     normalized_source_key = source_key.strip()
     exclusion = await session.scalar(
@@ -1615,13 +1622,19 @@ async def delete_rag_document_exclusion(
 
 @router.get("/documents/{document_id}", response_model=RagDocumentDetailOut)
 async def get_rag_document(
-    document_id: UUID, session: SessionDep, _current_user: RagDocumentReadAccessUser
+    document_id: UUID, session: SessionDep, can_view_excluded: CanViewExcludedRagDocuments
 ) -> RagDocumentDetailOut:
+    conditions: list[Any] = [
+        Document.id == document_id,
+        Document.type.in_(_viewer_document_types()),
+    ]
+    if not can_view_excluded:
+        apply_exclusion_filter(conditions, "included")
     row = (
         await session.execute(
             select(Document, RagDocumentExclusion)
             .outerjoin(RagDocumentExclusion, RagDocumentExclusion.source_key == Document.source_key)
-            .where(Document.id == document_id, Document.type.in_(_viewer_document_types()))
+            .where(*conditions)
         )
     ).first()
     if row is None:

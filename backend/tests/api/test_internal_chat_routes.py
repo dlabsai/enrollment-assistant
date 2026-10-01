@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass
 from datetime import timedelta
 from io import BytesIO
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 from uuid import UUID, uuid4
 from zipfile import ZipFile
 
@@ -916,7 +917,12 @@ async def test_internal_message_stream_returns_safe_retryable_generation_error(
         async def override_get_db_session() -> AsyncGenerator[AsyncSession]:
             yield route_session
 
+        @asynccontextmanager
+        async def route_generation_session() -> AsyncGenerator[AsyncSession]:
+            yield route_session
+
         app.dependency_overrides[get_db_session] = override_get_db_session
+        monkeypatch.setattr(message_routes, "generation_session", route_generation_session)
         try:
             async with AsyncClient(
                 transport=ASGITransport(app=app), base_url="http://testserver"
@@ -951,6 +957,106 @@ async def test_internal_message_stream_returns_safe_retryable_generation_error(
     assert attempt.status == "failed"
     assert attempt.user_message_id is None
     assert attempt.assistant_message_id is None
+
+
+@pytest.mark.asyncio
+async def test_internal_message_stream_generation_survives_client_disconnect(
+    transactional_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    user = await _create_user(
+        transactional_session, group_slug=SystemGroupSlug.USER, email_prefix="disconnect"
+    )
+    conversation = Conversation(
+        title="Disconnect", user=False, project="demo", user_id=user.id, is_public=False
+    )
+    transactional_session.add(conversation)
+    await transactional_session.commit()
+    generation_attempt_id = uuid4()
+    generation_started = asyncio.Event()
+    release_generation = asyncio.Event()
+    worker_finished = asyncio.Event()
+    turn_sessions: list[AsyncSession] = []
+
+    async def slow_conversation_turn(
+        *, user_prompt: str, session: AsyncSession, **_: object
+    ) -> tuple[UUID, MessageOut]:
+        turn_sessions.append(session)
+        generation_started.set()
+        await release_generation.wait()
+        user_message = Message(conversation_id=conversation.id, role="user", content=user_prompt)
+        assistant_message = Message(
+            conversation_id=conversation.id,
+            role="assistant",
+            content="Finished answer",
+            parent=user_message,
+        )
+        session.add_all([user_message, assistant_message])
+        await session.flush()
+        return user_message.id, MessageOut(
+            id=assistant_message.id,
+            role="assistant",
+            content="Finished answer",
+            created_at=assistant_message.created_at,
+            parent_id=user_message.id,
+            conversation_id=conversation.id,
+            metadata=None,
+            guardrails_blocked=False,
+        )
+
+    async def no_background_work(*_: object, **__: object) -> None:
+        return None
+
+    async def no_grounding(**_: object) -> tuple[list[MessageSourceUsed], str]:
+        return [], "no_selection"
+
+    monkeypatch.setattr(message_routes, "handle_conversation_turn", slow_conversation_turn)
+    monkeypatch.setattr(message_routes, "summarize_internal_conversation", no_background_work)
+    monkeypatch.setattr(
+        message_routes, "_select_and_store_grounding_sources_in_background", no_grounding
+    )
+
+    connection = await transactional_session.connection()
+    async with AsyncSession(
+        bind=connection, expire_on_commit=False, join_transaction_mode="create_savepoint"
+    ) as worker_session:
+
+        @asynccontextmanager
+        async def worker_generation_session() -> AsyncGenerator[AsyncSession]:
+            try:
+                yield worker_session
+            finally:
+                worker_finished.set()
+
+        monkeypatch.setattr(message_routes, "generation_session", worker_generation_session)
+
+        response = await message_routes.send_internal_message_stream(
+            message_routes.ChatRequest(
+                generation_attempt_id=generation_attempt_id,
+                user_prompt="Please answer",
+                conversation_id=conversation.id,
+            ),
+            transactional_session,
+            user,
+        )
+        stream = cast("AsyncGenerator[str]", response.body_iterator)
+        await anext(stream)
+        await generation_started.wait()
+
+        # The browser goes away mid-generation: the stream is closed, never the worker.
+        await stream.aclose()
+        release_generation.set()
+        async with asyncio.timeout(5):
+            await worker_finished.wait()
+
+    assert turn_sessions == [worker_session]
+    assert turn_sessions[0] is not transactional_session
+    attempt = await transactional_session.get(
+        ChatGenerationAttempt, generation_attempt_id, populate_existing=True
+    )
+    assert attempt is not None
+    assert attempt.status == "completed"
+    assert attempt.assistant_message_id is not None
+    assert await transactional_session.get(Message, attempt.assistant_message_id) is not None
 
 
 @pytest.mark.asyncio

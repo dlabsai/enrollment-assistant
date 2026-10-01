@@ -9,6 +9,7 @@ export const APP_VIEWS = [
     "usage",
     "traces",
     "analytics",
+    "chat-insights",
     "quality",
     "adoption",
     "public-analytics",
@@ -20,7 +21,7 @@ export const APP_VIEWS = [
     "rag",
     "rag-jobs",
     "rag-viewer",
-    "rag-exclusions",
+    "resources",
     "rbac",
     "settings",
 ] as const;

@@ -15,6 +15,10 @@ const api = vi.hoisted(() => ({
 vi.mock("../src/auth/hooks/use-authenticated-api", () => ({
     useAuthenticatedApi: () => api,
 }));
+vi.mock("../src/compliance/components/unsaved-changes", () => ({
+    UnsavedChanges: () => null,
+}));
+Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 
 let host: HTMLDivElement;
 let root: Root;
@@ -41,6 +45,17 @@ const button = (label: string): HTMLButtonElement => {
     assert.ok(result, `Missing action: ${label}`);
     return result;
 };
+const typeComment = async (value: string): Promise<void> => {
+    const input = host.querySelector("textarea");
+    assert.ok(input);
+    await act(async () => {
+        Object.getOwnPropertyDescriptor(
+            HTMLTextAreaElement.prototype,
+            "value",
+        )?.set?.call(input, value);
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+};
 
 beforeEach(() => {
     api.post.mockReset();
@@ -59,6 +74,7 @@ afterEach(async () => {
 test("a reviewer can decide a flag from its explanation", async () => {
     const decision = {
         state: "confirmed" as const,
+        comment: "Verified by the policy owner.",
         reviewer: "Current lawyer",
         created_at: "2026-09-02T10:00:00Z",
         revision: 1,
@@ -66,15 +82,86 @@ test("a reviewer can decide a flag from its explanation", async () => {
     api.post.mockResolvedValue(decision);
     await render();
 
+    assert.match(host.textContent, new RegExp(finding.title, "u"));
+    const title = host.querySelector('[data-slot="card-title"]');
+    const categories = host.querySelector('[aria-label="Categories"]');
+    assert.equal(title?.parentElement, categories?.parentElement);
+    assert.equal(title?.parentElement?.getAttribute("data-slot"), "card-header");
+    assert.match(host.textContent, /Misinformation/u);
+    assert.match(host.textContent, /Regulatory Compliance/u);
     assert.match(host.textContent, new RegExp(finding.explanation, "u"));
+    assert.doesNotMatch(host.textContent, /Decision history/u);
+    assert.doesNotMatch(host.textContent, /Decision comment \(optional\)/u);
+    assert.equal(
+        host.querySelector("textarea")?.getAttribute("placeholder"),
+        "Decision comment (optional)",
+    );
+    assert.equal(
+        host.querySelector("textarea")?.getAttribute("aria-label"),
+        "Decision comment (optional)",
+    );
+    await typeComment(decision.comment);
     await act(async () => button("Confirm").click());
 
     assert.deepEqual(api.post.mock.calls[0], [
         `/compliance/flags/${finding.id}/decision`,
-        { state: "confirmed", expected_revision: 0 },
+        {
+            state: "confirmed",
+            comment: decision.comment,
+            expected_revision: 0,
+        },
     ]);
     assert.equal(onSaved.mock.calls.length, 1);
-    assert.match(host.textContent, /Confirmed by Current lawyer/u);
+    assert.doesNotMatch(host.textContent, /Decision history/u);
+    const history = host.querySelector('section[aria-label="Decision history"]');
+    assert.ok(history);
+    assert.match(history.textContent, /Confirmed/u);
+    assert.match(history.textContent, /by Current lawyer/u);
+    assert.doesNotMatch(
+        host.querySelector('[data-slot="card-footer"]')?.textContent ?? "",
+        /Current lawyer/u,
+    );
+    assert.match(host.textContent, new RegExp(decision.comment, "u"));
+});
+
+test("changing a decision reveals the comment editor", async () => {
+    await render({
+        ...finding,
+        state: "confirmed",
+        revision: 1,
+        decisions: [
+            {
+                state: "confirmed",
+                comment: null,
+                reviewer: "Current lawyer",
+                created_at: "2026-09-02T10:00:00Z",
+                revision: 1,
+            },
+        ],
+    });
+    const content = host.querySelector<HTMLDivElement>(
+        '[data-slot="card-content"]',
+    );
+    assert.ok(content);
+    Object.defineProperty(content, "scrollHeight", {
+        configurable: true,
+        value: 640,
+    });
+    content.scrollTop = 20;
+
+    await act(async () => button("Change decision").click());
+
+    assert.equal(content.scrollTop, 640);
+    assert.equal(
+        host.querySelector("textarea")?.getAttribute("placeholder"),
+        "Decision comment (optional)",
+    );
+});
+
+test("a historical flag without categories is identified", async () => {
+    await render({ ...finding, categories: null });
+
+    assert.match(host.textContent, /Not categorized/u);
 });
 
 test("decision actions stay stable while a save is pending", async () => {
@@ -92,12 +179,15 @@ test("decision actions stay stable while a save is pending", async () => {
 
     assert.equal(button("Confirm").disabled, true);
     assert.equal(button("Dismiss").disabled, true);
+    assert.equal(button("Confirm").getAttribute("aria-busy"), "true");
+    assert.equal(button("Dismiss").getAttribute("aria-busy"), "true");
     assert.equal(button("Confirm").textContent, "Confirm");
     assert.equal(button("Dismiss").textContent, "Dismiss");
 
     await act(async () =>
         finish?.({
             state: "confirmed",
+            comment: null,
             reviewer: "Current lawyer",
             created_at: "2026-09-02T10:00:00Z",
             revision: 1,
@@ -113,9 +203,11 @@ test("a stale decision quietly reloads the latest revision", async () => {
         }),
     );
     await render();
+    await typeComment("Keep this comment.");
     await act(async () => button("Confirm").click());
 
     assert.equal(onReload.mock.calls.length, 1);
+    assert.equal(host.querySelector("textarea")?.value, "Keep this comment.");
     assert.doesNotMatch(host.textContent, /412:/u);
 });
 

@@ -1,3 +1,4 @@
+from datetime import datetime  # noqa: TC003
 from uuid import UUID  # noqa: TC003
 
 from fastapi import APIRouter, HTTPException
@@ -50,6 +51,7 @@ class RbacUserOut(BaseModel):
     id: UUID
     email: str
     name: str
+    created_at: datetime
     group_id: UUID
     group_slug: str
     overrides: list[UserPermissionOverrideOut]
@@ -150,6 +152,7 @@ async def _build_user_out(
         id=user.id,
         email=user.email,
         name=user.name,
+        created_at=user.created_at,
         group_id=group.id,
         group_slug=group.slug,
         overrides=[

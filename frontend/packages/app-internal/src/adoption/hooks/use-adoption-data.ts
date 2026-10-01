@@ -36,7 +36,7 @@ export const useAdoptionData = (
     const { data, loading, hasLoaded, error, refresh } = useAsyncData<
         AdoptionSummary | undefined
     >({
-        errorMessage: "Failed to fetch adoption data",
+        errorMessage: "Failed to fetch user analytics data",
         initialData: undefined,
         load,
     });

@@ -7,6 +7,7 @@ from datetime import timedelta
 from typing import TYPE_CHECKING
 from uuid import UUID, uuid4
 
+from pydantic_ai.exceptions import ContentFilterError
 from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.orm import joinedload
 
@@ -23,6 +24,7 @@ from app.models import (
 )
 from app.utils import current_time_utc, logger
 
+from .failures import is_azure_jailbreak_block
 from .schemas import TranscriptMessage
 from .screener import SCREENING_VERSION, ValidatedConcern, screen_conversation
 from .sources import ScreeningUnavailableError, load_transcript, transcript_hash, visible_items
@@ -53,6 +55,7 @@ class Work:
     target_message_ids: tuple[UUID, ...]
     context_as_of: datetime
     instructions: str
+    agent_prompt: str
     transcript: list[TranscriptMessage]
     input_hash: str
     model_name: str
@@ -167,6 +170,9 @@ async def prepare_work(session: AsyncSession, claim: Claim) -> Work | None:
     )
     if instructions is None:
         raise ScreeningUnavailableError("screening_version_changed")
+    agent_prompt = screening.model_settings.get("agent_prompt")
+    if not isinstance(agent_prompt, str):
+        raise ScreeningUnavailableError("screening_version_changed")
     transcript = await load_transcript(session, claim.conversation_id, as_of=screening.created_at)
     target_ids = {item.message_id for item in items if item.message_id is not None}
     expected_target_ids = {
@@ -181,6 +187,7 @@ async def prepare_work(session: AsyncSession, claim: Claim) -> Work | None:
         target_message_ids=tuple(message.id for message in transcript if message.id in target_ids),
         context_as_of=screening.created_at,
         instructions=instructions.content,
+        agent_prompt=agent_prompt,
         transcript=transcript,
         input_hash=transcript_hash(transcript),
         model_name=screening.model_name,
@@ -236,6 +243,7 @@ async def finish_result(
             item_id=by_message[concern.message_id].id,
             message_id=concern.message_id,
             title=concern.title,
+            categories=[category.value for category in concern.categories],
             explanation=concern.explanation,
             evidence_start=concern.evidence_start,
             evidence_end=concern.evidence_end,
@@ -290,6 +298,7 @@ async def execute_claim(factory: SessionFactory, claim: Claim) -> None:
         screening_task = asyncio.create_task(
             screen_conversation(
                 instructions=work.instructions,
+                agent_prompt=work.agent_prompt,
                 transcript=work.transcript,
                 target_message_ids=work.target_message_ids,
                 model_name=work.model_name,
@@ -313,9 +322,13 @@ async def execute_claim(factory: SessionFactory, claim: Claim) -> None:
             await session.commit()
     except ScreeningUnavailableError as exc:
         code = exc.code
-    except Exception:
-        # Provider/validation exceptions can contain requests or model output.
-        code = "provider_error"
+    except Exception as exc:
+        # ContentFilterError bodies contain provider metadata; persist only the fixed code.
+        code = (
+            "jailbreak_blocked"
+            if isinstance(exc, ContentFilterError) and is_azure_jailbreak_block(exc.body)
+            else "provider_error"
+        )
     else:
         return
     async with factory() as session:

@@ -4,9 +4,10 @@ from uuid import uuid4
 
 import pytest
 from httpx import ASGITransport, AsyncClient
-from sqlalchemy import text
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.compliance.scheduled import SCHEDULER_USER_EMAIL
 from app.core.rbac import (
     PermissionKey,
     SystemGroupSlug,
@@ -1118,6 +1119,8 @@ async def test_adoption_returns_zeroes_for_empty_range_and_rejects_future_start(
 
     assert empty_response.status_code == 200
     empty_body = empty_response.json()
+    assert empty_body["new_accounts"] == 0
+    assert empty_body["active_new_accounts"] == 0
     assert empty_body["latest_daily_active_users"] == 0
     assert empty_body["monthly_active_users"] == 0
     assert empty_body["average_daily_active_users"] == 0.0
@@ -1132,7 +1135,7 @@ async def test_adoption_returns_zeroes_for_empty_range_and_rejects_future_start(
 
 
 @pytest.mark.asyncio
-async def test_adoption_reports_internal_dau_and_rolling_mau(
+async def test_adoption_reports_account_growth_and_internal_activity(
     transactional_session: AsyncSession,
 ) -> None:
     reviewer = await _create_user(
@@ -1165,11 +1168,31 @@ async def test_adoption_reports_internal_dau_and_rolling_mau(
             PermissionKey.CHATS_VIEW_DEVS: False,
         },
     )
+    new_account_without_activity = await _create_user(
+        transactional_session,
+        group_slug=SystemGroupSlug.USER,
+        email_prefix="adoption-unused-new-account",
+    )
+    service_account = await transactional_session.scalar(
+        select(User).where(User.email == SCHEDULER_USER_EMAIL)
+    )
+    assert service_account is not None
 
     first_day = datetime(2098, 3, 1, 12, tzinfo=UTC)
     second_day = first_day + timedelta(days=1)
     last_day = first_day + timedelta(days=30)
     prior_day = first_day - timedelta(days=14)
+    for account in (reviewer, limited_reviewer, staff_one, staff_two, prior_staff, developer):
+        account.created_at = prior_day
+        account.updated_at = prior_day
+    staff_two.created_at = second_day
+    staff_two.updated_at = second_day
+    new_account_without_activity.created_at = second_day
+    new_account_without_activity.updated_at = second_day
+    service_account.created_at = second_day
+    service_account.updated_at = second_day
+    await transactional_session.commit()
+
     prior_chat = _conversation(
         title="Prior staff", created_at=prior_day, is_public=False, user_id=prior_staff.id
     )
@@ -1230,6 +1253,10 @@ async def test_adoption_reports_internal_dau_and_rolling_mau(
         developer_response = await client.get(
             "/api/analytics/adoption", params={**time_params, "user_email": developer.email}
         )
+        unused_new_account_response = await client.get(
+            "/api/analytics/adoption",
+            params={**time_params, "user_email": new_account_without_activity.email},
+        )
         conflict_response = await client.get(
             "/api/analytics/adoption",
             params={**time_params, "user_email": staff_one.email, "user_group": "staff"},
@@ -1250,10 +1277,14 @@ async def test_adoption_reports_internal_dau_and_rolling_mau(
     assert body["series"][0] == {
         "bucket_start": "2098-03-01T00:00:00Z",
         "bucket_end": "2098-03-02T00:00:00Z",
+        "new_accounts": 0,
         "active_users": 1,
         "monthly_active_users": 2,
     }
     assert body["series"][1]["active_users"] == 1
+    assert sum(point["new_accounts"] for point in body["series"]) == 2
+    assert body["new_accounts"] == 2
+    assert body["active_new_accounts"] == 1
     assert body["latest_daily_active_users"] == 2
     assert body["monthly_active_users"] == 3
     assert body["average_daily_active_users"] == pytest.approx(4 / 31)
@@ -1263,11 +1294,15 @@ async def test_adoption_reports_internal_dau_and_rolling_mau(
     assert staff_response.json()["latest_daily_active_users"] == 1
     assert staff_response.json()["monthly_active_users"] == 2
     assert exact_response.status_code == 200
+    assert exact_response.json()["active_new_accounts"] == 1
     assert exact_response.json()["latest_daily_active_users"] == 0
     assert exact_response.json()["monthly_active_users"] == 1
     assert developer_response.status_code == 200
     assert developer_response.json()["latest_daily_active_users"] == 1
     assert developer_response.json()["monthly_active_users"] == 1
+    assert unused_new_account_response.status_code == 200
+    assert unused_new_account_response.json()["new_accounts"] == 1
+    assert unused_new_account_response.json()["active_new_accounts"] == 0
     assert hidden_response.status_code == 200
     assert hidden_response.json()["monthly_active_users"] == 0
     assert conflict_response.status_code == 400

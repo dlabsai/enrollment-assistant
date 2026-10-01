@@ -25,12 +25,16 @@ import type { AdoptionTimeSeriesPoint } from "../types";
 interface AdoptionChartProps {
     data: AdoptionTimeSeriesPoint[];
     granularity: TimeGranularity;
-    metric: "active_users" | "monthly_active_users";
+    metric: "new_accounts" | "active_users" | "monthly_active_users";
     title: string;
     description: string;
 }
 
 const chartConfig = {
+    new_accounts: {
+        label: "Accounts created",
+        color: "var(--chart-3)",
+    },
     active_users: {
         label: "Active users",
         color: "var(--chart-1)",
@@ -48,10 +52,7 @@ export const AdoptionChart = ({
     description,
     granularity,
 }: AdoptionChartProps): JSX.Element => {
-    const gradientId =
-        metric === "active_users"
-            ? "fillAdoptionActive"
-            : "fillAdoptionMonthly";
+    const gradientId = `fillUserAnalytics${metric}`;
     return (
         <Card className="@container/card">
             <CardHeader>

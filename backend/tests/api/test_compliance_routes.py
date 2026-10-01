@@ -7,6 +7,7 @@ from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.routes import compliance as compliance_routes
+from app.compliance.schemas import FindingCategory
 from app.compliance.screener import Concern, ScreeningResult, validate_result
 from app.compliance.sources import ScreeningUnavailableError
 from app.compliance.worker import claim_next, finish_error, finish_result, prepare_work
@@ -171,7 +172,7 @@ async def test_screening_uses_one_request_cutoff_and_rejects_manifest_drift(
 
 
 @pytest.mark.asyncio
-async def test_instruction_saves_restore_new_versions_and_keep_screenings_pinned(
+async def test_instruction_layers_create_versions_and_keep_screenings_pinned(
     transactional_session: AsyncSession,
 ) -> None:
     session = transactional_session
@@ -183,12 +184,35 @@ async def test_instruction_saves_restore_new_versions_and_keep_screenings_pinned
     )
     await make_chat(session, staff)
     await session.commit()
+
+    async def deploy_agent_prompt(client: AsyncClient, name: str, content: str) -> None:
+        created = await client.post(
+            "/api/prompts/versions",
+            json={
+                "name": name,
+                "is_internal": True,
+                "scope": "compliance",
+                "prompts": [
+                    {"filename": "compliance_screening_agent_internal.j2", "content": content}
+                ],
+            },
+        )
+        assert created.status_code == 201, created.text
+        deployed = await client.post(
+            f"/api/prompts/versions/{created.json()['id']}/deploy", json={}
+        )
+        assert deployed.status_code == 200, deployed.text
+
     async with AsyncClient(
         transport=ASGITransport(app=app), base_url="http://testserver"
     ) as client:
         authenticate_client(client, owner.id)
+        await deploy_agent_prompt(
+            client, "Pinned screening prompt", "Pinned screening agent prompt {{ 1 + 1 }}."
+        )
         version = await save_rule(client)
         screening_id = await start_screening(client, version["id"])
+        await deploy_agent_prompt(client, "Later screening prompt", "Later screening agent prompt.")
         revised = await save_rule(client, RULE + " Flag missing qualifications.")
         restored = await client.post(
             "/api/compliance/instructions",
@@ -212,6 +236,7 @@ async def test_instruction_saves_restore_new_versions_and_keep_screenings_pinned
         work = await prepare_work(session, claim)
         assert work is not None
         assert work.instructions == RULE
+        assert work.agent_prompt == "Pinned screening agent prompt 2."
         await session.commit()
         authenticate_client(client, reviewer.id)
         assert (await client.get("/api/compliance/instructions")).status_code == 200
@@ -262,6 +287,10 @@ async def test_shared_decisions_separate_rescreenings_and_source_deletion(
                     Concern(
                         message_id=target.id,
                         title="Possible admission promise",
+                        categories=[
+                            FindingCategory.MISINFORMATION,
+                            FindingCategory.REGULATORY_COMPLIANCE,
+                        ],
                         explanation=(
                             "The admission guarantee conflicts with the requirement not to promise "
                             "admission."
@@ -295,8 +324,9 @@ async def test_shared_decisions_separate_rescreenings_and_source_deletion(
         flags = await client.get(f"/api/compliance/screenings/{screening_id}/flags")
         assert flags.status_code == 200, flags.text
         flag_row = flags.json()["items"][0]
-        assert {key: flag_row[key] for key in ("title", "chat", "state")} == {
+        assert {key: flag_row[key] for key in ("title", "categories", "chat", "state")} == {
             "title": "Possible admission promise",
+            "categories": ["misinformation", "regulatory_compliance"],
             "chat": chat.title,
             "state": "needs_review",
         }
@@ -311,6 +341,7 @@ async def test_shared_decisions_separate_rescreenings_and_source_deletion(
             str(node.id) for node in work.transcript
         ]
         assert detail["flag"]["id"] == flag_id
+        assert detail["flag"]["categories"] == ["misinformation", "regulatory_compliance"]
         assert detail["flag"]["evidence"] == MESSAGE
 
         authenticate_client(client, reviewer_id)
@@ -319,11 +350,21 @@ async def test_shared_decisions_separate_rescreenings_and_source_deletion(
             json={"state": "needs_review", "expected_revision": 0},
         )
         assert invalid_state.status_code == 422
+        too_long_comment = await client.post(
+            f"/api/compliance/flags/{flag_id}/decision",
+            json={"state": "dismissed", "comment": "x" * 4001, "expected_revision": 0},
+        )
+        assert too_long_comment.status_code == 422
         decision = await client.post(
             f"/api/compliance/flags/{flag_id}/decision",
-            json={"state": "dismissed", "expected_revision": 0},
+            json={
+                "state": "dismissed",
+                "comment": "  Needs official confirmation.  ",
+                "expected_revision": 0,
+            },
         )
         assert decision.status_code == 200, decision.text
+        assert decision.json()["comment"] == "Needs official confirmation."
         conflict = await client.post(
             f"/api/compliance/flags/{flag_id}/decision",
             json={"state": "confirmed", "expected_revision": 0},
@@ -336,10 +377,19 @@ async def test_shared_decisions_separate_rescreenings_and_source_deletion(
             await client.get(f"/api/compliance/screenings/{screening_id}/flags")
         ).json()
         assert decided_flags["items"][0]["state"] == "dismissed"
+        changed_decision = await client.post(
+            f"/api/compliance/flags/{flag_id}/decision",
+            json={
+                "state": "confirmed",
+                "comment": "Authoritative source verified.",
+                "expected_revision": 1,
+            },
+        )
+        assert changed_decision.status_code == 200, changed_decision.text
         history = (
             await client.get(f"/api/compliance/screenings/{screening_id}/flags/{flag_id}")
         ).json()
-        assert history["flag"]["decisions"] == [decision.json()]
+        assert history["flag"]["decisions"] == [changed_decision.json(), decision.json()]
 
         await session.execute(
             update(Message).where(Message.id == target.id).values(content="Changed source text.")
@@ -352,7 +402,7 @@ async def test_shared_decisions_separate_rescreenings_and_source_deletion(
         assert "source text has changed" in changed["error"]
         blocked = await client.post(
             f"/api/compliance/flags/{flag_id}/decision",
-            json={"state": "confirmed", "expected_revision": 1},
+            json={"state": "confirmed", "expected_revision": 2},
         )
         assert blocked.status_code == 409
         await session.execute(

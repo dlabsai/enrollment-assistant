@@ -3,6 +3,11 @@ import { Alert, AlertDescription } from "@va/shared/components/ui/alert";
 import { Badge } from "@va/shared/components/ui/badge";
 import { Button } from "@va/shared/components/ui/button";
 import {
+    Collapsible,
+    CollapsibleContent,
+    CollapsibleTrigger,
+} from "@va/shared/components/ui/collapsible";
+import {
     Progress,
     ProgressLabel,
     ProgressValue,
@@ -36,6 +41,7 @@ import type {
     FlagSummary,
     ScreeningDetail,
 } from "../types";
+import { FindingCategoryBadges } from "./finding-category-badges";
 import { FlagReview } from "./flag-review";
 
 interface Selection {
@@ -69,6 +75,13 @@ const flagColumns: ColumnDef<FlagSummary>[] = [
             >
                 {row.original.title}
             </div>
+        ),
+    },
+    {
+        accessorKey: "categories",
+        header: "Categories",
+        cell: ({ row }) => (
+            <FindingCategoryBadges categories={row.original.categories} />
         ),
     },
     {
@@ -113,6 +126,7 @@ export const ScreeningWorkspace = ({
 }: Props): JSX.Element => {
     const api = useAuthenticatedApi();
     const [instructionsOpen, setInstructionsOpen] = useState(false);
+    const [failuresOpen, setFailuresOpen] = useState(false);
     const [retrying, setRetrying] = useState(false);
     const loadScreening = useCallback(
         async (signal: AbortSignal) =>
@@ -197,24 +211,21 @@ export const ScreeningWorkspace = ({
     const retry = async (): Promise<void> => {
         setRetrying(true);
         try {
-            const result = await api.post<{
-                queued: number;
-                conversations: number;
-            }>(`/compliance/screenings/${screeningId}/retry`, {});
-            const chatLabel = result.conversations === 1 ? "chat" : "chats";
-            const messageLabel =
-                result.queued === 1 ? "message" : "messages";
+            const result = await api.post<{ conversations: number }>(
+                `/compliance/screenings/${screeningId}/retry`,
+                {},
+            );
             toast.success(
                 result.conversations > 0
-                    ? `Retrying ${number(result.conversations)} ${chatLabel} covering ${number(result.queued)} selected assistant ${messageLabel}.`
-                    : "No failed chats to retry.",
+                    ? `Trying screening again for ${number(result.conversations)} Chat${result.conversations === 1 ? "" : "s"}.`
+                    : "No failed Chats are available to try again.",
             );
             refresh();
         } catch (error) {
             toast.error(
                 error instanceof Error
                     ? error.message
-                    : "Could not retry. Please try again.",
+                    : "Could not start screening again. Please try again later.",
             );
         } finally {
             setRetrying(false);
@@ -309,7 +320,7 @@ export const ScreeningWorkspace = ({
             : Math.round(
                   (data.screened_conversations / data.conversations) * 100,
               );
-    const errorSummary = `${number(data.error_conversations)} Chat${data.error_conversations === 1 ? "" : "s"} could not be screened.`;
+    const errorSummary = `Automated screening did not finish for ${number(data.error_conversations)} Chat${data.error_conversations === 1 ? "" : "s"}.`;
     const hasRetriableFailures = data.failures.some(
         (failed) => failed.retryable,
     );
@@ -414,40 +425,69 @@ export const ScreeningWorkspace = ({
                         {data.errors > 0 && (
                             <Alert>
                                 <AlertDescription>
-                                    <div className="flex flex-col gap-2">
-                                        <span>{errorSummary}</span>
-                                        <ul
-                                            aria-label="Chats that could not be screened"
-                                            className="max-h-64 list-disc space-y-1 overflow-y-auto pl-5"
-                                        >
-                                            {data.failures.map((failed) => (
-                                                <li
-                                                    key={`${failed.chat_id}:${failed.reason}`}
-                                                >
-                                                    <span className="font-medium">
-                                                        {failed.chat}
-                                                    </span>
-                                                    : {failed.reason}
-                                                    {failed.assistant_messages > 1 &&
-                                                        ` (${number(failed.assistant_messages)} selected assistant messages)`}
-                                                </li>
-                                            ))}
-                                        </ul>
-                                        {hasRetriableFailures && (
-                                            <div>
-                                                <Button
-                                                    disabled={retrying}
-                                                    onClick={() => {
-                                                        void retry();
-                                                    }}
-                                                    variant="outline"
-                                                >
-                                                    <RotateCcw data-icon="inline-start" />
-                                                    Retry
-                                                </Button>
-                                            </div>
-                                        )}
-                                    </div>
+                                    <Collapsible
+                                        className="flex flex-col gap-2"
+                                        onOpenChange={setFailuresOpen}
+                                        open={failuresOpen}
+                                    >
+                                        <div className="flex flex-wrap items-center justify-between gap-2">
+                                            <span>{errorSummary}</span>
+                                            <CollapsibleTrigger
+                                                render={
+                                                    <Button
+                                                        pressMotion={false}
+                                                        size="sm"
+                                                        variant="ghost"
+                                                    />
+                                                }
+                                            >
+                                                {failuresOpen
+                                                    ? "Hide details"
+                                                    : "Show details"}
+                                            </CollapsibleTrigger>
+                                        </div>
+                                        <CollapsibleContent className="flex flex-col gap-2">
+                                            <ul
+                                                aria-label="Chats that could not be screened"
+                                                className="max-h-64 list-disc overflow-y-auto pl-5"
+                                            >
+                                                {data.failures.map((failed) => (
+                                                    <li
+                                                        key={`${failed.chat_id}:${failed.reason}`}
+                                                    >
+                                                        <span className="font-medium">
+                                                            {failed.chat}
+                                                        </span>
+                                                        : {failed.retryable && (
+                                                            <Badge
+                                                                className="border-amber-600/20 bg-amber-500/10 text-amber-700 dark:text-amber-400"
+                                                                variant="outline"
+                                                            >
+                                                                Another try may help
+                                                            </Badge>
+                                                        )}{" "}
+                                                        {failed.reason}
+                                                        {failed.assistant_messages > 1 &&
+                                                            ` (${number(failed.assistant_messages)} selected assistant messages)`}
+                                                    </li>
+                                                ))}
+                                            </ul>
+                                            {hasRetriableFailures && (
+                                                <div>
+                                                    <Button
+                                                        disabled={retrying}
+                                                        onClick={() => {
+                                                            void retry();
+                                                        }}
+                                                        variant="outline"
+                                                    >
+                                                        <RotateCcw data-icon="inline-start" />
+                                                        Try again
+                                                    </Button>
+                                                </div>
+                                            )}
+                                        </CollapsibleContent>
+                                    </Collapsible>
                                 </AlertDescription>
                             </Alert>
                         )}
@@ -501,7 +541,7 @@ export const ScreeningWorkspace = ({
                                         pagination.pageSize ||
                                     pagination.pageIndex > 0
                                 }
-                                tableClassName="min-w-[44rem] tabular-nums"
+                                tableClassName="min-w-[56rem] tabular-nums"
                                 wrapCellText
                             />
                         </div>

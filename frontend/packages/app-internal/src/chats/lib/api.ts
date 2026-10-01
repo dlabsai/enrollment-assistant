@@ -21,6 +21,7 @@ export const fetchChatUsers = async (
         platform?: "internal" | "public";
         limit?: number;
         kind?: "chat" | "investigation";
+        includeAccountsWithoutChats?: boolean;
     },
 ): Promise<ChatUserOption[]> => {
     const query = new URLSearchParams();
@@ -35,6 +36,9 @@ export const fetchChatUsers = async (
     }
     if (params.limit !== undefined) {
         query.set("limit", String(params.limit));
+    }
+    if (params.includeAccountsWithoutChats === true) {
+        query.set("include_accounts_without_chats", "true");
     }
 
     const endpoint = query.toString()

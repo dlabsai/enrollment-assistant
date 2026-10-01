@@ -18,7 +18,10 @@ import {
 import { useAdoptionData } from "../hooks/use-adoption-data";
 import { AdoptionChart } from "./adoption-chart";
 import { AdoptionHelp } from "./adoption-help";
-import { AdoptionSummaryCards } from "./adoption-summary-cards";
+import {
+    AccountSummaryCards,
+    AdoptionSummaryCards,
+} from "./adoption-summary-cards";
 
 const adoptionFilterStorageKey = "internal-adoption-filters";
 
@@ -96,6 +99,7 @@ export const AdoptionPage = (): JSX.Element => {
         end: parseStoredDate(storedFilters?.customRange?.end),
     }));
     const userFilter = useDashboardUserFilter({
+        includeAccountsWithoutChats: true,
         initialSelectedUser: storedFilters?.selectedUser,
         platform: "internal",
     });
@@ -128,7 +132,7 @@ export const AdoptionPage = (): JSX.Element => {
     if (error !== undefined || summary === undefined) {
         return (
             <PageError
-                message={error ?? "Failed to load adoption data."}
+                message={error ?? "Failed to load user analytics data."}
                 onRetry={refresh}
             />
         );
@@ -137,7 +141,7 @@ export const AdoptionPage = (): JSX.Element => {
     return (
         <PageShell variant="dashboard">
             <PageHeader
-                title="Adoption"
+                title="User Analytics"
                 titleAddon={<AdoptionHelp />}
             >
                 <UserFilterPopover
@@ -177,6 +181,20 @@ export const AdoptionPage = (): JSX.Element => {
                     Refresh
                 </Button>
             </PageHeader>
+
+            <PageSection>
+                <AccountSummaryCards summary={summary} />
+            </PageSection>
+
+            <PageSection>
+                <AdoptionChart
+                    data={summary.series}
+                    description="Accounts created in each displayed period"
+                    granularity={summary.time_granularity}
+                    metric="new_accounts"
+                    title="Accounts created over time"
+                />
+            </PageSection>
 
             <PageSection>
                 <AdoptionSummaryCards summary={summary} />

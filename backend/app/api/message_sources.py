@@ -8,7 +8,7 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
     from uuid import UUID
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -66,6 +66,7 @@ class MessageSourceUsed(BaseModel):
     search_query: str | None = None
     chunk: str | None = None
     explanation: str | None = None
+    identity_from_current_document: bool = Field(default=False, exclude=True)
 
 
 def message_source_type_value(source_type: MessageSourceType) -> str:
@@ -709,6 +710,7 @@ def _message_sources_from_candidates(
                 tool_name=candidate.tool_name,
                 search_query=candidate.search_query,
                 chunk=candidate.chunk,
+                identity_from_current_document=(candidate.title is None or candidate.url is None),
             )
         )
     return sources

@@ -1,6 +1,6 @@
 import asyncio
 import json
-from contextlib import suppress
+from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
 from datetime import datetime
 from hashlib import sha256
@@ -56,6 +56,11 @@ from app.chat.engine import (
     handle_investigation_turn,
 )
 from app.chat.engine_utils import ReasoningEffort
+from app.chat.generation_attempts import (
+    GENERATION_ATTEMPT_COMPLETED,
+    GENERATION_ATTEMPT_FAILED,
+    GENERATION_ATTEMPT_PENDING,
+)
 from app.chat.internal_summary import summarize_internal_conversation
 from app.chat.title import (
     build_fallback_title,
@@ -90,9 +95,19 @@ from app.prompt_sets import get_template_filenames_for_scope, hash_prompt_templa
 from app.utils import current_time_utc, logger
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Awaitable, Callable
+    from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable
 
 _background_tasks: set[asyncio.Task[Any]] = set()
+
+
+@asynccontextmanager
+async def generation_session() -> AsyncGenerator[AsyncSession]:
+    """Open the session owned by one detached generation worker.
+
+    The worker outlives the HTTP request, so it cannot use the request-scoped session.
+    """
+    async with get_session() as session:
+        yield session
 
 
 def _track_background_task(task: asyncio.Task[Any]) -> None:
@@ -115,9 +130,6 @@ router = APIRouter(tags=["messages"])
 
 _PREVIEW_MAX_LENGTH = 220
 _MESSAGE_GENERATION_FAILED_MESSAGE = "The response could not be completed."
-_GENERATION_ATTEMPT_PENDING = "pending"
-_GENERATION_ATTEMPT_COMPLETED = "completed"
-_GENERATION_ATTEMPT_FAILED = "failed"
 GenerationAttemptStatus = Literal["pending", "completed", "failed"]
 
 
@@ -172,8 +184,8 @@ async def _finalize_failed_generation_attempt(
         )
         if attempt is None:
             return None
-        if attempt.status == _GENERATION_ATTEMPT_PENDING:
-            attempt.status = _GENERATION_ATTEMPT_FAILED
+        if attempt.status == GENERATION_ATTEMPT_PENDING:
+            attempt.status = GENERATION_ATTEMPT_FAILED
             await session.commit()
     except Exception:
         logger.exception("Failed to finalize generation attempt %s", generation_attempt_id)
@@ -227,11 +239,11 @@ async def _get_generation_attempt_if_exists(
 
 
 def _raise_existing_generation_attempt(attempt: ChatGenerationAttempt) -> NoReturn:
-    if attempt.status == _GENERATION_ATTEMPT_PENDING:
+    if attempt.status == GENERATION_ATTEMPT_PENDING:
         detail = "Generation attempt is still pending"
-    elif attempt.status == _GENERATION_ATTEMPT_COMPLETED:
+    elif attempt.status == GENERATION_ATTEMPT_COMPLETED:
         detail = "Generation attempt is already completed"
-    elif attempt.status == _GENERATION_ATTEMPT_FAILED:
+    elif attempt.status == GENERATION_ATTEMPT_FAILED:
         detail = "Generation attempt has already failed"
     else:
         raise HTTPException(status_code=500, detail="Invalid generation attempt status")
@@ -1371,6 +1383,15 @@ async def send_internal_message_stream(
                     status_code=400, detail="Regeneration parent must be a user message"
                 )
 
+    # Snapshot the authenticated account before releasing its request transaction.
+    # Later profile edits must not change an admitted generation or its retries.
+    personal_instructions = (
+        current_user.personal_instructions
+        if conversation_kind == "chat"
+        and prompt_context is None
+        and request.prompt_set_version_id is None
+        else ""
+    )
     conversation_id = conversation.id
     conversation_title = conversation.title
     now = current_time_utc()
@@ -1381,7 +1402,7 @@ async def send_internal_message_stream(
             user_id=current_user.id,
             conversation_id=conversation_id,
             request_fingerprint=request_fingerprint,
-            status=_GENERATION_ATTEMPT_PENDING,
+            status=GENERATION_ATTEMPT_PENDING,
             created_at=now,
             updated_at=now,
         )
@@ -1410,7 +1431,7 @@ async def send_internal_message_stream(
     async def emit(event: str, payload: dict[str, Any]) -> None:
         await queue.put(_format_sse_event(event, payload))
 
-    async def worker() -> None:
+    async def worker(session: AsyncSession) -> None:
         initial_title_task: asyncio.Task[None] | None = None
         transcript_title_task: asyncio.Task[None] | None = None
         grounding_task: (
@@ -1489,6 +1510,7 @@ async def send_internal_message_stream(
                             prompt_set_version_id=request.prompt_set_version_id,
                             prompt_template_overrides=draft_prompt_templates,
                             prompt_context=prompt_context,
+                            personal_instructions=personal_instructions,
                             event_emitter=emit_agent_event,
                         )
 
@@ -1505,7 +1527,7 @@ async def send_internal_message_stream(
                 generation_attempt = _require_generation_attempt(
                     await session.get(ChatGenerationAttempt, generation_attempt_id)
                 )
-                generation_attempt.status = _GENERATION_ATTEMPT_COMPLETED
+                generation_attempt.status = GENERATION_ATTEMPT_COMPLETED
                 generation_attempt.user_message_id = user_message_id
                 generation_attempt.assistant_message_id = assistant_message_out.id
                 await session.commit()
@@ -1645,11 +1667,11 @@ async def send_internal_message_stream(
                 )
                 failure_retryable = (
                     generation_attempt is not None
-                    and generation_attempt.status == _GENERATION_ATTEMPT_FAILED
+                    and generation_attempt.status == GENERATION_ATTEMPT_FAILED
                 )
                 if (
                     generation_attempt is not None
-                    and generation_attempt.status == _GENERATION_ATTEMPT_COMPLETED
+                    and generation_attempt.status == GENERATION_ATTEMPT_COMPLETED
                     and generation_attempt.user_message_id is not None
                     and generation_attempt.assistant_message_id is not None
                 ):
@@ -1695,20 +1717,22 @@ async def send_internal_message_stream(
         finally:
             await queue.put(None)
 
-    worker_task = asyncio.create_task(worker())
+    async def run_worker() -> None:
+        async with generation_session() as worker_session:
+            await worker(worker_session)
+
+    # Generation is a durable attempt that must finish whether or not the client stays
+    # connected; a dropped stream never cancels it. The client reconciles through the
+    # attempt-status endpoint.
+    worker_task = asyncio.create_task(run_worker())
+    _track_background_task(worker_task)
 
     async def event_stream() -> AsyncIterator[str]:
-        try:
-            while True:
-                event = await queue.get()
-                if event is None:
-                    break
-                yield event
-        finally:
-            if not worker_task.done():
-                worker_task.cancel()
-            with suppress(asyncio.CancelledError):
-                await worker_task
+        while True:
+            event = await queue.get()
+            if event is None:
+                break
+            yield event
 
     return StreamingResponse(
         event_stream(), media_type="text/event-stream", headers={"Cache-Control": "no-cache"}

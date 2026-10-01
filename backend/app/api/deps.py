@@ -8,7 +8,7 @@ from sqlalchemy.orm import joinedload
 
 from app.core.config import settings
 from app.core.db import get_interactive_session, get_session
-from app.core.rbac import PermissionKey, user_has_permission
+from app.core.rbac import PermissionKey, get_effective_permission_map, user_has_permission
 from app.core.security import verify_token
 from app.models import User
 
@@ -161,14 +161,14 @@ def require_permission(permission_key: PermissionKey) -> Any:
     return dependency
 
 
-def require_any_permission(*permission_keys: PermissionKey) -> Any:
+def require_all_permissions(*permission_keys: PermissionKey) -> Any:
     if len(permission_keys) == 0:
         raise ValueError("At least one permission key is required")
 
     async def dependency(session: SessionDep, current_user: CurrentUser) -> User:
-        for permission_key in permission_keys:
-            if await user_has_permission(session, current_user, permission_key):
-                return current_user
+        permission_map = await get_effective_permission_map(session, current_user)
+        if all(permission_map.get(permission_key, False) for permission_key in permission_keys):
+            return current_user
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied")
 
     return dependency

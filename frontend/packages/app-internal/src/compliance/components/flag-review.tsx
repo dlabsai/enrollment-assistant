@@ -7,6 +7,11 @@ import {
     CardHeader,
     CardTitle,
 } from "@va/shared/components/ui/card";
+import {
+    ResizableHandle,
+    ResizablePanel,
+    ResizablePanelGroup,
+} from "@va/shared/components/ui/resizable";
 import { ArrowLeft, ArrowRight } from "lucide-react";
 import { type JSX, useCallback } from "react";
 
@@ -96,6 +101,41 @@ export const FlagReview = ({
             <ArrowRight data-icon="inline-end" />
         </Button>
     );
+    const findingCard =
+        data === undefined ? null : flag === null ? (
+            <Card
+                className="h-full"
+                size="sm"
+            >
+                <CardHeader className="min-h-0 flex-1 overflow-y-auto">
+                    <CardTitle>Flag unavailable</CardTitle>
+                    <CardDescription>
+                        Chat: {data.chat} · {formatTableTimestamp(data.message_at)}
+                    </CardDescription>
+                    <Alert variant="destructive">
+                        <AlertDescription>
+                            {data.error ?? "This flag is no longer available."}
+                        </AlertDescription>
+                    </Alert>
+                </CardHeader>
+                <CardFooter
+                    className="shrink-0 justify-center gap-2"
+                    variant="plain"
+                >
+                    {previousAction}
+                    {nextAction}
+                </CardFooter>
+            </Card>
+        ) : (
+            <FindingCard
+                finding={flag}
+                key={flag.id}
+                nextAction={nextAction}
+                onReload={handleRefresh}
+                onSaved={onDecisionSaved}
+                previousAction={previousAction}
+            />
+        );
     return (
         <>
             <PageHeader
@@ -128,64 +168,70 @@ export const FlagReview = ({
                             className="flex min-h-0 flex-1 flex-col overflow-hidden"
                             inert={loading}
                         >
-                            {data.transcript.length > 0 && (
-                                <section
-                                    aria-label="Chat"
-                                    className="min-h-0 min-w-0 flex-1 overflow-y-auto [scrollbar-gutter:stable]"
+                            {data.transcript.length > 0 ? (
+                                <ResizablePanelGroup
+                                    className="min-h-0 flex-1"
+                                    id="compliance-flag-review-layout"
+                                    orientation="vertical"
+                                    style={{ overflow: "visible" }}
                                 >
-                                    <ConversationTranscript
-                                        evidence={flag?.evidence}
-                                        key={`${data.message_id}:${flag?.id ?? "unavailable"}`}
-                                        messages={data.transcript}
-                                        targetId={data.message_id}
+                                    <ResizablePanel
+                                        className="min-h-0"
+                                        defaultSize="60%"
+                                        id="compliance-flag-transcript-panel"
+                                        minSize="20%"
+                                        style={{ overflow: "visible" }}
+                                    >
+                                        <section
+                                            aria-label="Chat"
+                                            className="h-full min-h-0 min-w-0 overflow-y-auto [scrollbar-gutter:stable]"
+                                        >
+                                            <ConversationTranscript
+                                                evidence={flag?.evidence}
+                                                key={`${data.message_id}:${flag?.id ?? "unavailable"}`}
+                                                messages={data.transcript}
+                                                targetId={data.message_id}
+                                            />
+                                        </section>
+                                    </ResizablePanel>
+                                    <ResizableHandle
+                                        className="mx-2 aria-[orientation=horizontal]:mx-0 aria-[orientation=horizontal]:my-2"
+                                        withHandle
                                     />
+                                    <ResizablePanel
+                                        className="min-h-0"
+                                        defaultSize="40%"
+                                        id="compliance-flag-finding-panel"
+                                        maxSize="80%"
+                                        minSize="12rem"
+                                        style={{ overflow: "visible" }}
+                                    >
+                                        <section
+                                            aria-label={
+                                                flag === null
+                                                    ? "Unavailable flag"
+                                                    : "Flag"
+                                            }
+                                            className="h-full w-full overflow-hidden px-4 py-3"
+                                        >
+                                            <div className="mx-auto h-full max-w-3xl">
+                                                {findingCard}
+                                            </div>
+                                        </section>
+                                    </ResizablePanel>
+                                </ResizablePanelGroup>
+                            ) : (
+                                <section
+                                    aria-label={
+                                        flag === null ? "Unavailable flag" : "Flag"
+                                    }
+                                    className="h-64 w-full shrink-0 overflow-hidden px-4 py-3"
+                                >
+                                    <div className="mx-auto h-full max-w-3xl">
+                                        {findingCard}
+                                    </div>
                                 </section>
                             )}
-                            <section
-                                aria-label={flag === null ? "Unavailable flag" : "Flag"}
-                                className="w-full shrink-0 overflow-y-auto px-4 py-3 [scrollbar-gutter:stable]"
-                            >
-                                <div className="mx-auto max-w-3xl">
-                                    {flag === null ? (
-                                        <Card
-                                            className="h-48"
-                                            size="sm"
-                                        >
-                                            <CardHeader className="min-h-0 flex-1 overflow-y-auto">
-                                                <CardTitle>Flag unavailable</CardTitle>
-                                                <CardDescription>
-                                                    Chat: {data.chat} ·{" "}
-                                                    {formatTableTimestamp(
-                                                        data.message_at,
-                                                    )}
-                                                </CardDescription>
-                                                <Alert variant="destructive">
-                                                    <AlertDescription>
-                                                        {data.error ??
-                                                            "This flag is no longer available."}
-                                                    </AlertDescription>
-                                                </Alert>
-                                            </CardHeader>
-                                            <CardFooter
-                                                className="shrink-0 justify-center gap-2"
-                                                variant="plain"
-                                            >
-                                                {previousAction}
-                                                {nextAction}
-                                            </CardFooter>
-                                        </Card>
-                                    ) : (
-                                        <FindingCard
-                                            finding={flag}
-                                            key={flag.id}
-                                            nextAction={nextAction}
-                                            onReload={handleRefresh}
-                                            onSaved={onDecisionSaved}
-                                            previousAction={previousAction}
-                                        />
-                                    )}
-                                </div>
-                            </section>
                         </section>
                     )
                 )}

@@ -23,6 +23,23 @@ def test_scheduler_configures_screening_and_rag_jobs(monkeypatch: pytest.MonkeyP
 
     scheduler_module.configure_scheduler_jobs()
 
+    sweep_function, sweep_options = next(
+        job for job in jobs if job[1].get("id") == "fail_stale_generation_attempts"
+    )
+    assert sweep_function is scheduler_module.fail_stale_generation_attempts_job
+    assert sweep_options["trigger"] == "interval"
+    assert sweep_options["next_run_time"] is not None
+    assert sweep_options["max_instances"] == 1
+    assert sweep_options["coalesce"] is True
+
+    insights_function, insights_options = next(
+        job for job in jobs if job[1].get("id") == "scheduled_chat_insights"
+    )
+    assert insights_function is scheduler_module.scheduled_chat_insights_job
+    assert insights_options["trigger"] == "cron"
+    assert (insights_options["hour"], insights_options["minute"]) == (1, 0)
+    assert insights_options["timezone"] == "America/New_York"
+
     screening_function, screening_options = next(
         job for job in jobs if job[1].get("id") == "scheduled_screening"
     )

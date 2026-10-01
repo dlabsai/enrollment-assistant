@@ -1,10 +1,12 @@
 import asyncio
+import json
 from datetime import timedelta
 from typing import Any
 from uuid import uuid4
 
 import pytest
 from httpx import ASGITransport, AsyncClient
+from pydantic_ai.exceptions import ContentFilterError
 from sqlalchemy import delete, func, select, text, update
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
@@ -176,6 +178,61 @@ async def test_executor_retries_failed_items_with_saved_instructions(
             await client.post(f"/api/compliance/screenings/{screening_id}/retry", json={})
         ).status_code == 409
 
+        await session.execute(
+            update(ComplianceItem)
+            .where(ComplianceItem.screening_id == screening_id)
+            .values(status="queued", error_code=None, attempts=0)
+        )
+        await session.execute(
+            update(ComplianceScreening)
+            .where(ComplianceScreening.id == screening_id)
+            .values(screening_version=SCREENING_VERSION)
+        )
+        await session.commit()
+
+        async def jailbreak_blocked_screening(**kwargs: Any) -> list[ValidatedConcern]:
+            raise ContentFilterError(
+                "Content filter triggered.",
+                body=json.dumps(
+                    [
+                        {
+                            "kind": "response",
+                            "provider_name": "azure",
+                            "finish_reason": "content_filter",
+                            "provider_details": {
+                                "finish_reason": "content_filter",
+                                "content_filter_result": {
+                                    "jailbreak": {"detected": True, "filtered": True}
+                                },
+                            },
+                        }
+                    ]
+                ),
+            )
+
+        monkeypatch.setattr(worker, "screen_conversation", jailbreak_blocked_screening)
+        claim = await worker.claim_next(session)
+        assert claim is not None
+        await session.commit()
+        await worker.execute_claim(factory, claim)
+        blocked = (await client.get(f"/api/compliance/screenings/{screening_id}")).json()
+        assert blocked["failures"] == [
+            {
+                "chat_id": str(chat.id),
+                "chat": chat.title,
+                "assistant_messages": 2,
+                "reason": (
+                    "Screening stopped because the service thought text in this Chat might "
+                    "be an attempt to change the screening instructions. Trying the same "
+                    "Chat again is unlikely to help."
+                ),
+                "retryable": False,
+            }
+        ]
+        assert (
+            await client.post(f"/api/compliance/screenings/{screening_id}/retry", json={})
+        ).json() == {"queued": 0, "conversations": 0}
+
 
 @pytest.mark.asyncio
 async def test_source_deletion_waits_for_result_persistence_without_resurrecting_data(
@@ -213,7 +270,11 @@ async def test_source_deletion_waits_for_result_persistence_without_resurrecting
                 end_at=END,
                 model_name="azure/gpt-5.5",
                 screening_version=SCREENING_VERSION,
-                model_settings={"max_tokens": 8192, "max_input_characters": 200000},
+                model_settings={
+                    "max_tokens": 8192,
+                    "max_input_characters": 200000,
+                    "agent_prompt": "Pinned screening agent prompt.",
+                },
                 created_at=END,
             )
             setup.add(screening_row)

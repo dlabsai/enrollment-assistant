@@ -1,6 +1,7 @@
 import * as React from "react";
 import { Menu as MenuPrimitive } from "@base-ui/react/menu";
 
+import { ScrollArea } from "@va/shared/components/ui/scroll-area";
 import { cn } from "@va/shared/lib/utils";
 import { ChevronRightIcon, CheckIcon } from "lucide-react";
 
@@ -37,6 +38,8 @@ function DropdownMenuContent({
     side = "bottom",
     sideOffset = 4,
     className,
+    children,
+    ref: forwardedRef,
     ...props
 }: MenuPrimitive.Popup.Props &
     Pick<
@@ -52,13 +55,26 @@ function DropdownMenuContent({
                 side={side}
                 sideOffset={sideOffset}
             >
-                <MenuPrimitive.Popup
-                    data-slot="dropdown-menu-content"
-                    className={cn(
-                        "bg-popover text-popover-foreground ring-foreground/10 data-[side=bottom]:slide-in-from-top-2 data-[side=inline-end]:slide-in-from-left-2 data-[side=inline-start]:slide-in-from-right-2 data-[side=left]:slide-in-from-right-2 data-[side=right]:slide-in-from-left-2 data-[side=top]:slide-in-from-bottom-2 data-open:animate-in data-open:fade-in-0 data-open:zoom-in-95 data-closed:animate-out data-closed:fade-out-0 data-closed:zoom-out-95 z-50 max-h-(--available-height) w-(--anchor-width) min-w-32 origin-(--transform-origin) overflow-x-hidden overflow-y-auto rounded-lg p-1 shadow-md ring-1 duration-100 outline-none data-closed:overflow-hidden",
-                        className,
-                    )}
-                    {...props}
+                <ScrollArea
+                    className="max-h-(--available-height) w-(--anchor-width) min-w-32"
+                    overflowFadeClassName="from-popover"
+                    viewportClassName="max-h-(--available-height) scroll-py-4 rounded-lg"
+                    viewportProps={{ style: { overflowX: "hidden" } }}
+                    viewportRender={
+                        <MenuPrimitive.Popup
+                            data-slot="dropdown-menu-content"
+                            className={cn(
+                                "bg-popover text-popover-foreground ring-foreground/10 data-[side=bottom]:slide-in-from-top-2 data-[side=inline-end]:slide-in-from-left-2 data-[side=inline-start]:slide-in-from-right-2 data-[side=left]:slide-in-from-right-2 data-[side=right]:slide-in-from-left-2 data-[side=top]:slide-in-from-bottom-2 data-open:animate-in data-open:fade-in-0 data-open:zoom-in-95 data-closed:animate-out data-closed:fade-out-0 data-closed:zoom-out-95 z-50 max-h-(--available-height) w-(--anchor-width) min-w-32 origin-(--transform-origin) rounded-lg py-1 pl-1 pr-3 shadow-md ring-1 duration-100 outline-none data-closed:overflow-hidden!",
+                                className,
+                            )}
+                            ref={forwardedRef}
+                            role="menu"
+                            tabIndex={-1}
+                            {...props}
+                        >
+                            {children}
+                        </MenuPrimitive.Popup>
+                    }
                 />
             </MenuPrimitive.Positioner>
         </MenuPrimitive.Portal>
